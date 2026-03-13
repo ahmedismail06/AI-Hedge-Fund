@@ -1,0 +1,32 @@
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+
+# ── Azure OpenAI ──────────────────────────────────────────────────────────────
+openai                        # Azure OpenAI uses the openai SDK
+
+# ── Data Sources ──────────────────────────────────────────────────────────────
+polygon-api-client
+fredapi
+yfinance
+requests
+beautifulsoup4                # Fed speech scraping
+
+# ── Database ──────────────────────────────────────────────────────────────────
+supabase
+chromadb                      # Local vector store for research memos
+
+# ── Quant / Data ──────────────────────────────────────────────────────────────
+pandas
+numpy
+scipy
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+apscheduler
+
+# ── Broker ────────────────────────────────────────────────────────────────────
+ib_insync
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv
+pydantic
