@@ -1,7 +1,8 @@
 """
 SEC Fetcher
 Fetches 10-K and 10-Q filings from SEC EDGAR for a given ticker.
-Extracts Items 1, 1A, 7, 8 (CAG approach) and caps each at ~12,000 chars.
+Extracts Items 1, 1A, 7 with reduced caps; drops Item 8 in favour of
+programmatically pre-extracted financial metrics.
 """
 
 import re
@@ -17,8 +18,15 @@ EDGAR_BASE = "https://data.sec.gov"
 EDGAR_ARCHIVES_BASE = "https://www.sec.gov"
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
-SECTION_CAP = 12_000
 FALLBACK_CAP = 15_000
+
+# Per-section caps — Item 8 is 0 (dropped; replaced by pre-extracted metrics)
+SECTION_CAPS = {
+    "Item 1":  8_000,   # Business narrative; no raw numbers
+    "Item 1A": 6_000,   # Risk factors front-loaded; boilerplate after ~6K
+    "Item 7":  8_000,   # MD&A management commentary still needed
+    "Item 8":  0,       # Financial tables replaced by extract_financial_metrics()
+}
 
 # Regex patterns for 10-K section headers (case-insensitive, flexible whitespace)
 SECTION_PATTERNS = {
@@ -77,23 +85,22 @@ def _find_latest_filing(filings_meta: dict, form_type: str) -> dict | None:
     return None
 
 
-def _download_filing_text(cik: str, accession: str, primary_doc: str) -> str:
-    # accession arrives with dashes stripped (e.g. "000032019325000079")
-    # EDGAR index JSON requires dashes restored (e.g. "0000320193-25-000079")
+def _download_filing_content(cik: str, accession: str, primary_doc: str) -> bytes:
+    """Download raw HTML bytes for a filing. Handles 404 fallback to filing index."""
     accession_dashed = f"{accession[:10]}-{accession[10:12]}-{accession[12:]}"
-
     cik_int = cik.lstrip("0")
-    # Try primary doc directly first
+
     url = f"{EDGAR_ARCHIVES_BASE}/Archives/edgar/data/{cik_int}/{accession}/{primary_doc}"
     resp = requests.get(url, headers=HEADERS, timeout=30)
 
-    # On 404, fetch the filing index and find the largest .htm
     if resp.status_code == 404:
-        index_url = f"{EDGAR_ARCHIVES_BASE}/Archives/edgar/data/{cik_int}/{accession}/{accession_dashed}-index.json"
+        index_url = (
+            f"{EDGAR_ARCHIVES_BASE}/Archives/edgar/data/{cik_int}/"
+            f"{accession}/{accession_dashed}-index.json"
+        )
         index_resp = requests.get(index_url, headers=HEADERS, timeout=15)
         index_resp.raise_for_status()
         index_data = index_resp.json()
-
         files = index_data.get("directory", {}).get("item", [])
         htm_files = [
             f for f in files
@@ -102,22 +109,149 @@ def _download_filing_text(cik: str, accession: str, primary_doc: str) -> str:
         ]
         if not htm_files:
             raise ValueError(f"No .htm filing found in EDGAR index for accession {accession}")
-
         htm_files.sort(key=lambda f: int(f.get("size", 0)), reverse=True)
-        best_file = htm_files[0]["name"]
-        url = f"{EDGAR_ARCHIVES_BASE}/Archives/edgar/data/{cik_int}/{accession}/{best_file}"
+        url = (
+            f"{EDGAR_ARCHIVES_BASE}/Archives/edgar/data/{cik_int}/"
+            f"{accession}/{htm_files[0]['name']}"
+        )
         resp = requests.get(url, headers=HEADERS, timeout=30)
 
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.content, "html.parser")
+    return resp.content
+
+
+def _html_to_narrative_text(content: bytes) -> str:
+    """Parse HTML → plain text with tables removed (for LLM narrative context)."""
+    soup = BeautifulSoup(content, "html.parser")
     for tag in soup(["script", "style", "table"]):
         tag.decompose()
     return soup.get_text(separator="\n")
 
 
-def _extract_sections(text: str) -> dict[str, str]:
-    """Extract Items 1, 1A, 7, 8 by matching section headers."""
+def _html_to_financial_text(content: bytes) -> str:
+    """Parse HTML → space-separated text keeping table cell values (for metric extraction)."""
+    soup = BeautifulSoup(content, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    return soup.get_text(separator=" ")
+
+
+def extract_financial_metrics(text: str) -> dict:
+    """
+    Programmatically extract key financial metrics from Item 7/8 text using regex.
+    Returns a dict of extracted values; None where not found.
+    Called before capping — runs on raw (uncapped) filing text.
+    """
+    metrics: dict = {
+        "revenue_recent": None,
+        "revenue_prior": None,
+        "gross_margin": None,
+        "operating_income": None,
+        "net_income": None,
+        "cash": None,
+        "long_term_debt": None,
+        "accounts_payable": None,
+        "atm_or_shelf": False,
+        "debt_maturities": None,
+    }
+
+    # Dollar amount pattern: handles "$ 1,234" (space after $), "$1,234", "1,234" near a keyword
+    # Also handles "\xa0" (non-breaking space) as whitespace in tables
+    _DOLLAR = r"\$\s*(\d[\d,\.]*)"            # captures digits after optional $+space
+    _DOLLAR_OR_NUM = r"(?:\$\s*)?(\d[\d,\.]*)"  # dollar sign optional
+
+    # Revenue — capture both current-period and prior-period values from the same table row
+    # Format: "Total revenue $ 2,347,637 $ 871,123" (two adjacent dollar amounts)
+    rev = re.search(
+        r"(?:total\s+(?:net\s+)?revenue|net\s+revenue)\s+" + _DOLLAR
+        + r"[^$\n]{0,60}" + _DOLLAR,
+        text, re.I
+    )
+    if rev:
+        metrics["revenue_recent"] = f"${rev.group(1)}"
+        metrics["revenue_prior"] = f"${rev.group(2)}"
+    else:
+        # Fallback: single period
+        rev1 = re.search(
+            r"(?:total\s+(?:net\s+)?revenue|net\s+revenue)\s+" + _DOLLAR,
+            text, re.I
+        )
+        if rev1:
+            metrics["revenue_recent"] = f"${rev1.group(1)}"
+
+    # Gross margin % — look for a % sign after "gross margin"
+    gm = re.search(r"gross\s+(?:profit\s+)?margin[^%]{0,100}?(\d+(?:\.\d+)?)\s*%", text, re.I)
+    if gm:
+        metrics["gross_margin"] = f"{gm.group(1)}%"
+
+    # Operating income / loss
+    op = re.search(
+        r"(?:income|loss)\s+from\s+operations[\s\S]{0,60}" + _DOLLAR,
+        text, re.I
+    )
+    if op:
+        metrics["operating_income"] = f"${op.group(1)}"
+
+    # Net income / loss — anchor tightly to avoid capturing unrelated values
+    net = re.search(
+        r"\bnet\s+(?:income|loss)\b[\s\S]{0,60}" + _DOLLAR,
+        text, re.I
+    )
+    if net:
+        metrics["net_income"] = f"${net.group(1)}"
+
+    # Cash and cash equivalents — look for dollar amount following the label
+    cash = re.search(
+        r"cash\s+and\s+cash\s+equivalents[\s\S]{0,80}" + _DOLLAR,
+        text, re.I
+    )
+    if cash:
+        val = cash.group(1)
+        if len(val) >= 3:  # at least "X,X" to filter single-char junk
+            metrics["cash"] = f"${val}"
+
+    # Long-term debt (dollar sign optional — many SEC table rows omit it)
+    ltd = re.search(
+        r"long[\-\s]term\s+debt(?:\s*,\s*(?:net|current\s+portion)?)?[\s\S]{0,80}" + _DOLLAR_OR_NUM,
+        text, re.I
+    )
+    if ltd:
+        val = ltd.group(1)
+        if len(val) >= 5:  # at least "1,234" to filter junk
+            metrics["long_term_debt"] = f"${val}"
+
+    # Accounts payable (dollar sign optional)
+    ap = re.search(
+        r"accounts\s+payable(?:\s+and\s+accrued[^$\n]{0,40})?[\s\S]{0,80}" + _DOLLAR_OR_NUM,
+        text, re.I
+    )
+    if ap:
+        val = ap.group(1)
+        if len(val) >= 5:
+            metrics["accounts_payable"] = f"${val}"
+
+    # ATM / shelf registration risk
+    if re.search(r"at[\-\s]the[\-\s]market|equity\s+offering|shelf\s+registration", text, re.I):
+        metrics["atm_or_shelf"] = True
+
+    # Debt maturities
+    maturities = re.findall(r"(?:due\s+in|matures?\s+in)\s+(20[2-9]\d)", text, re.I)
+    if maturities:
+        metrics["debt_maturities"] = ", ".join(sorted(set(maturities)))
+
+    return metrics
+
+
+def _extract_sections(text: str) -> tuple[dict[str, str], str]:
+    """
+    Extract Items 1, 1A, 7, 8 by matching section headers.
+    Returns:
+      - sections dict: capped text for LLM (Item 8 excluded per SECTION_CAPS)
+      - financial_text: raw uncapped Item 7 + Item 8 text for metric extraction
+    """
     results: dict[str, str] = {}
+    financial_text_parts: list[str] = []
+
     for section_name, pattern in SECTION_PATTERNS.items():
         match = pattern.search(text)
         if not match:
@@ -125,29 +259,50 @@ def _extract_sections(text: str) -> dict[str, str]:
         start = match.start()
         # Find where next section begins after this one
         next_match = NEXT_SECTION_PATTERN.search(text, match.end() + 200)
-        end = next_match.start() if next_match else start + SECTION_CAP * 2
-        chunk = text[start:end].strip()
-        results[section_name] = chunk[:SECTION_CAP]
-    return results
+        # Use a generous raw cap for metric extraction
+        end = next_match.start() if next_match else start + 40_000
+        raw_chunk = text[start:end].strip()
+
+        # Collect Item 7 and 8 raw text for financial metric extraction
+        if section_name in ("Item 7", "Item 8"):
+            financial_text_parts.append(raw_chunk)
+
+        cap = SECTION_CAPS.get(section_name, 8_000)
+        if cap > 0:
+            results[section_name] = raw_chunk[:cap]
+        # If cap == 0, section is intentionally dropped from LLM context
+
+    return results, "\n\n".join(financial_text_parts)
 
 
-def _fetch_filing(cik: str, form_type: str) -> str:
+def _fetch_filing(cik: str, form_type: str) -> tuple[str, dict]:
+    """Returns (sections_text_for_llm, financial_metrics_dict)."""
     meta = _get_filings_metadata(cik)
     filing = _find_latest_filing(meta, form_type)
     if filing is None:
-        return f"[No {form_type} filing found in EDGAR]"
+        return f"[No {form_type} filing found in EDGAR]", {}
 
-    raw_text = _download_filing_text(cik, filing["accession"], filing["primary_doc"])
-    sections = _extract_sections(raw_text)
+    # Download once, parse twice: narrative (no tables) for LLM; financial (with tables) for metrics
+    raw_content = _download_filing_content(cik, filing["accession"], filing["primary_doc"])
+    narrative_text = _html_to_narrative_text(raw_content)
+    financial_text_full = _html_to_financial_text(raw_content)
+
+    sections, _ = _extract_sections(narrative_text)
+
+    # Run metric extraction on the table-preserving version.
+    # Financial statements appear anywhere in the filing; use the full text.
+    metrics = extract_financial_metrics(financial_text_full)
 
     if sections:
         parts = []
         for name, content in sections.items():
             parts.append(f"=== {name} ===\n{content}")
-        return "\n\n".join(parts)
+        text = "\n\n".join(parts)
     else:
         # Fallback: first N chars of raw text
-        return raw_text[:FALLBACK_CAP]
+        text = raw_text[:FALLBACK_CAP]
+
+    return text, metrics
 
 
 def fetch_sec_filings(ticker: str) -> dict:
@@ -156,17 +311,25 @@ def fetch_sec_filings(ticker: str) -> dict:
     {
         "10-K": "text...",
         "10-Q": "text...",
+        "metrics_10k": {...},
+        "metrics_10q": {...},
         "error": None | "error message"
     }
     Never raises — errors are captured in the "error" field.
     """
-    result = {"10-K": "[Not available]", "10-Q": "[Not available]", "error": None}
+    result = {
+        "10-K": "[Not available]",
+        "10-Q": "[Not available]",
+        "metrics_10k": {},
+        "metrics_10q": {},
+        "error": None,
+    }
     try:
         cik = _resolve_cik(ticker)
         # Small delay between EDGAR requests to be polite
-        result["10-K"] = _fetch_filing(cik, "10-K")
+        result["10-K"], result["metrics_10k"] = _fetch_filing(cik, "10-K")
         time.sleep(0.5)
-        result["10-Q"] = _fetch_filing(cik, "10-Q")
+        result["10-Q"], result["metrics_10q"] = _fetch_filing(cik, "10-Q")
     except Exception as exc:
         result["error"] = str(exc)
     return result

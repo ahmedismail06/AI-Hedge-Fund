@@ -1,24 +1,36 @@
 """
 Transcript Fetcher
-Fetches the 2 most recent earnings call transcripts from API Ninjas.
-Step 1: Search for available transcripts.
-Step 2: Fetch the 2 most recent by (year, quarter) descending.
+Fetches the 2 most recent earnings call transcripts from Alpha Vantage.
+Tries quarters in descending order until 2 transcripts are collected.
+Free tier: 25 requests/day. Each ticker costs 1 request per quarter tried.
 """
 
 import os
+import time
 import requests
+from dotenv import load_dotenv
 
-NINJAS_BASE = "https://api.api-ninjas.com/v1"
+load_dotenv()
+
+AV_BASE = "https://www.alphavantage.co/query"
+
+# Quarters to probe, most-recent first. Extend as needed each year.
+_QUARTERS_TO_TRY = [
+    "2025Q4", "2025Q3", "2025Q2", "2025Q1",
+    "2024Q4", "2024Q3", "2024Q2", "2024Q1",
+]
 
 
-def _ninjas_headers() -> dict:
-    key = os.getenv("API_NINJAS_KEY", "")
-    return {"X-Api-Key": key}
-
-
-def _quarter_sort_key(item: dict) -> tuple:
-    """Sort key: (year desc, quarter desc) — higher is more recent."""
-    return (item.get("year", 0), item.get("quarter", 0))
+def _turns_to_text(turns: list) -> str:
+    """Flatten AV structured turns into a readable transcript string."""
+    lines = []
+    for turn in turns:
+        speaker = turn.get("speaker", "")
+        title = turn.get("title", "")
+        content = turn.get("content", "")
+        header = f"{speaker} ({title})" if title and title != speaker else speaker
+        lines.append(f"{header}: {content}")
+    return "\n\n".join(lines)
 
 
 def fetch_transcripts(ticker: str) -> dict:
@@ -27,11 +39,12 @@ def fetch_transcripts(ticker: str) -> dict:
     {
         "ticker": str,
         "transcripts": {
-            "Q3_2024": {
-                "quarter": int,
-                "year": int,
+            "Q4_2025": {
+                "quarter": int,       # e.g. 4
+                "year": int,          # e.g. 2025
                 "date": str | None,
-                "text": str
+                "text": str,          # flat speaker-joined transcript
+                "turns": list         # raw AV turn dicts with per-turn sentiment
             },
             ...
         },
@@ -47,21 +60,21 @@ def fetch_transcripts(ticker: str) -> dict:
         "warning": None,
     }
 
-    api_key = os.getenv("API_NINJAS_KEY")
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
     if not api_key:
-        result["warning"] = "API_NINJAS_KEY not set — transcripts unavailable"
+        result["warning"] = "ALPHA_VANTAGE_API_KEY not set — transcripts unavailable"
         return result
 
     # ── MANUAL TRANSCRIPT OVERRIDE ────────────────────────────────────────────
     # Drop a raw earnings call transcript here to bypass the API entirely.
-    # Useful for testing, for tickers the API doesn't cover, or for pasting in
-    # a Q4/Q1 transcript before API Ninjas has indexed it.
+    # Useful for testing, for tickers AV doesn't cover, or for pasting in
+    # a transcript before AV has indexed it (AV typically lags 1–3 days).
     #
     # HOW TO USE:
     #   1. Paste the transcript text into MANUAL_TRANSCRIPTS below as a string.
     #   2. Set the ticker key to uppercase (e.g. "PRCT").
     #   3. Run the pipeline — the manual text will be sent to the LLM instead.
-    #   4. Remove or clear the entry when the API starts returning live data.
+    #   4. Remove or clear the entry when AV starts returning live data.
     #
     # MANUAL_TRANSCRIPTS: dict[ticker -> list of {quarter, year, date, text}]
     MANUAL_TRANSCRIPTS: dict = {
@@ -424,65 +437,62 @@ Thank you for your participation in today's conference. This does conclude the p
         ],
     }
 
-    if ticker.upper() in MANUAL_TRANSCRIPTS:
-        for entry in MANUAL_TRANSCRIPTS[ticker.upper()]:
-            key = f"Q{entry['quarter']}_{entry['year']}"
-            result["transcripts"][key] = entry
-        result["fetched_count"] = len(result["transcripts"])
-        return result
+    # if ticker.upper() in MANUAL_TRANSCRIPTS:
+    #     for entry in MANUAL_TRANSCRIPTS[ticker.upper()]:
+    #         key = f"Q{entry['quarter']}_{entry['year']}"
+    #         result["transcripts"][key] = entry
+    #     result["fetched_count"] = len(result["transcripts"])
+    #     return result
     # ─────────────────────────────────────────────────────────────────────────
 
     try:
-        # Step 1: Search available transcripts
-        search_resp = requests.get(
-            f"{NINJAS_BASE}/earningstranscriptsearch",
-            params={"ticker": ticker.upper()},
-            headers=_ninjas_headers(),
-            timeout=15,
-        )
-        search_resp.raise_for_status()
-        available = search_resp.json()
+        # Probe quarters in descending order; collect up to 2 transcripts.
+        for quarter_str in _QUARTERS_TO_TRY:
+            if result["fetched_count"] >= 2:
+                break
 
-        if not available:
-            result["warning"] = f"No earnings transcripts found for {ticker.upper()}"
-            return result
+            resp = requests.get(
+                AV_BASE,
+                params={
+                    "function": "EARNINGS_CALL_TRANSCRIPT",
+                    "symbol": ticker.upper(),
+                    "quarter": quarter_str,
+                    "apikey": api_key,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        # Step 2: Sort descending and take 2 most recent
-        sorted_entries = sorted(available, key=_quarter_sort_key, reverse=True)
-        to_fetch = sorted_entries[:2]
+            # Rate limit or invalid key — stop immediately
+            if "Information" in data or "Note" in data:
+                msg = data.get("Information") or data.get("Note", "")
+                result["warning"] = f"Alpha Vantage rate limit or invalid key: {msg[:120]}"
+                break
 
-        fetched_count = 0
-        for entry in to_fetch:
-            year = entry.get("year")
-            quarter = entry.get("quarter")
-            if year is None or quarter is None:
+            turns = data.get("transcript")
+            if not turns:
+                # No transcript for this quarter — try next
+                time.sleep(1)
                 continue
-            try:
-                transcript_resp = requests.get(
-                    f"{NINJAS_BASE}/earningstranscript",
-                    params={"ticker": ticker.upper(), "year": year, "quarter": quarter},
-                    headers=_ninjas_headers(),
-                    timeout=20,
-                )
-                transcript_resp.raise_for_status()
-                transcript_data = transcript_resp.json()
 
-                key = f"Q{quarter}_{year}"
-                result["transcripts"][key] = {
-                    "quarter": quarter,
-                    "year": year,
-                    "date": entry.get("date"),
-                    "text": transcript_data.get("transcript", ""),
-                }
-                fetched_count += 1
-            except Exception as exc:
-                # Log per-transcript failure but continue
-                if result["warning"] is None:
-                    result["warning"] = f"Failed to fetch Q{quarter}_{year}: {exc}"
+            # Parse "2025Q4" → quarter=4, year=2025
+            year_int = int(quarter_str[:4])
+            quarter_int = int(quarter_str[5])
+            key = f"Q{quarter_int}_{year_int}"
 
-        result["fetched_count"] = fetched_count
-        if fetched_count == 0 and result["warning"] is None:
-            result["warning"] = f"Could not retrieve any transcript text for {ticker.upper()}"
+            result["transcripts"][key] = {
+                "quarter": quarter_int,
+                "year": year_int,
+                "date": data.get("date"),
+                "text": _turns_to_text(turns),
+                "turns": turns,  # structured turns with per-turn sentiment
+            }
+            result["fetched_count"] += 1
+            time.sleep(1)  # stay within free-tier rate limits
+
+        if result["fetched_count"] == 0 and result["warning"] is None:
+            result["warning"] = f"No transcripts found for {ticker.upper()} in last {len(_QUARTERS_TO_TRY)} quarters"
 
     except Exception as exc:
         result["warning"] = str(exc)

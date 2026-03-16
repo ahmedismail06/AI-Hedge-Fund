@@ -14,6 +14,7 @@ class FinancialHealth(BaseModel):
     margin_trend: Literal["expanding", "stable", "contracting", "unknown"]
     debt_level: Literal["low", "moderate", "high", "unknown"]
     fcf: Literal["strong", "neutral", "weak", "unknown"]
+    cash_runway_months: Optional[float] = None  # Required for sub-$2B; null for larger
 
 
 class EarningsScenarios(BaseModel):
@@ -37,6 +38,10 @@ class InvestmentMemo(BaseModel):
     macro_sensitivity: str
     verdict: Literal["LONG", "SHORT", "AVOID"]
     conviction_score: float = Field(ge=0.0, le=10.0)
+    conviction_score_rationale: str  # One sentence using the rubric
+    valuation_note: str              # Specific metric vs peers/history, or "unavailable"
+    variant_perception: str          # "Market believes X. We believe Y because Z."
+    repricing_catalyst: str          # "Event is X, expected Y, which reveals Z."
     suggested_position_size: Literal["small", "medium", "large", "skip"]
     summary: str
 
@@ -53,3 +58,6 @@ class InvestmentMemo(BaseModel):
 
     # /financial-analysis:competitive-analysis
     competitive_position: Optional[str] = None
+
+    # Red team — second LLM call that argues against the bull thesis
+    red_team_risks: Optional[list[str]] = None

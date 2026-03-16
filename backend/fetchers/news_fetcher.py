@@ -8,6 +8,9 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 POLYGON_BASE = "https://api.polygon.io"
 

@@ -6,7 +6,10 @@ ChromaDB / semantic search is stubbed (raises NotImplementedError).
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
 from supabase import create_client, Client
+
+load_dotenv()
 
 _client: Optional[Client] = None
 
