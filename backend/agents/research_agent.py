@@ -96,10 +96,17 @@ def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
 
     atm = m.get("atm_or_shelf") or m_annual.get("atm_or_shelf", False)
     maturities = m.get("debt_maturities") or m_annual.get("debt_maturities")
+    reporting_unit = m.get("reporting_unit") or m_annual.get("reporting_unit")
+
+    if reporting_unit:
+        unit_label = f"[REPORTING UNIT: values are in {reporting_unit.upper()} (detected from filing header)]"
+    else:
+        unit_label = "[REPORTING UNIT: not detected in filing — assume THOUSANDS per SEC convention]"
 
     lines = [
         "=== PRE-EXTRACTED FINANCIAL METRICS ===",
         "[Programmatically extracted — verify against filing text if values seem off]",
+        unit_label,
         "",
         f"Revenue (recent):    {_val('revenue_recent')}",
         f"Revenue (prior):     {_val('revenue_prior')}",
@@ -125,24 +132,22 @@ def _format_insider_buying(form4_data: dict) -> str:
     applies = form4_data.get("conviction_rubric_applies", False)
 
     lines = ["=== INSIDER BUYING (SEC Form 4, last 90 days) ==="]
-    if ceo:
-        lines.append(
-            f"CEO [{ceo['name']}]: Purchased {ceo['shares']:,} shares "
-            f"at ${ceo['price']:.2f} on {ceo['date']} (open market)"
+    def _fmt_purchase(role: str, p: dict | None) -> str:
+        if not p:
+            return f"{role}: No qualifying open-market purchase found"
+        val = p.get("value", 0)
+        val_str = f"~${val / 1_000:.0f}K" if val < 1_000_000 else f"~${val / 1_000_000:.2f}M"
+        threshold_note = "" if val >= 25_000 else " [BELOW $25K threshold — rubric does not apply]"
+        return (
+            f"{role} [{p['name']}]: Purchased {p['shares']:,} shares "
+            f"at ${p['price']:.2f} on {p['date']} (open market) — value {val_str}{threshold_note}"
         )
-    else:
-        lines.append("CEO: No qualifying open-market purchase found")
 
-    if cfo:
-        lines.append(
-            f"CFO [{cfo['name']}]: Purchased {cfo['shares']:,} shares "
-            f"at ${cfo['price']:.2f} on {cfo['date']} (open market)"
-        )
-    else:
-        lines.append("CFO: No qualifying open-market purchase found")
+    lines.append(_fmt_purchase("CEO", ceo))
+    lines.append(_fmt_purchase("CFO", cfo))
 
     lines.append(
-        f"Conviction rubric: {'+1.0 APPLIES' if applies else 'does not apply'}"
+        f"Conviction rubric: {'+1.0 APPLIES (purchase ≥ $25K)' if applies else 'does not apply'}"
     )
     return "\n".join(lines)
 
@@ -167,8 +172,10 @@ def _format_market_intelligence(fmp_data: dict) -> str:
     ltd = fmp_data.get("long_term_debt")
     ap = fmp_data.get("accounts_payable")
     mktcap = fmp_data.get("market_cap")
+    mktcap_source = fmp_data.get("market_cap_source")
     cash = fmp_data.get("cash")
     ttm_ocf = fmp_data.get("ttm_operating_cash_flow")
+    ocf_annualized = fmp_data.get("ocf_annualized", False)
     runway = fmp_data.get("cash_runway_months")
 
     def _fmt_pct(v) -> str:
@@ -188,9 +195,14 @@ def _format_market_intelligence(fmp_data: dict) -> str:
         growth = (rev_nxt - rev_cur) / rev_cur * 100
         growth_str = f"+{growth:.0f}%" if growth >= 0 else f"{growth:.0f}%"
 
+    # Bug 10: flag stale Polygon reference data so the LLM doesn't treat it as live
+    mktcap_note = " [STALE — Polygon reference data; may be months old]" if mktcap_source == "polygon_reference" else ""
+    # Bug 9: flag when TTM OCF is a single-quarter annualisation
+    ocf_note = " [APPROX: single quarter ×4 — may overstate runway for seasonal businesses]" if ocf_annualized else ""
+
     lines = [
         "=== MARKET INTELLIGENCE ===",
-        f"Market cap:         {_fmt_dollars(mktcap)}",
+        f"Market cap:         {_fmt_dollars(mktcap)}{mktcap_note}",
         f"Short interest:     {_fmt_pct(si)}  ({_fmt_num(dtc, ' days to cover')})",
         f"Analyst coverage:   {_fmt_num(analysts, ' analysts')}     [confirms ≤5 universe]",
         f"Analyst price target (mean): {_fmt_num(target, '')}",
@@ -199,7 +211,7 @@ def _format_market_intelligence(fmp_data: dict) -> str:
         f"(FY next ${_fmt_num(rev_nxt, 'M')}) → implied {growth_str} growth",
         f"Next earnings:      {earnings if earnings else 'unavailable'}",
         f"Cash:               {_fmt_dollars(cash)}",
-        f"TTM operating CFO:  {_fmt_dollars(ttm_ocf)}",
+        f"TTM operating CFO:  {_fmt_dollars(ttm_ocf)}{ocf_note}",
         f"Cash runway:        {f'{runway} months (pre-computed — use this value directly for cash_runway_months)' if runway else 'unavailable'}",
         f"Long-term debt:     {_fmt_dollars(ltd)}",
         f"Accounts payable:   {_fmt_dollars(ap)}",
@@ -389,6 +401,80 @@ def _format_transcripts_structured(transcript_data: dict) -> tuple[str, str]:
     return formatted, signal_summary
 
 
+def _build_cash_reconciliation(metrics_10k: dict, metrics_10q: dict, fmp_data: dict) -> str:
+    """
+    Bug 12: Three cash sources (SEC regex, yfinance, Polygon) populate cash independently.
+    Uses the reporting_unit detected from the filing header to normalize SEC values to raw
+    dollars before comparing. Flags divergences > 20% explicitly.
+
+    Returns a short reconciliation block, or an empty string if only one source fired.
+    """
+    sec_cash_raw = metrics_10q.get("cash") or metrics_10k.get("cash")  # string, e.g. "$285,000"
+    yf_cash = fmp_data.get("cash")  # float, raw dollars, e.g. 285_000_000.0
+
+    # Use detected reporting unit; fall back to thousands (SEC convention)
+    reporting_unit = (
+        metrics_10q.get("reporting_unit")
+        or metrics_10k.get("reporting_unit")
+        or "thousands"
+    )
+    unit_multiplier = {"thousands": 1_000, "millions": 1_000_000}.get(reporting_unit, 1_000)
+    unit_label = (
+        f"detected from filing: {reporting_unit}"
+        if (metrics_10q.get("reporting_unit") or metrics_10k.get("reporting_unit"))
+        else "not detected — assumed thousands per SEC convention"
+    )
+
+    sources: list[str] = []
+    sec_cash_normalized: float | None = None
+
+    if sec_cash_raw:
+        digits = sec_cash_raw.replace("$", "").replace(",", "").strip()
+        try:
+            sec_cash_normalized = float(digits) * unit_multiplier
+            sec_fmt = (
+                f"${sec_cash_normalized / 1_000_000:.1f}M"
+                if sec_cash_normalized < 1_000_000_000
+                else f"${sec_cash_normalized / 1_000_000_000:.2f}B"
+            )
+            sources.append(
+                f"SEC filing regex: {sec_cash_raw} (units: {unit_label} → {sec_fmt})"
+            )
+        except (ValueError, TypeError):
+            sources.append(f"SEC filing regex: {sec_cash_raw} (unit conversion failed — {unit_label})")
+
+    if yf_cash is not None:
+        yf_str = (
+            f"${yf_cash / 1_000_000:.1f}M"
+            if yf_cash < 1_000_000_000
+            else f"${yf_cash / 1_000_000_000:.2f}B"
+        )
+        sources.append(f"yfinance (quarterly balance sheet): {yf_str} (raw dollars — authoritative)")
+
+    if len(sources) < 2:
+        return ""  # Only one source — no conflict possible, no note needed
+
+    # Divergence check — only meaningful after normalizing SEC to raw dollars
+    divergence_note = ""
+    if sec_cash_normalized is not None and yf_cash is not None and yf_cash > 0:
+        divergence = abs(sec_cash_normalized - yf_cash) / yf_cash
+        if divergence > 0.20:
+            divergence_note = (
+                f"\n  WARNING: values diverge by {divergence:.0%} after unit normalization. "
+                "Possible causes: different report dates, incorrect unit assumption, "
+                "or short-term investments included in one source but not the other. "
+                "Note the discrepancy in the summary if it affects the cash_runway_months calculation."
+            )
+
+    return (
+        "\n=== CASH SOURCE RECONCILIATION ===\n"
+        f"Multiple sources reported cash. SEC value converted using filing units ({unit_label}).\n"
+        + "\n".join(f"  • {s}" for s in sources)
+        + divergence_note
+        + "\nUse the yfinance figure for cash_runway_months.\n"
+    )
+
+
 def _build_user_message(
     ticker: str,
     sec: dict,
@@ -403,6 +489,13 @@ def _build_user_message(
     """
     transcript_text, transcript_signal = _format_transcripts_structured(transcripts)
 
+    # Bug 12: Three independent cash sources — SEC regex, yfinance, Polygon — can
+    # contradict each other silently. Build a reconciliation note so the LLM sees
+    # the discrepancy explicitly rather than picking the last successful value.
+    cash_reconciliation = _build_cash_reconciliation(
+        sec.get("metrics_10k", {}), sec.get("metrics_10q", {}), fmp
+    )
+
     msg = f"""Analyze {ticker.upper()} and produce a structured investment memo.
 
 {_format_financial_metrics(sec.get('metrics_10k', {}), sec.get('metrics_10q', {}))}
@@ -410,6 +503,7 @@ def _build_user_message(
 {_format_insider_buying(form4)}
 
 {_format_market_intelligence(fmp)}
+{cash_reconciliation}
 
 === SEC FILINGS ===
 {_format_sec(sec)}
@@ -491,20 +585,41 @@ THINKING ORDER — follow this sequence for every memo:
 
 ---
 
-CONVICTION SCORE RUBRIC — derive the score mechanically, then state
-your rationale in one sentence:
+CONVICTION SCORE RUBRIC — derive the score mechanically using this exact process:
+
+   1. Start at 5.0
+   2. For each Addition: state whether it applies (YES/NO) and why
+   3. For each Deduction: state whether it applies (YES/NO) and why
+   4. Sum the result
+   5. Apply hard caps if triggered
+   6. Write conviction_score_rationale as: "5.0 base + [list of applied
+      additions with values] - [list of applied deductions with values]
+      = [final score]; [one sentence on dominant factor]"
+
+   Do NOT mention rubric items that did not apply. Do NOT cite absences
+   as explanations (e.g. "no insider buying" is not a deduction — only
+   list what actually moved the score).
 
    Start at 5.0 (neutral baseline)
 
    Additions:
    +1.0  Strong revenue growth with evidence of operating leverage
    +1.0  Valuation discount to peers with a documented reason for mispricing
-   +1.0  Insider buying by CEO or CFO in the past 90 days (Form 4 evidence)
+   +1.0  Insider buying by CEO or CFO in the past 90 days (Form 4 evidence,
+         purchase value ≥ $25,000 — token purchases below this threshold are
+         noted but do not qualify; check the "value" field in the insider block)
    +1.0  Specific near-term catalyst with binary outcome
    +0.5  Management has a track record of hitting or beating guidance
 
    Deductions:
-   -1.5  Active securities fraud investigation or SEC enforcement action
+   -1.5  Active SEC enforcement action or formal government investigation
+         (Wells Notice, SEC order, CFTC charge, DOJ indictment — must be a
+         regulatory body finding or action). EXCLUSION: Do NOT apply this
+         deduction for plaintiff law firm solicitation letters. Identify them
+         by these phrases: "on behalf of investors," "class period,"
+         "shareholders who purchased," "no obligation to you," "no cost to you,"
+         "encourage you to contact." These are attorney marketing, not regulatory
+         findings, and do NOT trigger this deduction regardless of firm name.
    -1.0  Negative FCF + net debt + cash runway under 18 months (all three)
    -1.0  Guidance reset or material miss in the most recent quarter
    -1.0  Single product or customer concentration above 30% of revenue
@@ -521,9 +636,31 @@ your rationale in one sentence:
 ---
 
 VARIANT PERCEPTION — required field:
-   Format: "The market believes [X]. We believe [Y] because [specific evidence from documents]."
-   Not a summary of the bull thesis. The specific mispricing claim.
-   Use the consensus estimates from MARKET INTELLIGENCE to anchor the "market believes" side.
+
+   STEP 1 — Find the contradiction:
+   Scan the documents for a metric or data point that moves in the OPPOSITE direction
+   from the stock price action or consensus narrative. Examples:
+   - Procedures growing while revenue declined (demand vs. channel issue)
+   - Margins expanding while headline numbers missed
+   - Insider buying while stock is down
+   - Backlog growing while reported revenue fell
+   If no contradiction exists, state that explicitly and cap conviction at 6.0.
+
+   STEP 2 — Anchor the market belief:
+   The "market believes" side must describe what the current stock price or consensus
+   multiple implies — not what analysts say, but what the PRICE is pricing in. A 15%
+   stock decline after an earnings miss implies the market believes the miss reflects
+   structural deterioration. Name that.
+
+   STEP 3 — Write the variant perception:
+   Format: "The market believes [what the price action implies]. We believe [the specific
+   contradiction you found in Step 1] because [the exact metric and its value from the
+   documents]."
+
+   This field must name a specific number. "Execution risk is underappreciated" is not
+   a variant perception. "Procedures grew 69% YoY while revenue missed, indicating the
+   miss was channel behavior not demand destruction" is.
+
    If you cannot identify a specific market belief to disagree with, conviction score
    cannot exceed 6.0 and verdict cannot be LONG.
 
@@ -551,9 +688,15 @@ BEAR THESIS REQUIREMENTS:
      balance sheet, competitive position, management execution,
      valuation, regulatory/legal, market structure, or fraud/governance
    - Do not write variations of the same risk
-   - Do not soften risks that are existential. If securities fraud
-     investigations are present, that is not "legal scrutiny" — call it
-     what it is.
+   - Do not soften risks that are existential. If a formal SEC enforcement
+     action or government investigation is present, that is not "legal
+     scrutiny" — call it what it is.
+   - IMPORTANT: Plaintiff class action solicitation letters are attorney
+     marketing, NOT regulatory findings. Identify them by these phrases:
+     "on behalf of investors," "class period," "shareholders who purchased,"
+     "no obligation to you," "no cost to you," "encourage you to contact."
+     Anything matching these phrases must NOT be classified as fraud or SEC
+     enforcement. It may be noted as potential litigation risk, nothing more.
 
 ---
 
@@ -633,18 +776,23 @@ Required JSON schema (output must match exactly):
   "verdict": "LONG | SHORT | AVOID",
   "conviction_score": <number 0.0-10.0>,
   "conviction_score_rationale": "string — one sentence explaining the score using the rubric above",
-  "variant_perception": "string — The market believes [X]. We believe [Y] because [specific evidence].",
+  "variant_perception": "string — Before writing this field, identify the single metric or data point in the documents that most directly contradicts the narrative embedded in the current stock price. The variant perception must be anchored to that specific metric. If procedure volumes and revenue are moving in opposite directions, that contradiction must be named explicitly. Format: The market believes [X]. We believe [Y] because [specific metric/data point].",
   "repricing_catalyst": "string — The repricing event is [X], expected [timeframe], which will reveal [Z].",
   "suggested_position_size": "small | medium | large | skip",
   "summary": "string — 3-5 sentences with specific data points; addresses highest-severity risk; ends with verdict-change condition if AVOID or SHORT",
   "red_team_risks": [
-    "risk 1 — attack the bull thesis directly",
-    "risk 2 — identify what the memo is most likely wrong about",
-    "risk 3 — worst credible outcome if the bear case is right",
-    "risk 4 — signal or data point that would confirm the bear case is playing out",
-    "risk 5 — structural or hidden risk the filing language obscures"
+    "risk 1 — attack bull thesis point 1 directly; must cite a specific number or statement from the source documents that undermines it",
+    "risk 2 — attack bull thesis point 2 directly; same citation requirement",
+    "risk 3 — worst credible outcome if bear case is right; must be grounded in a specific risk already present in the documents",
+    "risk 4 — the single data point or event that would confirm the bear case is playing out; must be observable and specific",
+    "risk 5 — a risk the filing language obscures or understates; cite the specific filing language and explain what it is hiding"
   ]
-}}"""
+}}
+
+HARD RULE: Every red team risk must cite at least one specific data point, quote, or metric
+from the source documents. Risks with no documentary evidence must not be included. If you
+cannot find five evidenced risks, write fewer. Do not invent bearish narratives to fill the
+slots."""
 
 
 # ── CLAUDE SWAP ───────────────────────────────────────────────────────────────

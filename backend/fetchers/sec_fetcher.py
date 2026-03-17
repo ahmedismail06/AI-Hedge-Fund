@@ -23,7 +23,8 @@ FALLBACK_CAP = 15_000
 # Per-section caps — Item 8 is 0 (dropped; replaced by pre-extracted metrics)
 SECTION_CAPS = {
     "Item 1":  8_000,   # Business narrative; no raw numbers
-    "Item 1A": 6_000,   # Risk factors front-loaded; boilerplate after ~6K
+    "Item 1A": 12_000,  # Risk factors: 6K was truncating mid-section; material disclosures
+                        # can appear in the back half (going-concern, regulatory, litigation)
     "Item 7":  8_000,   # MD&A management commentary still needed
     "Item 8":  0,       # Financial tables replaced by extract_financial_metrics()
 }
@@ -153,7 +154,20 @@ def extract_financial_metrics(text: str) -> dict:
         "accounts_payable": None,
         "atm_or_shelf": False,
         "debt_maturities": None,
+        "reporting_unit": None,  # "thousands" | "millions" | None (not detected)
     }
+
+    # Detect reporting unit from financial statement header, e.g.:
+    #   "(in thousands, except per share data)"
+    #   "(in millions)"
+    #   "(dollars in thousands)"
+    _unit_match = re.search(
+        r"\(\s*(?:in|amounts?\s+in|dollars?\s+in)\s+(thousands?|millions?)\b",
+        text, re.I
+    )
+    if _unit_match:
+        raw = _unit_match.group(1).lower()
+        metrics["reporting_unit"] = "thousands" if raw.startswith("thousand") else "millions"
 
     # Dollar amount pattern: handles "$ 1,234" (space after $), "$1,234", "1,234" near a keyword
     # Also handles "\xa0" (non-breaking space) as whitespace in tables
@@ -200,9 +214,11 @@ def extract_financial_metrics(text: str) -> dict:
     if net:
         metrics["net_income"] = f"${net.group(1)}"
 
-    # Cash and cash equivalents — look for dollar amount following the label
+    # Cash and cash equivalents — only allow horizontal whitespace between label and value.
+    # Using [\s\S] here caused the regex to cross row boundaries and match the
+    # accumulated deficit or other nearby balance sheet items (Bug 1).
     cash = re.search(
-        r"cash\s+and\s+cash\s+equivalents[\s\S]{0,80}" + _DOLLAR,
+        r"cash\s+and\s+cash\s+equivalents[ \t\xa0]{0,50}" + _DOLLAR,
         text, re.I
     )
     if cash:
@@ -220,14 +236,17 @@ def extract_financial_metrics(text: str) -> dict:
         if len(val) >= 5:  # at least "1,234" to filter junk
             metrics["long_term_debt"] = f"${val}"
 
-    # Accounts payable (dollar sign optional)
+    # Accounts payable (dollar sign optional).
+    # Tightened from [\s\S]{0,80} to horizontal-whitespace-only to prevent
+    # jumping across table rows and producing nonsense values like "$0,665" (Bug 2).
+    # Also reject values starting with "0," which indicate a partial-number match.
     ap = re.search(
-        r"accounts\s+payable(?:\s+and\s+accrued[^$\n]{0,40})?[\s\S]{0,80}" + _DOLLAR_OR_NUM,
+        r"accounts\s+payable(?:\s+and\s+accrued[^\n]{0,40})?[ \t\xa0]{0,50}" + _DOLLAR_OR_NUM,
         text, re.I
     )
     if ap:
         val = ap.group(1)
-        if len(val) >= 5:
+        if len(val) >= 5 and not val.startswith("0,"):
             metrics["accounts_payable"] = f"${val}"
 
     # ATM / shelf registration risk
@@ -253,7 +272,17 @@ def _extract_sections(text: str) -> tuple[dict[str, str], str]:
     financial_text_parts: list[str] = []
 
     for section_name, pattern in SECTION_PATTERNS.items():
+        # Bug 6: SEC filings have a Table of Contents that lists "Item 1 — Business"
+        # before the actual section body. In the TOC, the next section header
+        # appears within ~50-100 chars; in the real body it's thousands of chars away.
+        # Skip any match where another section header appears within 600 chars of it.
         match = pattern.search(text)
+        while match:
+            next_nearby = NEXT_SECTION_PATTERN.search(text, match.end())
+            if next_nearby is None or next_nearby.start() - match.end() > 600:
+                break  # no nearby header → real section body
+            match = pattern.search(text, match.end() + 1)
+
         if not match:
             continue
         start = match.start()
@@ -289,6 +318,19 @@ def _fetch_filing(cik: str, form_type: str) -> tuple[str, dict]:
 
     sections, _ = _extract_sections(narrative_text)
 
+    # Bug 14: 10-Q Item 1A often just says "no material changes to risk factors
+    # disclosed in our Annual Report." Detect this boilerplate (short section +
+    # "no material changes" language) and replace it so the LLM doesn't treat it
+    # as a real risk update. The 10-K Item 1A remains authoritative.
+    if form_type == "10-Q" and "Item 1A" in sections:
+        item1a = sections["Item 1A"]
+        if len(item1a) < 2_000 and re.search(
+            r"no\s+material\s+changes?\s+(?:to|from|in)", item1a, re.I
+        ):
+            sections["Item 1A"] = (
+                "[10-Q Item 1A: No material changes vs. annual filing. Refer to 10-K.]"
+            )
+
     # Run metric extraction on the table-preserving version.
     # Financial statements appear anywhere in the filing; use the full text.
     metrics = extract_financial_metrics(financial_text_full)
@@ -299,8 +341,8 @@ def _fetch_filing(cik: str, form_type: str) -> tuple[str, dict]:
             parts.append(f"=== {name} ===\n{content}")
         text = "\n\n".join(parts)
     else:
-        # Fallback: first N chars of raw text
-        text = raw_text[:FALLBACK_CAP]
+        # Fallback: first N chars of narrative text (Bug 5: raw_text was undefined)
+        text = narrative_text[:FALLBACK_CAP]
 
     return text, metrics
 

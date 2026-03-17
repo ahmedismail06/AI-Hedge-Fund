@@ -5,6 +5,7 @@ Tries quarters in descending order until 2 transcripts are collected.
 Free tier: 25 requests/day. Each ticker costs 1 request per quarter tried.
 """
 
+import datetime
 import os
 import time
 import requests
@@ -13,12 +14,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 AV_BASE = "https://www.alphavantage.co/query"
+AV_DAILY_LIMIT = 25  # Free-tier hard cap
 
 # Quarters to probe, most-recent first. Extend as needed each year.
 _QUARTERS_TO_TRY = [
     "2025Q4", "2025Q3", "2025Q2", "2025Q1",
     "2024Q4", "2024Q3", "2024Q2", "2024Q1",
 ]
+
+# Bug 13: module-level daily request counter — resets automatically when date changes.
+# Prevents silent empty-transcript failures on the 26th+ ticker in a multi-ticker run.
+_av_usage: dict = {"date": None, "count": 0}
+
+
+def _av_request_allowed() -> bool:
+    """Return True if we are under the daily AV request budget; increment counter."""
+    today = datetime.date.today().isoformat()
+    if _av_usage["date"] != today:
+        _av_usage["date"] = today
+        _av_usage["count"] = 0
+    if _av_usage["count"] >= AV_DAILY_LIMIT:
+        return False
+    _av_usage["count"] += 1
+    return True
+
+
+def av_requests_remaining() -> int:
+    """How many AV requests are left today (useful for logging in multi-ticker runs)."""
+    today = datetime.date.today().isoformat()
+    if _av_usage["date"] != today:
+        return AV_DAILY_LIMIT
+    return max(0, AV_DAILY_LIMIT - _av_usage["count"])
 
 
 def _turns_to_text(turns: list) -> str:
@@ -60,12 +86,9 @@ def fetch_transcripts(ticker: str) -> dict:
         "warning": None,
     }
 
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-    if not api_key:
-        result["warning"] = "ALPHA_VANTAGE_API_KEY not set — transcripts unavailable"
-        return result
-
     # ── MANUAL TRANSCRIPT OVERRIDE ────────────────────────────────────────────
+    # Bug 8: this block must run BEFORE the api_key guard so that manual
+    # transcripts work even when ALPHA_VANTAGE_API_KEY is not set.
     # Drop a raw earnings call transcript here to bypass the API entirely.
     # Useful for testing, for tickers AV doesn't cover, or for pasting in
     # a transcript before AV has indexed it (AV typically lags 1–3 days).
@@ -437,18 +460,32 @@ Thank you for your participation in today's conference. This does conclude the p
         ],
     }
 
-    # if ticker.upper() in MANUAL_TRANSCRIPTS:
-    #     for entry in MANUAL_TRANSCRIPTS[ticker.upper()]:
-    #         key = f"Q{entry['quarter']}_{entry['year']}"
-    #         result["transcripts"][key] = entry
-    #     result["fetched_count"] = len(result["transcripts"])
-    #     return result
+    if ticker.upper() in MANUAL_TRANSCRIPTS:
+        for entry in MANUAL_TRANSCRIPTS[ticker.upper()]:
+            key = f"Q{entry['quarter']}_{entry['year']}"
+            result["transcripts"][key] = entry
+        result["fetched_count"] = len(result["transcripts"])
+        return result
     # ─────────────────────────────────────────────────────────────────────────
+
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+    if not api_key:
+        result["warning"] = "ALPHA_VANTAGE_API_KEY not set — transcripts unavailable"
+        return result
 
     try:
         # Probe quarters in descending order; collect up to 2 transcripts.
+        # Bug 13: debit the daily counter before each API call so multi-ticker runs
+        # never silently exhaust the 25-request daily budget.
         for quarter_str in _QUARTERS_TO_TRY:
             if result["fetched_count"] >= 2:
+                break
+
+            if not _av_request_allowed():
+                result["warning"] = (
+                    f"Alpha Vantage daily limit ({AV_DAILY_LIMIT} requests) reached for "
+                    f"{datetime.date.today().isoformat()}. Remaining quarters not fetched."
+                )
                 break
 
             resp = requests.get(
