@@ -2,8 +2,9 @@
 fastapi
 uvicorn[standard]
 
-# ── Azure OpenAI ──────────────────────────────────────────────────────────────
-openai                        # Azure OpenAI uses the openai SDK
+# ── LLM ───────────────────────────────────────────────────────────────────────
+anthropic                     # Claude API (active)
+openai                        # Azure OpenAI — kept for reference; no longer called
 
 # ── Data Sources ──────────────────────────────────────────────────────────────
 polygon-api-client
