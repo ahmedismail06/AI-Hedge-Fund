@@ -52,7 +52,7 @@ def _build_azure_client() -> AzureOpenAI:
         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     )
 
-AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
 
 # Claude API — synthesis (Phase 4) + red team (Phase 5)
 def _build_client() -> anthropic.Anthropic:
