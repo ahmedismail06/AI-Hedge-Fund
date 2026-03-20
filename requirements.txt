@@ -31,3 +31,4 @@ ib_insync
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv
 pydantic
+sentence-transformers             # local embeddings (BAAI/bge-base-en-v1.5); ~400MB model download on first run

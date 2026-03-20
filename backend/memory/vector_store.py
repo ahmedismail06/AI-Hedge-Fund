@@ -1,17 +1,29 @@
 """
-Vector Store — thin Supabase wrapper for investment memos.
-ChromaDB / semantic search is stubbed (raises NotImplementedError).
+Vector Store — Supabase wrapper for investment memos and document chunks (pgvector).
+
+Memo operations: store_memo, get_memo, get_all_memos, get_watchlist, update_memo_status.
+Chunk operations: upsert_chunks, search_similar (pgvector cosine similarity).
+Embedding model: BAAI/bge-base-en-v1.5 (768 dims, local SentenceTransformers).
 """
 
+import logging
 import os
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 _client: Optional[Client] = None
+_embed_model: Optional["SentenceTransformer"] = None
+
+_EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
 
 def _get_client() -> Client:
@@ -20,7 +32,7 @@ def _get_client() -> Client:
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_KEY")
         if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
         _client = create_client(url, key)
     return _client
 
@@ -99,5 +111,64 @@ def update_memo_status(memo_id: str, status: str) -> None:
     _get_client().table("memos").update({"status": status}).eq("id", memo_id).execute()
 
 
-def search_similar(query: str, n: int = 5) -> list[dict]:
-    raise NotImplementedError("ChromaDB not yet integrated")
+def _get_embed_model() -> "SentenceTransformer":
+    """Lazy singleton: loads BAAI/bge-base-en-v1.5 on first call (~400MB download cached locally)."""
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading embedding model %s (first call — may download ~400MB)", _EMBED_MODEL_NAME)
+        _embed_model = SentenceTransformer(_EMBED_MODEL_NAME)
+    return _embed_model
+
+
+def upsert_chunks(chunks: list[dict]) -> None:
+    """
+    Bulk upsert document chunks into document_chunks table.
+    Each chunk dict must have: ticker, doc_type, section, chunk_index, content, embedding.
+    Idempotent: upserts on (ticker, doc_type, section, chunk_index) unique constraint.
+    """
+    if not chunks:
+        return
+    _get_client().table("document_chunks").upsert(
+        chunks,
+        on_conflict="ticker,doc_type,section,chunk_index",
+    ).execute()
+
+
+def search_similar(
+    query: str,
+    ticker: str,
+    doc_types: Optional[list[str]] = None,
+    n: int = 4,
+) -> list[dict]:
+    """
+    Cosine similarity search over document_chunks for a given ticker.
+
+    Args:
+        query: natural language query string
+        ticker: stock ticker to filter by
+        doc_types: optional list of '10-K', '10-Q', 'transcript' to filter by
+        n: max number of results (capped at 8)
+
+    Returns:
+        list of dicts with keys: id, ticker, doc_type, section, chunk_index,
+        content, token_count, filing_date, similarity
+    """
+    n = min(n, 8)
+    model = _get_embed_model()
+    embedding: list[float] = model.encode([query], show_progress_bar=False)[0].tolist()
+
+    try:
+        result = _get_client().rpc(
+            "match_document_chunks",
+            {
+                "query_embedding": embedding,
+                "filter_ticker": ticker.upper(),
+                "filter_doc_types": doc_types if doc_types else None,
+                "match_count": n,
+            },
+        ).execute()
+        return result.data or []
+    except Exception as exc:
+        logger.warning("search_similar(%s, %s): pgvector RPC failed — %s", ticker, query[:50], exc)
+        return []

@@ -1,19 +1,28 @@
 """
-Research Agent
-Orchestrates the 3 fetchers → builds LLM prompt → calls Claude → returns structured memo.
+Research Agent — Hybrid B+D agentic retrieval pipeline.
 
-NOTE: Azure OpenAI integration is commented out below (search "CLAUDE SWAP").
-      To revert to Azure: comment out the anthropic import/client block,
-      uncomment the AzureOpenAI block, and swap the API calls back.
+Phase 0: Fetch all 5 data sources.
+Phase 1: Index unstructured narrative into pgvector (SEC + transcripts).
+Phase 2: Build structured block (metrics, insider buying, market intel, news).
+Phase 3: ReAct agentic retrieval loop — Claude iteratively queries pgvector.
+Phase 4: Synthesis call — Claude writes the full memo using structured + retrieved data.
+Phase 5: Red team — adversarial second call to harden the bull thesis.
+
+Fallback: If Phase 1 indexing fails (missing deps, pgvector not ready) → retrieved_chunks=[]
+          → synthesis proceeds with structured block only (same quality as v1).
+
+Azure OpenAI is used for the ReAct retrieval loop (Phase 3) only.
+Synthesis (Phase 4) and red team (Phase 5) run on Claude (claude-sonnet-4-6).
 """
 
 import anthropic
 import json
+import logging
 import os
 import re
 from datetime import date
 from dotenv import load_dotenv
-# from openai import AzureOpenAI  # CLAUDE SWAP: Azure OpenAI — commented out
+from openai import AzureOpenAI  # ReAct loop only
 from pydantic import ValidationError
 
 from backend.fetchers.sec_fetcher import fetch_sec_filings
@@ -21,40 +30,75 @@ from backend.fetchers.news_fetcher import fetch_news
 from backend.fetchers.transcript_fetcher import fetch_transcripts
 from backend.fetchers.form4_fetcher import fetch_form4
 from backend.fetchers.fmp_fetcher import fetch_fmp
+from backend.memory.vector_store import search_similar
 from backend.models import InvestmentMemo
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchAgentError(Exception):
     pass
 
 
-# ── LLM Client ───────────────────────────────────────────────────────────────
+# ── LLM Clients ──────────────────────────────────────────────────────────────
 
-# ACTIVE: Claude API (claude-sonnet-4-6)
-def _build_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(
-        api_key=os.getenv("ANTHROPIC_API_KEY")
+# Azure OpenAI — ReAct retrieval loop only (Phase 3)
+def _build_azure_client() -> AzureOpenAI:
+    return AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     )
 
-# ── CLAUDE SWAP ───────────────────────────────────────────────────────────────
-# Azure OpenAI (GPT-4.1) — commented out. To revert, uncomment below and
-# comment out the Claude client above. Also swap the API calls in
-# run_research() and _run_red_team() below.
-#
-# def _build_client() -> AzureOpenAI:
-#     return AzureOpenAI(
-#         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-#         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-#         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-#     )
-# ─────────────────────────────────────────────────────────────────────────────
+AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+
+# Claude API — synthesis (Phase 4) + red team (Phase 5)
+def _build_client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# ── ReAct Tool Schema ─────────────────────────────────────────────────────────
+
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_documents",
+        "description": (
+            "Search SEC filings (10-K, 10-Q) and earnings call transcripts for this company. "
+            "Use specific, targeted queries to find the exact evidence you need for the memo. "
+            "Returns ranked text chunks with source labels and similarity scores."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Specific search query — be precise, not generic",
+                },
+                "doc_types": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["10-K", "10-Q", "transcript"]},
+                    "description": "Filter to specific document types. Omit to search all.",
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "Number of chunks to return (default 4, max 8)",
+                    "default": 4,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+MAX_TURNS = 10  # hard cap on ReAct loop iterations
 
 
 # ── Formatters ───────────────────────────────────────────────────────────────
 
 def _format_news(news_data: dict) -> str:
+    """Format recent news articles into a plain-text block for the LLM prompt."""
     if news_data.get("error"):
         return f"[News unavailable: {news_data['error']}]"
     articles = news_data.get("articles", [])
@@ -68,15 +112,6 @@ def _format_news(news_data: dict) -> str:
             lines.append(f"  {a['description'][:200]}")
     return "\n".join(lines)
 
-
-def _format_sec(sec_data: dict) -> str:
-    if sec_data.get("error"):
-        return f"[SEC filings unavailable: {sec_data['error']}]"
-    parts = []
-    for form_type in ("10-K", "10-Q"):
-        text = sec_data.get(form_type, "[Not available]")
-        parts.append(f"--- {form_type} ---\n{text}")
-    return "\n\n".join(parts)
 
 
 def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
@@ -473,49 +508,33 @@ def _build_cash_reconciliation(metrics_10k: dict, metrics_10q: dict, fmp_data: d
     )
 
 
-def _build_user_message(
+def _build_structured_block(
     ticker: str,
     sec: dict,
     news: dict,
-    transcripts: dict,
     form4: dict,
     fmp: dict,
-) -> tuple[str, str]:
+) -> str:
     """
-    Build the user message for the main LLM call.
-    Returns (user_message, transcript_signal_summary).
+    Build the structured data block: pre-extracted metrics, insider buying,
+    market intelligence, cash reconciliation, and recent news.
+    This is passed upfront in both the ReAct retrieval message and the synthesis message.
+    Does NOT include SEC narrative text or transcripts — those come via pgvector retrieval.
     """
-    transcript_text, transcript_signal = _format_transcripts_structured(transcripts)
-
-    # Bug 12: Three independent cash sources — SEC regex, yfinance, Polygon — can
-    # contradict each other silently. Build a reconciliation note so the LLM sees
-    # the discrepancy explicitly rather than picking the last successful value.
     cash_reconciliation = _build_cash_reconciliation(
         sec.get("metrics_10k", {}), sec.get("metrics_10q", {}), fmp
     )
 
-    msg = f"""Analyze {ticker.upper()} and produce a structured investment memo.
-
-{_format_financial_metrics(sec.get('metrics_10k', {}), sec.get('metrics_10q', {}))}
+    return f"""{_format_financial_metrics(sec.get('metrics_10k', {}), sec.get('metrics_10q', {}))}
 
 {_format_insider_buying(form4)}
 
 {_format_market_intelligence(fmp)}
 {cash_reconciliation}
 
-=== SEC FILINGS ===
-{_format_sec(sec)}
-
-=== EARNINGS CALL TRANSCRIPTS ===
-{transcript_text}
-
 === RECENT NEWS (last 30 days) ===
-{_format_news(news)}
+{_format_news(news)}"""
 
-Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.
-Use today's date ({date.today().isoformat()}) for the "date" field.
-"""
-    return msg, transcript_signal
 
 
 # ── System Prompts ────────────────────────────────────────────────────────────
@@ -708,6 +727,437 @@ HARD RULE: Every red team risk must cite at least one specific data point, quote
 from source documents. Risks with no documentary evidence must not be included. Write fewer
 than 5 if evidence is insufficient. Do not invent bearish narratives to fill slots."""
 
+
+# ── ReAct Retrieval System Prompt ─────────────────────────────────────────────
+
+def _build_react_system_prompt() -> str:
+    return """You are a senior equity research analyst at a long/short hedge fund focused on
+US micro/small-cap equities ($50M–$2B, SaaS/Healthcare/Industrials, ≤5 analysts).
+
+YOUR ROLE IN THIS PHASE: Information gathering only. You are NOT writing the investment
+memo yet. You are using the search_documents tool to retrieve the unstructured narrative
+evidence — from SEC filings and earnings call transcripts in the pgvector database — that
+will ground every claim in the final memo. Do not analyze, score, or conclude during this
+phase. Retrieve, then stop.
+
+You are NOT a news summarizer. You are not here to collect background facts. You are here
+to retrieve the specific documentary evidence that will support or refute the thesis signals
+already visible in the structured metrics block above.
+
+What failure looks like in this phase: issuing queries that are generic ("company overview",
+"financial results") when the structured data has already flagged a specific red flag that
+demands targeted retrieval. A retrieval phase that ends without evidence for variant_perception,
+repricing_catalyst, and the top two bear thesis failure modes is incomplete.
+
+---
+
+TOOL AVAILABLE:
+
+search_documents(query: str, doc_types: list[str], n: int) -> list[dict]
+
+  query     — natural language search string; write it as a phrase a CFO or analyst would say,
+               not a database keyword. "We have sufficient liquidity" retrieves covenant
+               language. "Revenue concentration" retrieves customer risk disclosures.
+  doc_types — one or more of: ["10-K", "10-Q", "transcript"]. Always specify explicitly.
+               Do NOT pass ["all"] — filter by what you actually need.
+  n         — number of chunks to retrieve. Use 3–5 for targeted queries. Use 6–8 only when
+               fishing for a signal you have not yet found and have budget remaining.
+
+Each returned chunk includes: source_type, date, and text. Read the text before deciding
+whether to issue a follow-up query.
+
+---
+
+MANDATORY THINKING ORDER — complete these steps in sequence before issuing each query:
+
+1. SURVIVAL SIGNAL FIRST: Before any other query, check the structured metrics above for
+   negative FCF, net debt, cash runway < 18 months, ATM program, or near-term debt
+   maturities. If any flag is present, your first query MUST retrieve management commentary
+   on liquidity, covenants, or capital raise plans. Evidence of a going concern opinion or
+   covenant violation is the highest-priority retrieval target in this universe.
+
+2. SHORT INTEREST CHASE: If short interest > 15% (visible in the MARKET INTELLIGENCE block),
+   your second query MUST search for the bear thesis. Search transcripts for analyst pushback
+   on contested topics and filings for the risk factors short sellers are likely citing.
+   High short interest without a retrieved bear thesis is an incomplete retrieval.
+
+3. VARIANT PERCEPTION HUNT: Identify any metric in the structured block that moves OPPOSITE
+   to what the price action or short interest implies. Examples: procedures growing while
+   revenue missed; backlog growing while revenue fell; gross margins expanding while the
+   stock is down. Issue a query specifically targeting the narrative explanation for that
+   divergence. This is the most valuable retrieval target for memo quality.
+
+4. REPRICING CATALYST: Search for any time-bound, binary event mentioned in filings or
+   transcripts — FDA decision dates, contract renewal windows, debt maturity dates, earnings
+   dates, regulatory approval timelines. "Continued execution" language in transcripts is
+   NOT a repricing catalyst. Retrieve the specific event, not the sentiment.
+
+5. MANAGEMENT TONE SHIFT: If two or more transcript quarters are available, issue at least
+   one query against transcripts only to retrieve language on guidance, forward outlook, or
+   topics the CEO/CFO addressed differently across quarters. Sentiment shift is a signal;
+   retrieve the language that explains it.
+
+---
+
+QUERY STRATEGY — mandatory sequence:
+
+Issue queries in this order. Do not skip phases. Do not issue phase 3 queries before
+exhausting phase 1 and phase 2.
+
+PHASE 1 — SURVIVAL AND RED FLAGS (queries 1–3):
+  Priority order within phase 1:
+  a. Liquidity and covenant language (if any survival flag is present in metrics)
+  b. Going concern, material weakness, covenant violation — always search this even if
+     metrics look clean; these disclosures are often buried in footnotes
+  c. Debt maturity schedule and refinancing commentary
+
+  Example queries for phase 1:
+    "going concern substantial doubt liquidity"         → doc_types: ["10-K", "10-Q"], n: 5
+    "covenant compliance debt maturity refinancing"     → doc_types: ["10-K", "10-Q"], n: 5
+    "ATM program equity offering shelf registration"    → doc_types: ["10-K", "10-Q"], n: 4
+
+PHASE 2 — BEAR THESIS AND SHORT INTEREST (queries 4–5):
+  If short interest > 15%: search for the exact risk the shorts are pricing.
+  If short interest ≤ 15%: search for the top two risk factors by severity from the 10-K
+  risk factors section.
+
+  Required coverage — retrieve evidence for at least two DISTINCT failure modes from:
+    balance sheet fragility | competitive displacement | management credibility |
+    regulatory or legal exposure | customer/product concentration | market structure change
+
+  Example queries for phase 2:
+    "customer concentration revenue dependence single customer"  → ["10-K", "10-Q"], n: 5
+    "competitive pressure pricing discount market share"         → ["10-K", "transcript"], n: 5
+
+PHASE 3 — BULL THESIS AND VARIANT PERCEPTION (queries 6–8):
+  Search for the evidence that would support a non-consensus view — something the price
+  does NOT already reflect. Focus on operating metrics that diverge from headline numbers.
+
+  Required: at least one query must target the specific divergence identified in
+  THINKING ORDER step 3.
+
+  Example queries for phase 3:
+    "procedure volume growth reimbursement rate"         → ["10-K", "10-Q", "transcript"], n: 6
+    "net revenue retention churn upsell expansion"       → ["10-K", "10-Q", "transcript"], n: 5
+    "book to bill backlog order growth pipeline"         → ["10-K", "10-Q", "transcript"], n: 5
+    "gross margin expansion operating leverage scale"    → ["10-K", "10-Q"], n: 5
+
+PHASE 4 — REPRICING CATALYST AND MANAGEMENT TONE (queries 9–10, use only if budget remains):
+  Search transcripts separately from filings. Tone shifts, hedging language, or newly
+  introduced risk language in prepared remarks are not captured by metrics.
+
+  Example queries for phase 4:
+    "FDA approval decision PDUFA date regulatory milestone"      → ["transcript", "10-K"], n: 5
+    "guidance raised lowered withdrew visibility confidence"     → ["transcript"], n: 6
+    "capital allocation buyback dividend return shareholders"    → ["transcript", "10-K"], n: 4
+
+---
+
+EFFICIENCY RULES:
+
+NEVER issue a query whose result would not change the memo. Ask: "Which memo field does
+this query serve?" If you cannot name a specific field (variant_perception, bear_thesis
+point 2, cash_runway_months, repricing_catalyst, etc.), do not issue the query.
+
+NEVER issue two queries that retrieve the same content type for the same topic. If query 2
+retrieved covenant language from 10-Q filings, do not issue a 10-K query on the same topic
+unless the 10-Q result was insufficient (fewer than 2 chunks returned, or no relevant text).
+
+NEVER issue a query with vague phrasing: "financial performance overview", "business
+description", "key highlights". Every query must target a specific memo field or red flag.
+
+PREFER multi-field queries: a query like "gross margin expansion operating leverage SaaS"
+can simultaneously ground the bull thesis point on unit economics AND the variant_perception
+field. Write queries that cover multiple memo fields simultaneously.
+
+---
+
+ANTI-PATTERNS — these are the specific wrong behaviors in this phase:
+
+NEVER: Issue query 1 as "company overview" or "business description."
+WHY: This information is already in the structured metrics block. Repeating it wastes
+     budget on zero-signal retrieval.
+INSTEAD: Start with the highest-severity survival or red-flag query derived from
+         the metrics already visible above.
+
+NEVER: Search only filings and skip transcripts.
+WHY: Management tone, forward guidance language, and analyst pushback in Q&A are only
+     in transcripts. A memo with no transcript evidence for management credibility
+     assessments is structurally incomplete.
+INSTEAD: Issue at least two queries with doc_types containing "transcript".
+
+NEVER: Stop at query 3 because "enough information has been gathered."
+WHY: variant_perception and repricing_catalyst require targeted retrieval that generic
+     early queries do not cover. Stopping before phase 3 guarantees those fields will
+     be weak or unsupported in the final memo.
+INSTEAD: Complete all four phases before evaluating whether to terminate.
+
+NEVER: Issue a query targeting plaintiff law firm language ("class action", "shareholder
+lawsuit", "securities class period") and treat a result as evidence of SEC enforcement.
+WHY: Attorney marketing solicitations are identifiable by phrases like "on behalf of
+     investors," "no cost to you," "encourage you to contact" — these are not regulatory
+     findings and produce a false conviction deduction if misclassified.
+INSTEAD: Search specifically for SEC enforcement language: "Wells Notice", "SEC order",
+         "formal investigation", "consent order", "CFTC charge", "DOJ indictment."
+
+NEVER: Issue more than 10 queries regardless of how many fields remain uncovered.
+WHY: The hard cap is a discipline mechanism. If 10 queries are insufficient, the
+     structured metrics block above was not used effectively to narrow the target.
+INSTEAD: Prioritize phase 1 and phase 2 before spending budget on phase 3 and 4.
+
+---
+
+QUALITY FILTER — apply before terminating:
+
+Before issuing the termination signal, run this self-test:
+
+  (a) Survival check: Is there retrieved documentary evidence for cash runway, covenant
+      status, or going concern — OR did the metrics block show clean financials (positive
+      FCF, no net debt, runway > 24 months) that made this search unnecessary?
+      If neither condition is met -> issue one more phase 1 query.
+
+  (b) Variant perception check: Is there at least one retrieved chunk that shows a metric
+      moving OPPOSITE to what the price or short interest implies?
+      If no -> issue one phase 3 query targeting the specific divergence before terminating.
+
+  (c) Bear thesis coverage: Are at least two DISTINCT failure modes represented in
+      retrieved chunks, from different categories (balance sheet, competitive, management,
+      regulatory, concentration, governance)?
+      If only one category is covered -> issue one phase 2 query before terminating.
+
+  (d) Transcript evidence: Is at least one retrieved chunk from a transcript?
+      If no -> issue one transcript query before terminating.
+
+  If all four conditions are satisfied -> output the termination signal.
+  If budget is exhausted (10 queries issued) -> output the termination signal regardless.
+
+---
+
+MISSING DATA HANDLING:
+
+If a required evidence category is absent after exhausting all budget:
+  - Survival/covenant: if no filing language found after 2 phase 1 queries, note mentally
+    that cash_runway_months will rely solely on the pre-computed value in the metrics block.
+  - Variant perception: if no divergent metric is found in any retrieved chunk, note
+    mentally that variant_perception will be absent -> conviction cap of 6.0 will apply
+    and verdict cannot be LONG in the final memo.
+  - Repricing catalyst: if no time-bound event is found in any chunk, note mentally that
+    repricing_catalyst will be "unavailable from source documents" -> SHORT verdict is
+    blocked regardless of score.
+  - Do not invent evidence. An absent field is always preferable to an unsupported claim.
+
+---
+
+EVIDENCE STANDARDS:
+
+Every major claim in the final memo must be grounded in a chunk retrieved in this phase.
+This means:
+  - Do not stop retrieval until you have chunks that can support: company_overview,
+    at least 3 bull thesis points, at least 4 bear thesis failure modes, variant_perception
+    (with a specific metric and value), repricing_catalyst (with a timeframe), and
+    cash_runway_months (or a clean bill of financial health).
+  - If a retrieved chunk does not contain specific numbers, dates, or quoted language,
+    it is low-signal. Note this mentally and consider whether a more targeted follow-up
+    query would retrieve higher-quality evidence.
+  - Chunks with no relevant text (boilerplate, table of contents, legal disclaimers) do
+    not count toward evidence coverage. Assess chunk quality before marking a field covered.
+
+---
+
+TERMINATION:
+
+When the quality filter passes (all four conditions satisfied) OR when 10 queries have
+been issued, output exactly the following JSON object and nothing else:
+
+{"status": "retrieval_complete"}
+
+No markdown. No code fences. No explanatory text before or after. A single valid JSON
+object on a single line.
+
+Do not write any analysis, scoring, or memo draft before outputting the termination
+signal. This phase ends at retrieval_complete. The memo-writing phase is separate."""
+
+
+# ── ReAct Loop ────────────────────────────────────────────────────────────────
+
+def _format_retrieved_chunks(chunks: list[dict]) -> str:
+    """Format retrieved chunks with source labels and similarity scores."""
+    if not chunks:
+        return "[No chunks retrieved]"
+    lines = []
+    for i, chunk in enumerate(chunks, 1):
+        doc_type = chunk.get("doc_type", "unknown")
+        section = chunk.get("section", "")
+        similarity = chunk.get("similarity", 0)
+        source_label = f"{doc_type}" + (f" — {section}" if section else "")
+        lines.append(
+            f"[{i}] Source: {source_label} | Similarity: {similarity:.3f}\n"
+            f"{chunk.get('content', '')}"
+        )
+    return "\n\n---\n\n".join(lines)
+
+
+def _run_agentic_retrieval(
+    ticker: str,
+    structured_block: str,
+    azure_client: AzureOpenAI,
+) -> tuple[list[dict], dict]:
+    """
+    ReAct agentic retrieval loop.
+    Azure OpenAI iteratively issues search_documents tool calls against pgvector.
+    Returns (deduplicated chunks, azure_usage_dict).
+
+    On any failure: logs warning, returns ([], {}) so caller falls back gracefully.
+    """
+    system_prompt = _build_react_system_prompt()
+    initial_user_msg = (
+        f"Company: {ticker}\n\n"
+        f"STRUCTURED DATA (already available — do not search for this):\n"
+        f"{structured_block}\n\n"
+        f"Now use search_documents to gather the narrative evidence you need from "
+        f"SEC filings and earnings transcripts. Follow the search strategy in your instructions."
+    )
+
+    messages = [{"role": "user", "content": initial_user_msg}]
+    all_chunks: list[dict] = []
+    seen_chunk_ids: set[str] = set()
+    azure_input_tokens = 0
+    azure_output_tokens = 0
+
+    try:
+        for turn in range(MAX_TURNS):
+            response = azure_client.chat.completions.create(
+                model=AZURE_DEPLOY,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+                tools=[SEARCH_TOOL],
+                tool_choice="auto",
+                temperature=0.1,
+                max_tokens=1500,
+            )
+
+            # Accumulate token usage per turn
+            if response.usage:
+                azure_input_tokens += response.usage.prompt_tokens
+                azure_output_tokens += response.usage.completion_tokens
+                print(
+                    f"  [ReAct turn {turn+1}] "
+                    f"in={response.usage.prompt_tokens:,}  "
+                    f"out={response.usage.completion_tokens:,}  "
+                    f"chunks_so_far={len(all_chunks)}"
+                )
+
+            choice = response.choices[0]
+            msg = choice.message
+
+            # Append assistant message to history
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in (msg.tool_calls or [])
+                ] or None,
+            })
+
+            # Check termination
+            if choice.finish_reason == "stop" or not msg.tool_calls:
+                content = msg.content or ""
+                if "retrieval_complete" in content or not msg.tool_calls:
+                    logger.info("_run_agentic_retrieval(%s): terminated at turn %d", ticker, turn + 1)
+                    break
+
+            # Process tool calls
+            tool_results = []
+            for tool_call in (msg.tool_calls or []):
+                if tool_call.function.name != "search_documents":
+                    continue
+
+                try:
+                    tool_input = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    tool_input = {}
+
+                query = tool_input.get("query", "")
+                doc_types = tool_input.get("doc_types") or None
+                n = min(int(tool_input.get("n", 4)), 8)
+
+                print(f"    → search_documents({query!r}, doc_types={doc_types}, n={n})")
+
+                chunks: list[dict] = []
+                if query:
+                    try:
+                        chunks = search_similar(query, ticker=ticker, doc_types=doc_types, n=n)
+                    except Exception as exc:
+                        logger.warning(
+                            "_run_agentic_retrieval(%s): search_similar failed — %s", ticker, exc
+                        )
+
+                # Deduplicate by chunk id
+                new_chunks = []
+                for c in chunks:
+                    chunk_id = str(c.get("id", ""))
+                    if chunk_id and chunk_id not in seen_chunk_ids:
+                        seen_chunk_ids.add(chunk_id)
+                        all_chunks.append(c)
+                        new_chunks.append(c)
+
+                print(f"      ↳ {len(new_chunks)} new chunks (total unique: {len(all_chunks)})")
+
+                tool_result_content = _format_retrieved_chunks(new_chunks) if new_chunks else "[No new results]"
+                tool_results.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "content": tool_result_content,
+                })
+
+            if tool_results:
+                messages.extend(tool_results)
+            elif not msg.tool_calls:
+                break
+
+        else:
+            logger.warning(
+                "_run_agentic_retrieval(%s): hit MAX_TURNS=%d without termination signal",
+                ticker, MAX_TURNS,
+            )
+
+    except Exception as exc:
+        logger.warning("_run_agentic_retrieval(%s): loop failed — %s; proceeding without retrieval", ticker, exc)
+        return [], {}
+
+    logger.info("_run_agentic_retrieval(%s): collected %d unique chunks", ticker, len(all_chunks))
+    usage = {"phase": "ReAct retrieval (Azure)", "input": azure_input_tokens, "output": azure_output_tokens}
+    return all_chunks, usage
+
+
+def _build_synthesis_message(
+    ticker: str,
+    structured_block: str,
+    retrieved_chunks: list[dict],
+) -> str:
+    """Assemble final synthesis prompt combining structured data and retrieved narrative chunks."""
+    if retrieved_chunks:
+        chunks_section = (
+            f"=== RETRIEVED DOCUMENT EVIDENCE ===\n"
+            f"(from SEC filings and earnings transcripts, retrieved via semantic search)\n\n"
+            f"{_format_retrieved_chunks(retrieved_chunks)}"
+        )
+    else:
+        chunks_section = "[No narrative documents retrieved — base memo on structured data only]"
+
+    return (
+        f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
+        f"{structured_block}\n\n"
+        f"{chunks_section}\n\n"
+        f"Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.\n"
+        f"Use today's date ({date.today().isoformat()}) for the \"date\" field.\n"
+    )
+
+
 # ── Red Team ─────────────────────────────────────────────────────────────────
 
 def _build_red_team_system_prompt() -> str:
@@ -796,45 +1246,37 @@ SUMMARY:
 Now argue aggressively against this bull thesis. Find 5 distinct failure modes the memo misses or underweights."""
 
 
-def _run_red_team(client, memo: dict, raw_context: dict) -> list[str]:
+def _run_red_team(client: anthropic.Anthropic, memo: dict, raw_context: dict) -> tuple[list[str], dict]:
     """
     Second LLM call: adversarial critique of the bull thesis.
-    Returns a list of 5 risk strings, or an empty list on failure (never blocks the main memo).
+    Returns (risks, usage_dict). Risks is empty list on failure — never blocks the main memo.
     """
     try:
-        # ACTIVE: Claude API call
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2000,
-            temperature=0.5,  # slightly higher — adversarial creativity benefits from more variance
+            temperature=0.3,
             system=_build_red_team_system_prompt(),
             messages=[{"role": "user", "content": _build_red_team_user_message(memo, raw_context)}],
         )
         raw = response.content[0].text or ""
-
-        # ── CLAUDE SWAP ────────────────────────────────────────────────────────
-        # Azure OpenAI (GPT-4.1) — commented out
-        # response = client.chat.completions.create(
-        #     model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        #     messages=[
-        #         {"role": "system", "content": _build_red_team_system_prompt()},
-        #         {"role": "user", "content": _build_red_team_user_message(memo, raw_context)},
-        #     ],
-        #     temperature=0.5,
-        #     max_tokens=2000,
-        # )
-        # raw = response.choices[0].message.content or ""
-        # ──────────────────────────────────────────────────────────────────────
+        usage = {
+            "phase": "Red team (Claude)",
+            "input": response.usage.input_tokens,
+            "output": response.usage.output_tokens,
+            "cache_write": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            "cache_read": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+        }
 
         cleaned = _strip_code_fences(raw)
         parsed = json.loads(cleaned)
         risks = parsed.get("red_team_risks", [])
         if isinstance(risks, list) and all(isinstance(r, str) for r in risks):
-            return risks
-        return []
-    except Exception:
-        # Red team failure must never block the main memo from being returned
-        return []
+            return risks, usage
+        return [], usage
+    except Exception as exc:
+        logger.warning("_run_red_team(%s): failed — %s", memo.get("ticker", "?"), exc)
+        return [], {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -843,6 +1285,26 @@ def _strip_code_fences(text: str) -> str:
     text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.I)
     text = re.sub(r"\s*```$", "", text.strip())
     return text.strip()
+
+
+def _print_usage_summary(ticker: str, usage_log: list[dict]) -> None:
+    """Print a token usage table to stdout after every research run."""
+    total_in = sum(u["input"] for u in usage_log)
+    total_out = sum(u["output"] for u in usage_log)
+    sep = "─" * 62
+    print(f"\n{'='*62}")
+    print(f"  TOKEN USAGE — {ticker}")
+    print(f"{'='*62}")
+    print(f"  {'Phase':<28}  {'Input':>7}  {'Output':>7}  {'Total':>8}")
+    print(f"  {sep}")
+    for u in usage_log:
+        extra = ""
+        if u.get("cache_write") or u.get("cache_read"):
+            extra = f"  [cache wr={u.get('cache_write',0):,} rd={u.get('cache_read',0):,}]"
+        print(f"  {u['phase']:<28}  {u['input']:>7,}  {u['output']:>7,}  {u['input']+u['output']:>8,}{extra}")
+    print(f"  {sep}")
+    print(f"  {'TOTAL':<28}  {total_in:>7,}  {total_out:>7,}  {total_in+total_out:>8,}")
+    print(f"{'='*62}\n")
 
 
 def _validate_memo(memo: dict) -> InvestmentMemo:
@@ -855,56 +1317,150 @@ def _validate_memo(memo: dict) -> InvestmentMemo:
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
-def run_research(ticker: str) -> dict:
+def run_research(ticker: str, use_cache: bool = False) -> dict:
     """
-    Full pipeline: fetch data → build prompt → call Claude → validate → return memo dict.
-    Attaches raw fetcher outputs as '_raw_docs' key (stripped before DB insert in vector_store).
+    5-phase hybrid B+D pipeline:
+      Phase 0: Fetch all 5 data sources (skipped when use_cache=True).
+      Phase 1: Index narrative into pgvector (skipped when use_cache=True).
+      Phase 2: Build structured block.
+      Phase 3: ReAct agentic retrieval loop (Azure OpenAI; fallback-safe).
+      Phase 4: Synthesis call — Claude (claude-sonnet-4-6).
+      Phase 5: Red team call — Claude (claude-sonnet-4-6).
+
+    use_cache=True: pulls raw_docs from the most recent Supabase memo for this ticker
+    and skips all API fetching and pgvector re-indexing. pgvector chunks from the
+    previous run are still queried in Phase 3.
+
     Raises ResearchAgentError on LLM parse / validation failure.
+    Phase 1 and Phase 3 failures are non-fatal — degrade gracefully.
     """
     ticker = ticker.upper().strip()
 
-    sec_data = fetch_sec_filings(ticker)
-    news_data = fetch_news(ticker)
-    transcript_data = fetch_transcripts(ticker)
-    form4_data = fetch_form4(ticker)
-    fmp_data = fetch_fmp(ticker)
+    # ── Phase 0: Fetch (or load from cache) ──────────────────────────────────
+    if use_cache:
+        from backend.memory.vector_store import get_memo
+        cached = get_memo(ticker)
+        if not cached or not cached.get("raw_docs"):
+            raise ResearchAgentError(
+                f"use_cache=True but no cached raw_docs found for {ticker}. "
+                "Run a full fetch first."
+            )
+        raw = cached["raw_docs"]
+        sec_data = raw.get("sec", {})
+        news_data = raw.get("news", {})
+        transcript_data = raw.get("transcripts", {})
+        form4_data = raw.get("form4", {})
+        fmp_data = raw.get("fmp", {})
+        logger.info("run_research(%s): using cached raw_docs (memo id=%s)", ticker, cached.get("id"))
+        print(f"\n{'─'*62}")
+        print(f"  CACHE MODE — skipping fetch + indexing ({ticker})")
+        print(f"{'─'*62}")
+        indexing_ok = True  # assume chunks already in pgvector from prior run
+    else:
+        sec_data = fetch_sec_filings(ticker)
+        news_data = fetch_news(ticker)
+        transcript_data = fetch_transcripts(ticker)
+        form4_data = fetch_form4(ticker)
+        fmp_data = fetch_fmp(ticker)
+
+        # ── Phase 1: Index narrative into pgvector ────────────────────────────
+        try:
+            from backend.memory.document_indexer import index_documents
+            n_chunks = index_documents(ticker, sec_data, transcript_data)
+            logger.info("run_research(%s): indexed %d chunks", ticker, n_chunks)
+            indexing_ok = n_chunks > 0
+        except Exception as exc:
+            logger.warning(
+                "run_research(%s): indexing failed (%s) — falling back to structured-only synthesis",
+                ticker, exc,
+            )
+            indexing_ok = False
+
+    # ── Phase 2: Build structured block ──────────────────────────────────────
+    structured_block = _build_structured_block(ticker, sec_data, news_data, form4_data, fmp_data)
+
+    usage_log: list[dict] = []
+
+    # ── Phase 3: ReAct agentic retrieval ─────────────────────────────────────
+    retrieved_chunks: list[dict] = []
+    if indexing_ok:
+        print(f"\n{'─'*62}")
+        print(f"  PHASE 3 — ReAct retrieval ({ticker})")
+        print(f"{'─'*62}")
+        try:
+            azure_client = _build_azure_client()
+            retrieved_chunks, react_usage = _run_agentic_retrieval(ticker, structured_block, azure_client)
+            if react_usage:
+                usage_log.append(react_usage)
+        except Exception as exc:
+            logger.warning(
+                "run_research(%s): agentic retrieval failed (%s) — proceeding without retrieved chunks",
+                ticker, exc,
+            )
+
+    # ── Phase 4: Synthesis (Claude) ───────────────────────────────────────────
+    print(f"\n{'─'*62}")
+    print(f"  PHASE 4 — Synthesis ({ticker})")
+    print(f"{'─'*62}")
 
     client = _build_client()
-    user_message, transcript_signal = _build_user_message(
-        ticker, sec_data, news_data, transcript_data, form4_data, fmp_data
-    )
-
-    # ACTIVE: Claude API call
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        temperature=0.3,
-        system=_build_system_prompt(),
-        messages=[
-            {"role": "user", "content": user_message},
-        ],
-    )
-    raw_content = response.content[0].text or ""
+    synthesis_message = _build_synthesis_message(ticker, structured_block, retrieved_chunks)
+    response = client.messages.create(                                                       
+      model="claude-sonnet-4-6",                            
+      max_tokens=16000,
+      temperature=1,           # required for extended thinking                            
+      thinking={"type": "enabled", "budget_tokens": 10000},
+      system=_build_system_prompt(),                                                       
+      messages=[{"role": "user", "content": synthesis_message}],                           
+  ) 
+    # response = client.messages.create(
+    #     model="claude-sonnet-4-6",
+    #     max_tokens=8000,
+    #     temperature=0.3,
+    #     system=_build_system_prompt(),
+    #     messages=[{"role": "user", "content": synthesis_message}],
+    # )
+    raw_content = ""
+    for block in response.content:
+        if block.type == "thinking":
+            print(f"\n{'='*62}\n  SYNTHESIS THINKING — {ticker}\n{'='*62}")
+            print(block.thinking)
+            print(f"{'='*62}\n")
+        elif block.type == "text":
+            raw_content = block.text or ""
+    usage_log.append({
+        "phase": "Synthesis (Claude)",
+        "input": response.usage.input_tokens,
+        "output": response.usage.output_tokens,
+        "cache_write": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+    })
 
     # ── CLAUDE SWAP ───────────────────────────────────────────────────────────
-    # Azure OpenAI (GPT-4.1) — commented out. Note: Azure uses messages[] for
-    # the system prompt, Claude uses system= as a top-level param.
+    # Azure OpenAI synthesis — commented out
     #
-    # response = client.chat.completions.create(
-    #     model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    # azure = _build_azure_client()
+    # az_response = azure.chat.completions.create(
+    #     model=AZURE_DEPLOY,
     #     messages=[
     #         {"role": "system", "content": _build_system_prompt()},
-    #         {"role": "user", "content": user_message},
+    #         {"role": "user", "content": synthesis_message},
     #     ],
     #     temperature=0.3,
     #     max_tokens=4000,
     # )
-    # raw_content = response.choices[0].message.content or ""
+    # raw_content = az_response.choices[0].message.content or ""
+    # if az_response.usage:
+    #     usage_log.append({
+    #         "phase": "Synthesis (Azure)",
+    #         "input": az_response.usage.prompt_tokens,
+    #         "output": az_response.usage.completion_tokens,
+    #     })
     # ─────────────────────────────────────────────────────────────────────────
 
     cleaned = _strip_code_fences(raw_content)
 
-    # Robust JSON extraction — handles rare cases where GPT-4.1 prepends a sentence
+    # Robust JSON extraction — handles rare cases where model prepends a sentence
     try:
         memo = json.loads(cleaned)
     except json.JSONDecodeError:
@@ -922,11 +1478,14 @@ def run_research(ticker: str) -> dict:
 
     memo["ticker"] = ticker
     validated = _validate_memo(memo)
-
     result = validated.model_dump(exclude_none=True)
 
-    # ── Red Team: second adversarial LLM call ─────────────────────────────────
-    # Collect negative management turns across all transcripts for red team context
+    # ── Phase 5: Red Team ─────────────────────────────────────────────────────
+    print(f"\n{'─'*62}")
+    print(f"  PHASE 5 — Red team ({ticker})")
+    print(f"{'─'*62}")
+
+    _, transcript_signal = _format_transcripts_structured(transcript_data)
     all_negative_turns: list[dict] = []
     for t in transcript_data.get("transcripts", {}).values():
         for turn in t.get("turns", []):
@@ -944,10 +1503,14 @@ def run_research(ticker: str) -> dict:
         "transcript_signal": transcript_signal,
         "negative_turns": all_negative_turns[:3],
     }
-    red_team_risks = _run_red_team(client, result, raw_context)
+    red_team_risks, rt_usage = _run_red_team(client, result, raw_context)
     if red_team_risks:
         result["red_team_risks"] = red_team_risks
-    # ─────────────────────────────────────────────────────────────────────────
+    if rt_usage:
+        usage_log.append(rt_usage)
+
+    # ── Token usage summary ───────────────────────────────────────────────────
+    _print_usage_summary(ticker, usage_log)
 
     result["_raw_docs"] = {
         "sec": sec_data,

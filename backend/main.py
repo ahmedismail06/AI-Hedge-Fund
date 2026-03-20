@@ -56,14 +56,15 @@ def health():
 
 
 @app.post("/research/{ticker}")
-def trigger_research(ticker: str):
+def trigger_research(ticker: str, use_cache: bool = False):
     """
-    Run the full research pipeline for a ticker.
-    Fetches SEC filings, transcripts, and news → calls GPT-4.1 → stores memo.
-    Expect 15–45s response time.
+    Run the research pipeline for a ticker.
+    use_cache=true: skips API fetching and re-indexing — uses raw_docs from the most
+    recent Supabase memo and queries existing pgvector chunks. Fast (~10s vs 60s+).
+    use_cache=false (default): full fetch + index + synthesize pipeline.
     """
     try:
-        memo = run_research(ticker)
+        memo = run_research(ticker, use_cache=use_cache)
     except ResearchAgentError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
