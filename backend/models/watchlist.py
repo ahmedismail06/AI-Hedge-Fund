@@ -5,7 +5,7 @@ Schema is informed by /equity-research:screen output structure (see SKILLS_INTEG
 Top-5 entries per daily screen run are passed to the Research Agent.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -20,6 +20,8 @@ class FactorScores(BaseModel):
 
 
 class WatchlistEntry(BaseModel):
+    """Screener output entry — one row per ticker per daily run. Top-5 are queued for research."""
+
     ticker: str
     date: str  # YYYY-MM-DD — screen run date
     composite_score: float = Field(ge=0.0, le=10.0)  # ≥7.0 to qualify
@@ -28,3 +30,8 @@ class WatchlistEntry(BaseModel):
     market_cap_m: Optional[float] = None  # market cap in $M
     adv_k: Optional[float] = None  # average daily volume in $K
     sector: Optional[str] = None
+    beneish_m_score: Optional[float] = None
+    beneish_flag: Optional[Literal["EXCLUDED", "FLAGGED", "CLEAN", "INSUFFICIENT_DATA"]] = None
+    insider_signal: bool = False
+    regime: Optional[str] = None
+    queued_for_research: bool = False

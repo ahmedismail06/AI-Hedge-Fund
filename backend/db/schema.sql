@@ -1,0 +1,119 @@
+-- Research Engine: memos table
+-- Run this in the Supabase SQL editor to create the table.
+
+create table if not exists memos (
+    id              uuid primary key default gen_random_uuid(),
+    ticker          text not null,
+    date            date not null,
+    verdict         text not null check (verdict in ('LONG', 'SHORT', 'AVOID')),
+    conviction_score numeric(4, 2) not null check (conviction_score >= 0 and conviction_score <= 10),
+    memo_json       jsonb not null,
+    raw_docs        jsonb,
+    status          text not null default 'PENDING'
+                        check (status in ('PENDING', 'APPROVED', 'REJECTED', 'WATCHLIST')),
+    created_at      timestamptz not null default now()
+);
+
+-- Index for fast lookups by ticker (latest memo)
+create index if not exists memos_ticker_created_idx on memos (ticker, created_at desc);
+
+-- Index for watchlist queries
+create index if not exists memos_status_idx on memos (status);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Agentic RAG: vector store for SEC filings and earnings transcripts
+-- Prerequisite: run `CREATE EXTENSION IF NOT EXISTS vector;` once in Supabase
+--               SQL editor before running this block.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- document_chunks: pgvector table for agentic retrieval
+-- doc_type allowed values: '10-K' | '10-Q' | 'transcript'
+create table if not exists document_chunks (
+    id           uuid primary key default gen_random_uuid(),
+    ticker       text not null,
+    doc_type     text not null,       -- '10-K' | '10-Q' | 'transcript'
+    section      text,                -- 'Item 1' | 'Item 7' | 'Q4_2025' | null
+    chunk_index  integer not null,
+    content      text not null,
+    token_count  integer,
+    embedding    vector(768),         -- BAAI/bge-base-en-v1.5 output dims
+    filing_date  date,
+    created_at   timestamptz not null default now(),
+    unique (ticker, doc_type, section, chunk_index)
+);
+
+-- IVFFlat index for fast approximate cosine similarity search
+create index if not exists document_chunks_embedding_idx
+    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+
+-- Index for ticker + doc_type filtering (WHERE clause in match_document_chunks)
+create index if not exists document_chunks_ticker_idx
+    on document_chunks (ticker, doc_type);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Screening System: watchlist table
+-- Stores daily screener output — ranked candidates + audit trail for EXCLUDED.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists watchlist (
+    id              uuid primary key default gen_random_uuid(),
+    run_date        date not null,
+    ticker          text not null,
+    composite_score numeric(5,3) not null,
+    quality_score   numeric(5,3) not null,
+    value_score     numeric(5,3) not null,
+    momentum_score  numeric(5,3) not null,
+    rank            integer not null,
+    market_cap_m    numeric(12,2),
+    adv_k           numeric(12,2),
+    sector          text,
+    regime          text not null,
+    beneish_m_score numeric(7,4),
+    beneish_flag    text check (beneish_flag in ('EXCLUDED', 'FLAGGED', 'CLEAN', 'INSUFFICIENT_DATA')),
+    insider_signal  boolean default false,
+    raw_factors     jsonb,
+    queued_for_research boolean default false,
+    created_at      timestamptz not null default now(),
+    unique (run_date, ticker)
+);
+
+create index if not exists watchlist_run_date_rank_idx on watchlist (run_date, rank asc);
+create index if not exists watchlist_ticker_idx on watchlist (ticker, run_date desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RPC function for cosine similarity search
+create or replace function match_document_chunks(
+    query_embedding  vector(768),
+    filter_ticker    text,
+    filter_doc_types text[],
+    match_count      int default 4
+)
+returns table (
+    id          uuid,
+    ticker      text,
+    doc_type    text,
+    section     text,
+    chunk_index integer,
+    content     text,
+    token_count integer,
+    filing_date date,
+    similarity  float
+)
+language sql stable
+as $$
+    select
+        dc.id,
+        dc.ticker,
+        dc.doc_type,
+        dc.section,
+        dc.chunk_index,
+        dc.content,
+        dc.token_count,
+        dc.filing_date,
+        1 - (dc.embedding <=> query_embedding) as similarity
+    from document_chunks dc
+    where dc.ticker = filter_ticker
+      and (filter_doc_types is null or dc.doc_type = any(filter_doc_types))
+    order by dc.embedding <=> query_embedding
+    limit match_count;
+$$;
