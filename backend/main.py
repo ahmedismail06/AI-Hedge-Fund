@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from contextlib import asynccontextmanager
+
 from backend.agents.research_agent import run_research, ResearchAgentError
 from backend.memory.vector_store import (
     store_memo,
@@ -15,8 +17,22 @@ from backend.memory.vector_store import (
     get_watchlist,
     update_memo_status,
 )
+from backend.screener.scheduler import create_screener_scheduler
 
-app = FastAPI(title="AI Hedge Fund API", version="0.1.0")
+_screener_scheduler = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _screener_scheduler
+    _screener_scheduler = create_screener_scheduler()
+    _screener_scheduler.start()
+    yield
+    if _screener_scheduler and _screener_scheduler.running:
+        _screener_scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="AI Hedge Fund API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -131,4 +147,45 @@ def update_status(memo_id: str, body: StatusUpdate):
     return {"memo_id": memo_id, "status": body.status}
 
 
-# WATCHFILES_IGNORE_PATHS=".venv" uvicorn backend.main:app --reload --reload-dir backend 
+
+# ── Screening ─────────────────────────────────────────────────────────────────
+
+
+@app.post("/screening/run")
+def trigger_screening(regime: str | None = None):
+    """
+    Manually trigger a screening run. Regime defaults to Supabase macro_briefings.
+    Useful for testing or ad-hoc re-runs outside the scheduled 4PM ET window.
+    """
+    from backend.agents.screening_agent import run_screening, ScreeningAgentError
+    try:
+        results = run_screening(regime=regime)
+    except ScreeningAgentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Screening pipeline error: {exc}")
+    return {"count": len(results), "results": results}
+
+
+@app.get("/screening/watchlist")
+def get_screener_watchlist(run_date: str | None = None, limit: int = 50):
+    """
+    Returns today's (or a specific run_date's) screener watchlist from Supabase.
+    run_date format: YYYY-MM-DD
+    """
+    from datetime import date as _date
+    from backend.memory.vector_store import _get_client
+    try:
+        client = _get_client()
+        query = client.table("watchlist").select("*").order("rank", desc=False).limit(limit)
+        if run_date:
+            query = query.eq("run_date", run_date)
+        else:
+            query = query.eq("run_date", _date.today().isoformat())
+        result = query.execute()
+        return result.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# WATCHFILES_IGNORE_PATHS=".venv" uvicorn backend.main:app --reload --reload-dir backend
