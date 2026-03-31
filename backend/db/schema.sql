@@ -81,6 +81,46 @@ create index if not exists watchlist_run_date_rank_idx on watchlist (run_date, r
 create index if not exists watchlist_ticker_idx on watchlist (ticker, run_date desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Macro Intelligence Engine: macro_briefings table
+-- Stores daily MacroBriefing output from the Macro Agent (7AM ET).
+-- Downstream agents read current regime via SELECT ... ORDER BY date DESC LIMIT 1.
+-- One authoritative record per trading day (UNIQUE on date).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists macro_briefings (
+    id                  uuid primary key default gen_random_uuid(),
+    date                date not null,
+    regime              text not null
+                            check (regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation')),
+    regime_score        numeric(6, 2) not null,
+    previous_regime     text
+                            check (previous_regime is null or previous_regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation')),
+    regime_changed      boolean not null default false,
+    growth_score        numeric(5, 4) not null,
+    inflation_score     numeric(5, 4) not null,
+    fed_score           numeric(5, 4) not null,
+    stress_score        numeric(5, 4) not null,
+    regime_confidence   numeric(4, 2) not null,
+    override_flag       boolean not null default false,
+    override_reason     text,
+    qualitative_summary text not null,
+    key_themes          jsonb not null default '[]'::jsonb,
+    portfolio_guidance  text not null,
+    indicator_scores    jsonb not null default '[]'::jsonb,
+    sector_tilts        jsonb,
+    upcoming_events     jsonb,
+    briefing_json       jsonb not null,
+    created_at          timestamptz not null default now(),
+    unique (date)
+);
+
+create index if not exists macro_briefings_date_idx
+    on macro_briefings (date desc);
+
+create index if not exists macro_briefings_created_idx
+    on macro_briefings (created_at desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
 create or replace function match_document_chunks(
     query_embedding  vector(768),
