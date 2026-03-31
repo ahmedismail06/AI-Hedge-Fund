@@ -18,21 +18,28 @@ from backend.memory.vector_store import (
     update_memo_status,
 )
 from backend.screener.scheduler import create_screener_scheduler
+from backend.macro.scheduler import create_macro_scheduler
+from backend.api.macro import router as macro_router
 
 _screener_scheduler = None
+_macro_scheduler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _screener_scheduler
+    global _screener_scheduler, _macro_scheduler
     _screener_scheduler = create_screener_scheduler()
+    _macro_scheduler = create_macro_scheduler()
     _screener_scheduler.start()
+    _macro_scheduler.start()
     yield
-    if _screener_scheduler and _screener_scheduler.running:
-        _screener_scheduler.shutdown(wait=False)
+    for sched in (_screener_scheduler, _macro_scheduler):
+        if sched and sched.running:
+            sched.shutdown(wait=False)
 
 
 app = FastAPI(title="AI Hedge Fund API", version="0.1.0", lifespan=lifespan)
+app.include_router(macro_router)
 
 app.add_middleware(
     CORSMiddleware,
