@@ -21,6 +21,7 @@ import logging
 import os
 import re
 from datetime import date
+from typing import Optional
 from dotenv import load_dotenv
 from openai import AzureOpenAI  # ReAct loop only
 from pydantic import ValidationError
@@ -1134,10 +1135,41 @@ def _run_agentic_retrieval(
     return all_chunks, usage
 
 
+def _read_macro_context() -> Optional[str]:
+    """Return a formatted macro regime block for injection into the synthesis message.
+    Returns None if macro_briefings is empty or the query fails (non-blocking)."""
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        result = (
+            client.table("macro_briefings")
+            .select("regime,regime_confidence,growth_score,inflation_score,fed_score,stress_score,date")
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return None
+        row = result.data[0]
+        return (
+            f"CURRENT MACRO REGIME: {row['regime']} "
+            f"(confidence: {row['regime_confidence']:.1f}/10, as of {row['date']})\n"
+            f"Sub-scores — Growth: {row['growth_score']:.2f}, "
+            f"Inflation: {row['inflation_score']:.2f}, "
+            f"Fed: {row['fed_score']:.2f}, "
+            f"Stress: {row['stress_score']:.2f}\n"
+            f"Use this regime to ground the macro_sensitivity field with today's actual conditions."
+        )
+    except Exception as exc:
+        logger.warning("_read_macro_context: failed — %s", exc)
+        return None
+
+
 def _build_synthesis_message(
     ticker: str,
     structured_block: str,
     retrieved_chunks: list[dict],
+    macro_context: Optional[str] = None,
 ) -> str:
     """Assemble final synthesis prompt combining structured data and retrieved narrative chunks."""
     if retrieved_chunks:
@@ -1149,13 +1181,16 @@ def _build_synthesis_message(
     else:
         chunks_section = "[No narrative documents retrieved — base memo on structured data only]"
 
-    return (
+    message = (
         f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
         f"{structured_block}\n\n"
         f"{chunks_section}\n\n"
         f"Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.\n"
         f"Use today's date ({date.today().isoformat()}) for the \"date\" field.\n"
     )
+    if macro_context:
+        message = macro_context + "\n\n" + message
+    return message
 
 
 # ── Red Team ─────────────────────────────────────────────────────────────────
@@ -1335,6 +1370,7 @@ def run_research(ticker: str, use_cache: bool = False) -> dict:
     Phase 1 and Phase 3 failures are non-fatal — degrade gracefully.
     """
     ticker = ticker.upper().strip()
+    macro_context = _read_macro_context()  # None if macro pipeline hasn't run yet — non-blocking
 
     # ── Phase 0: Fetch (or load from cache) ──────────────────────────────────
     if use_cache:
@@ -1404,7 +1440,7 @@ def run_research(ticker: str, use_cache: bool = False) -> dict:
     print(f"{'─'*62}")
 
     client = _build_client()
-    synthesis_message = _build_synthesis_message(ticker, structured_block, retrieved_chunks)
+    synthesis_message = _build_synthesis_message(ticker, structured_block, retrieved_chunks, macro_context)
     response = client.messages.create(                                                       
       model="claude-sonnet-4-6",                            
       max_tokens=16000,
