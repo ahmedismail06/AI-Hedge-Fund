@@ -42,11 +42,9 @@ class RawIndicators:
     gdp_yoy: Optional[float] = None
     """% YoY change in real GDP (e.g. 2.8)."""
 
-    ism_mfg: Optional[float] = None
-    """ISM Manufacturing PMI level (e.g. 52.3)."""
-
     ism_svc: Optional[float] = None
-    """ISM Services PMI level (e.g. 54.1)."""
+    """ISM Services PMI level (50-centered; >50 = expansion).
+    Manufacturing PMI slot is empty — ISM removed NAPM from FRED; no valid proxy available."""
 
     jobless_claims: Optional[float] = None
     """Initial jobless claims — actual count, NOT thousands (e.g. 220000)."""
@@ -150,7 +148,6 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
     return RawIndicators(
         # Growth
         gdp_yoy=fred.yoy_changes.get("gdp"),
-        ism_mfg=fred.raw_values.get("ism_mfg"),
         ism_svc=fred.raw_values.get("ism_svc"),
         jobless_claims=jobless_actual,
         payrolls_level=fred.raw_values.get("payrolls"),
@@ -211,6 +208,8 @@ def _score_growth(ind: RawIndicators) -> float:
     signals: list[Optional[float]] = []
 
     # GDP YoY %
+    # Thresholds: >2.5% strong expansion; 1-2.5% moderate; 0-1% stall speed;
+    # -1.5 to 0% mild contraction (not yet recession); < -1.5% severe contraction.
     if ind.gdp_yoy is not None:
         g = ind.gdp_yoy
         if g > 2.5:
@@ -219,28 +218,30 @@ def _score_growth(ind: RawIndicators) -> float:
             signals.append(0.5)
         elif g >= 0.0:
             signals.append(0.0)
+        elif g >= -1.5:
+            signals.append(-0.5)   # mild contraction — one negative quarter ≠ recession
         else:
-            signals.append(-1.0)
+            signals.append(-1.0)   # severe / confirmed contraction
         logger.debug("growth/gdp_yoy=%.2f → signal=%.1f", g, signals[-1])
     else:
         signals.append(None)
 
-    # ISM composite (avg of mfg + svc if both present, else whichever exists)
-    ism_values = [v for v in [ind.ism_mfg, ind.ism_svc] if v is not None]
-    if ism_values:
-        ism_avg = sum(ism_values) / len(ism_values)
-        if ism_avg > 55:
-            ism_signal: Optional[float] = 1.0
-        elif ism_avg >= 52:
-            ism_signal = 0.5
-        elif ism_avg >= 50:
-            ism_signal = 0.0
-        elif ism_avg >= 48:
-            ism_signal = -0.5
+    # ISM Services PMI (50-centered standard PMI scale).
+    # Mfg PMI slot is empty — no valid source available.
+    if ind.ism_svc is not None:
+        svc = ind.ism_svc
+        if svc > 55:
+            svc_signal: Optional[float] = 1.0
+        elif svc >= 52:
+            svc_signal = 0.5
+        elif svc >= 50:
+            svc_signal = 0.0
+        elif svc >= 48:
+            svc_signal = -0.5
         else:
-            ism_signal = -1.0
-        signals.append(ism_signal)
-        logger.debug("growth/ism_avg=%.2f → signal=%.1f", ism_avg, ism_signal)
+            svc_signal = -1.0
+        signals.append(svc_signal)
+        logger.debug("growth/ism_svc=%.1f → signal=%.1f", svc, svc_signal)
     else:
         signals.append(None)
 
@@ -265,14 +266,18 @@ def _score_growth(ind: RawIndicators) -> float:
     else:
         signals.append(None)
 
-    # Jobless claims (inverted — lower = better)
+    # Jobless claims (inverted — lower = better).
+    # Thresholds calibrated to 2020s labor market: <200K = historically tight;
+    # 200-240K = solid; 240-280K = neutral; 280-320K = softening; >320K = deteriorating.
     if ind.jobless_claims is not None:
         jc = ind.jobless_claims
-        if jc < 220_000:
+        if jc < 200_000:
             j_signal: Optional[float] = 1.0
-        elif jc <= 260_000:
+        elif jc < 240_000:
+            j_signal = 0.5
+        elif jc <= 280_000:
             j_signal = 0.0
-        elif jc <= 300_000:
+        elif jc <= 320_000:
             j_signal = -0.5
         else:
             j_signal = -1.0
@@ -312,8 +317,10 @@ def _score_inflation(ind: RawIndicators) -> float:
             return 0.5
         elif value >= 2:
             return 0.0
+        elif value >= 1:
+            return -0.5   # below Fed target — disinflationary
         else:
-            return -0.5
+            return -1.0   # < 1%: significant undershoot / deflation risk
 
     # CPI YoY
     if ind.cpi_yoy is not None:
@@ -340,8 +347,10 @@ def _score_inflation(ind: RawIndicators) -> float:
             s = 0.5
         elif ppi >= 1:
             s = 0.0
+        elif ppi >= 0:
+            s = -0.5   # flat producer prices
         else:
-            s = -0.5
+            s = -1.0   # outright PPI deflation
         signals.append(s)
         logger.debug("inflation/ppi_yoy=%.2f → signal=%.1f", ppi, s)
     else:
@@ -356,8 +365,10 @@ def _score_inflation(ind: RawIndicators) -> float:
             s = 0.5
         elif pce >= 2.0:
             s = 0.0
+        elif pce >= 1.5:
+            s = -0.5   # below Fed 2% target
         else:
-            s = -0.5
+            s = -1.0   # significantly below target / deflationary territory
         signals.append(s)
         logger.debug("inflation/pce_yoy=%.2f → signal=%.1f", pce, s)
     else:
@@ -372,8 +383,10 @@ def _score_inflation(ind: RawIndicators) -> float:
             s = 0.5
         elif be >= 2.0:
             s = 0.0
+        elif be >= 1.5:
+            s = -0.5   # expectations anchored below target
         else:
-            s = -0.5
+            s = -1.0   # market pricing deflation / de-anchored to downside
         signals.append(s)
         logger.debug("inflation/breakeven_5y=%.2f → signal=%.1f", be, s)
     else:
@@ -453,9 +466,12 @@ def _score_stress(ind: RawIndicators) -> float:
     float
         Stress score in [-1.0, +1.0].
     """
-    signals: list[Optional[float]] = []
+    vix_score: Optional[float] = None
+    hy_score: Optional[float] = None
+    dxy_score: Optional[float] = None
+    spx_score: Optional[float] = None
 
-    # VIX
+    # VIX — primary stress indicator (weight 1.0)
     if ind.vix is not None:
         vix = ind.vix
         if vix > 30:
@@ -464,30 +480,32 @@ def _score_stress(ind: RawIndicators) -> float:
             s = 0.5
         elif vix >= 15:
             s = 0.0
+        elif vix >= 12:
+            s = -0.5   # calm
         else:
-            s = -0.5
-        signals.append(s)
+            s = -1.0   # extreme complacency (historically precedes vol spikes)
+        vix_score = s
         logger.debug("stress/vix=%.2f → signal=%.1f", vix, s)
-    else:
-        signals.append(None)
 
-    # HY Spread (bps OAS)
+    # HY Spread (bps OAS — ICE BofA BAMLH0A0HYM2, already converted to bps in build_raw_indicators).
+    # Thresholds: >600 crisis; 450-600 stressed; 300-450 normal; 200-300 tight; <200 boom-time.
+    # Primary stress indicator (weight 1.0).
     if ind.hy_spread is not None:
         hy = ind.hy_spread
         if hy > 600:
             s = 1.0
-        elif hy >= 400:
+        elif hy >= 450:
             s = 0.5
-        elif hy >= 250:
+        elif hy >= 300:
             s = 0.0
+        elif hy >= 200:
+            s = -0.5   # tight credit — benign but historically precedes mean reversion
         else:
-            s = -0.5
-        signals.append(s)
+            s = -1.0   # extremely tight / boom-time credit
+        hy_score = s
         logger.debug("stress/hy_spread=%.1f bps → signal=%.1f", hy, s)
-    else:
-        signals.append(None)
 
-    # DXY level
+    # DXY level — secondary indicator (weight 0.5); capped at ±0.5 by step function design.
     if ind.dxy is not None:
         dxy = ind.dxy
         if dxy > 108:
@@ -496,12 +514,10 @@ def _score_stress(ind: RawIndicators) -> float:
             s = 0.0
         else:
             s = -0.5
-        signals.append(s)
+        dxy_score = s
         logger.debug("stress/dxy=%.2f → signal=%.1f", dxy, s)
-    else:
-        signals.append(None)
 
-    # SPX vs 200-day SMA
+    # SPX vs 200-day SMA — secondary indicator (weight 0.5).
     if ind.spx_pct_above_sma is not None:
         pct = ind.spx_pct_above_sma
         if pct < -5.0:
@@ -512,12 +528,21 @@ def _score_stress(ind: RawIndicators) -> float:
             s = 0.0
         else:
             s = -0.5
-        signals.append(s)
+        spx_score = s
         logger.debug("stress/spx_pct_above_sma=%.2f%% → signal=%.1f", pct, s)
-    else:
-        signals.append(None)
 
-    score = _safe_avg(signals)
+    # Weighted aggregation: VIX and HY are primary (w=1.0); DXY and SPX are secondary (w=0.5).
+    # Denominator is the sum of weights for present (non-None) indicators, so missing data
+    # degrades gracefully without distorting the average.
+    present = [
+        (vix_score, 1.0),
+        (hy_score, 1.0),
+        (dxy_score, 0.5),
+        (spx_score, 0.5),
+    ]
+    weighted_sum = sum(v * w for v, w in present if v is not None)
+    weight_sum = sum(w for v, w in present if v is not None)
+    score = weighted_sum / weight_sum if weight_sum > 0 else 0.0
     logger.debug("_score_stress → %.4f", score)
     return score
 
@@ -552,7 +577,7 @@ def classify_regime(growth: float, inflation: float, fed: float, stress: float) 
     """
     if growth > 0 and inflation < 0.5 and stress < 0.3:
         return "Risk-On"
-    if stress > 0.6 or (growth < -0.3 and fed < 0):
+    if stress > 0.4 or (growth < -0.3 and fed < 0):
         return "Risk-Off"
     if growth < 0 and inflation > 0.6:
         return "Stagflation"
@@ -657,14 +682,35 @@ def compute_regime_score(
     float
         Regime health score in [0.0, 100.0].
     """
-    health_raw = (
-        (growth + 1) / 2 * 0.35        # growth: positive = good
-        + (1 - inflation) / 2 * 0.30   # low inflation = good
-        + (fed + 1) / 2 * 0.20         # accommodative = good
-        + (1 - stress) / 2 * 0.15      # low stress = good
-    )
+    # Each dimension mapped from [-1, +1] to [0, 1]. All step functions must use the
+    # full [-1, +1] range for this normalization to be correct:
+    #   growth_contrib    = (growth + 1) / 2 * 0.35   — higher expansion = better
+    #   inflation_contrib = (1 - inflation) / 2 * 0.30 — lower inflation = better
+    #   fed_contrib       = (fed + 1) / 2 * 0.20      — more accommodative = better
+    #   stress_contrib    = (1 - stress) / 2 * 0.15   — lower stress = better
+    # Note: DXY [-0.5, +0.5] and SPX [-0.5, +1.0] intentionally don't reach ±1;
+    # their avg contribution to stress_score keeps stress within roughly [-0.75, +0.875]
+    # in practice, which is acceptable for a secondary-weight (15%) dimension.
+    growth_contrib    = (growth + 1) / 2 * 0.35
+    inflation_contrib = (1 - inflation) / 2 * 0.30
+    fed_contrib       = (fed + 1) / 2 * 0.20
+    stress_contrib    = (1 - stress) / 2 * 0.15
+    health_raw = growth_contrib + inflation_contrib + fed_contrib + stress_contrib
     result = max(0.0, min(100.0, health_raw * 100))
-    logger.debug("compute_regime_score → %.2f", result)
+    logger.debug(
+        "regime_score: "
+        "growth=%.3f→%+.1fpts(35%%) "
+        "inflation=%.3f→%+.1fpts(30%%) "
+        "fed=%.3f→%+.1fpts(20%%) "
+        "stress=%.3f→%+.1fpts(15%%) "
+        "raw_sum=%.4f → score=%.1f",
+        growth,    growth_contrib * 100,
+        inflation, inflation_contrib * 100,
+        fed,       fed_contrib * 100,
+        stress,    stress_contrib * 100,
+        health_raw,
+        result,
+    )
     return result
 
 
@@ -698,10 +744,19 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
     result: list[dict] = []
 
     def _signal(score: float) -> str:
+        """For growth and Fed indicators: high score = bullish."""
         if score > 0:
             return "bullish"
         elif score < 0:
             return "bearish"
+        return "neutral"
+
+    def _inv_signal(score: float) -> str:
+        """For inflation and stress indicators: high score = bearish (bad for portfolio)."""
+        if score > 0:
+            return "bearish"
+        elif score < 0:
+            return "bullish"
         return "neutral"
 
     # GDP YoY
@@ -713,6 +768,8 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif g >= 0.0:
             s = 0.0
+        elif g >= -1.5:
+            s = -0.5
         else:
             s = -1.0
         result.append({
@@ -722,27 +779,7 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             "note": f"{g:.1f}% annual growth",
         })
 
-    # ISM Mfg PMI
-    if ind.ism_mfg is not None:
-        v = ind.ism_mfg
-        if v > 55:
-            s = 1.0
-        elif v >= 52:
-            s = 0.5
-        elif v >= 50:
-            s = 0.0
-        elif v >= 48:
-            s = -0.5
-        else:
-            s = -1.0
-        result.append({
-            "name": "ISM Mfg PMI (Philly proxy)",
-            "value": v,
-            "signal": _signal(s),
-            "note": "above 50 = expansion" if v >= 50 else "below 50 = contraction",
-        })
-
-    # ISM Svc PMI
+    # ISM Services PMI (50-centered)
     if ind.ism_svc is not None:
         v = ind.ism_svc
         if v > 55:
@@ -765,11 +802,13 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
     # Jobless Claims
     if ind.jobless_claims is not None:
         jc = ind.jobless_claims
-        if jc < 220_000:
+        if jc < 200_000:
             s = 1.0
-        elif jc <= 260_000:
+        elif jc < 240_000:
+            s = 0.5
+        elif jc <= 280_000:
             s = 0.0
-        elif jc <= 300_000:
+        elif jc <= 320_000:
             s = -0.5
         else:
             s = -1.0
@@ -800,7 +839,7 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             "note": f"{payrolls_mom_abs:+.0f}K jobs added",
         })
 
-    # CPI YoY
+    # CPI YoY — high inflation = bearish for portfolio
     if ind.cpi_yoy is not None:
         v = ind.cpi_yoy
         if v > 5:
@@ -809,19 +848,18 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 2:
             s = 0.0
-        else:
+        elif v >= 1:
             s = -0.5
-        # For inflation indicators, bullish/bearish is inverted from the inflation score
-        # (high inflation score = bearish for equities). We reflect the inflation signal
-        # directly so the dashboard shows economic signal, not equity signal.
+        else:
+            s = -1.0
         result.append({
             "name": "CPI YoY",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.1f}% vs 2% Fed target",
         })
 
-    # Core CPI YoY
+    # Core CPI YoY — high inflation = bearish
     if ind.core_cpi_yoy is not None:
         v = ind.core_cpi_yoy
         if v > 5:
@@ -830,16 +868,18 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 2:
             s = 0.0
-        else:
+        elif v >= 1:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "Core CPI YoY",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.1f}% ex-food & energy",
         })
 
-    # PPI YoY
+    # PPI YoY — high inflation = bearish
     if ind.ppi_yoy is not None:
         v = ind.ppi_yoy
         if v > 6:
@@ -848,16 +888,18 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 1:
             s = 0.0
-        else:
+        elif v >= 0:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "PPI YoY",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.1f}% producer price inflation",
         })
 
-    # PCE YoY
+    # PCE YoY — high inflation = bearish
     if ind.pce_yoy is not None:
         v = ind.pce_yoy
         if v > 4:
@@ -866,16 +908,18 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 2.0:
             s = 0.0
-        else:
+        elif v >= 1.5:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "PCE YoY",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.1f}% Fed's preferred inflation gauge",
         })
 
-    # 5Y Breakeven
+    # 5Y Breakeven — elevated expectations = bearish
     if ind.breakeven_5y is not None:
         v = ind.breakeven_5y
         if v > 3.0:
@@ -884,16 +928,18 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 2.0:
             s = 0.0
-        else:
+        elif v >= 1.5:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "5Y Breakeven",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.2f}% market inflation expectation",
         })
 
-    # VIX
+    # VIX — high stress = bearish
     if ind.vix is not None:
         v = ind.vix
         if v > 30:
@@ -902,34 +948,38 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             s = 0.5
         elif v >= 15:
             s = 0.0
-        else:
+        elif v >= 12:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "VIX",
             "value": v,
-            "signal": _signal(s),
-            "note": f"{v:.1f} — {'fear elevated' if v > 20 else 'complacent' if v < 15 else 'normal range'}",
+            "signal": _inv_signal(s),
+            "note": f"{v:.1f} — {'fear elevated' if v > 20 else 'extreme complacency' if v < 12 else 'complacent' if v < 15 else 'normal range'}",
         })
 
-    # HY Spread
+    # HY Spread — wide spread = bearish
     if ind.hy_spread is not None:
         v = ind.hy_spread
         if v > 600:
             s = 1.0
-        elif v >= 400:
+        elif v >= 450:
             s = 0.5
-        elif v >= 250:
+        elif v >= 300:
             s = 0.0
-        else:
+        elif v >= 200:
             s = -0.5
+        else:
+            s = -1.0
         result.append({
             "name": "HY Spread",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.0f} bps OAS",
         })
 
-    # DXY
+    # DXY — strong dollar = mild stress = bearish
     if ind.dxy is not None:
         v = ind.dxy
         if v > 108:
@@ -941,7 +991,7 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
         result.append({
             "name": "DXY",
             "value": v,
-            "signal": _signal(s),
+            "signal": _inv_signal(s),
             "note": f"{v:.1f} — {'strong dollar' if v > 104 else 'weak dollar' if v < 100 else 'neutral'}",
         })
 

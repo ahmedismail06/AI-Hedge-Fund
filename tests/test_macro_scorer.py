@@ -34,7 +34,6 @@ def _risk_on_ind() -> RawIndicators:
     """Strong growth, low inflation, low stress → Risk-On."""
     return RawIndicators(
         gdp_yoy=3.0,
-        ism_mfg=56,
         ism_svc=57,
         jobless_claims=210_000,
         payrolls_level=158_000,
@@ -57,7 +56,6 @@ def _risk_off_ind() -> RawIndicators:
     """Contracting growth, high stress, tight Fed → Risk-Off."""
     return RawIndicators(
         gdp_yoy=-0.5,
-        ism_mfg=46,
         ism_svc=47,
         jobless_claims=350_000,
         payrolls_level=158_000,
@@ -80,16 +78,16 @@ def _stagflation_ind() -> RawIndicators:
     """Contracting growth + high inflation → Stagflation.
 
     Design constraints so that Risk-Off does NOT fire first:
-      - stress must be <= 0.6  (vix=28→0.5, hy=380→0.0, dxy=105→0.0, spx=-3→0.5 → avg 0.25)
+      - stress must be < 0.4   (vix=28→0.5 w=1.0, hy=380→0.0 w=1.0, dxy=105→0.0 w=0.5,
+                               spx=-3→0.5 w=0.5 → weighted avg = (0.5+0.0+0.0+0.25)/3.0 = 0.25)
       - NOT (growth < -0.3 AND fed < 0): use rate_direction=0.5 so fed > 0
     Stagflation fires when: growth < 0 AND inflation > 0.6
-      - growth: gdp=-0.8→-1.0, ism avg 47.5→-1.0, payrolls 31.6K→-0.5, jobless 270K→-0.5
-              avg = -0.75 (< 0)
+      - growth: gdp=-0.8→-0.5, ism_svc=48→-0.5, payrolls 31.6K→-0.5, jobless 270K→0.0
+                avg = -0.375 (< 0)
       - inflation: all metrics above 5% → all signals = 1.0, avg = 1.0 (> 0.6)
     """
     return RawIndicators(
         gdp_yoy=-0.8,
-        ism_mfg=47,
         ism_svc=48,
         jobless_claims=270_000,
         payrolls_level=158_000,
@@ -113,14 +111,14 @@ def _transitional_ind() -> RawIndicators:
     # growth_score: gdp_yoy=0.5 → signal 0.0; ism avg ~51 → 0.0; payrolls ~0.0; jobless ~0.0
     # Avg growth ≈ 0.0  (not > 0 for Risk-On)
     # inflation: cpi ~2.3, core ~2.1, ppi ~2.0, pce ~2.3, breakeven 2.3 → all near 0.0
-    # stress: vix ~18 → 0.5, hy ~350 → 0.0, dxy ~102 → 0.0, spx -1.0 → 0.0  avg ≈ 0.125
+    # stress: vix=18→0.5 (w=1.0), hy=350→0.0 (w=1.0), dxy=102→0.0 (w=0.5), spx=-1→0.0 (w=0.5)
+    #         weighted = 0.5/3.0 ≈ 0.167
     # NOT Risk-On (growth == 0.0, not > 0)
-    # NOT Risk-Off (stress ~0.125, not > 0.6; growth ~0.0, not < -0.3)
+    # NOT Risk-Off (stress ≈ 0.167, not > 0.4; growth ~0.0, not < -0.3)
     # NOT Stagflation (growth ~0.0, not < 0; inflation ~0.0, not > 0.6)
     # → Transitional
     return RawIndicators(
         gdp_yoy=0.5,
-        ism_mfg=51,
         ism_svc=51,
         jobless_claims=250_000,
         payrolls_level=158_000,
@@ -299,9 +297,8 @@ def test_build_indicator_scores_risk_off_has_multiple_entries():
 # ===========================================================================
 
 def _make_fred_block(
-    jobless_thousands: float = 220.0,
+    jobless_thousands: float = 220_000.0,  # actual headcount, not thousands (FRED ICSA is actual)
     gdp_yoy: float = 2.5,
-    ism_mfg: float = 54.0,
     ism_svc: float = 55.0,
     payrolls: float = 158_000.0,
     payrolls_mom_pct: float = 0.12,
@@ -320,7 +317,6 @@ def _make_fred_block(
     return FredBlock(
         raw_values={
             "jobless": jobless_thousands,
-            "ism_mfg": ism_mfg,
             "ism_svc": ism_svc,
             "payrolls": payrolls,          # level in thousands
             "breakeven_5y": breakeven_5y,
@@ -363,9 +359,9 @@ def test_build_raw_indicators_returns_raw_indicators():
     assert isinstance(result, RawIndicators)
 
 
-def test_build_raw_indicators_jobless_multiplied_by_1000():
-    """FRED jobless claims are stored in thousands; build_raw_indicators multiplies by 1000."""
-    fred = _make_fred_block(jobless_thousands=220.0)
+def test_build_raw_indicators_jobless_passed_through():
+    """FRED ICSA (jobless claims) is already in actual headcount — build_raw_indicators passes it through unchanged."""
+    fred = _make_fred_block(jobless_thousands=220_000.0)  # pass actual headcount, not thousands
     market = _make_market_block()
     result = build_raw_indicators(fred, market)
     assert result.jobless_claims == 220_000.0, (
@@ -519,3 +515,70 @@ def test_score_indicators_fed_score_affected_by_fed_tone():
     result_neutral = score_indicators(ind, fed_tone=0.0)
     result_dovish = score_indicators(ind, fed_tone=1.0)
     assert result_dovish.fed_score > result_neutral.fed_score
+
+
+# ---------------------------------------------------------------------------
+# Weighted stress aggregation tests (Problem 1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_stress_score_dxy_does_not_cancel_vix():
+    """DXY weak signal (-0.5) must not fully cancel VIX elevated (0.5) under the
+    weighted formula. With VIX=25 (signal=0.5, w=1.0) and DXY=98 (signal=-0.5, w=0.5):
+    weighted_sum = 0.5*1.0 + (-0.5)*0.5 = 0.25; weight_sum = 1.5 → score = 0.167 > 0.0."""
+    ind = RawIndicators(vix=25.0, hy_spread=350.0, dxy=98.0, spx_pct_above_sma=0.0)
+    result = score_indicators(ind, fed_tone=0.0)
+    assert result.stress_score > 0.0, (
+        f"VIX=25/DXY=98 should not net to 0.0 stress; got {result.stress_score:.4f}"
+    )
+
+
+def test_stress_score_weighted_formula_spot_check():
+    """Verify weighted aggregation arithmetic:
+    vix=38→1.0 (w=1.0), hy=700→1.0 (w=1.0), dxy=110→0.5 (w=0.5), spx=-8→1.0 (w=0.5)
+    weighted_sum = 1.0 + 1.0 + 0.25 + 0.5 = 2.75; weight_sum = 3.0 → score ≈ 0.9167."""
+    ind = RawIndicators(vix=38.0, hy_spread=700.0, dxy=110.0, spx_pct_above_sma=-8.0)
+    result = score_indicators(ind, fed_tone=0.0)
+    assert abs(result.stress_score - 0.9167) < 0.001, (
+        f"Expected weighted stress ≈ 0.9167, got {result.stress_score:.4f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-signal mild stress Risk-Off test (Problem 2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_multi_signal_mild_stress_triggers_risk_off():
+    """VIX=25 + HY=460 + SPX below SMA together breach stress > 0.4 → Risk-Off.
+    weighted: (0.5*1.0 + 0.5*1.0 + 0.0*0.5 + 0.5*0.5) / 3.0 = 1.25/3.0 ≈ 0.417."""
+    ind = RawIndicators(
+        gdp_yoy=-0.2,
+        vix=25.0,
+        hy_spread=460.0,
+        dxy=102.0,
+        spx_pct_above_sma=-3.0,
+        rate_direction=0.0,
+    )
+    result = score_indicators(ind, fed_tone=0.0)
+    assert result.stress_score > 0.4, (
+        f"Expected stress > 0.4 for multi-signal stress env, got {result.stress_score:.4f}"
+    )
+    assert result.regime == "Risk-Off", (
+        f"Expected Risk-Off from multi-signal stress, got {result.regime}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# fed_score baseline test (Problem 3 — scorer layer is correct)
+# ---------------------------------------------------------------------------
+
+
+def test_fed_score_zero_fed_tone_positive_yield_curve():
+    """rate_direction=0.0, yield_curve=+53 bps → signal 0.5, fed_tone=0.0
+    → fed_score = (0.0 + 0.5 + 0.0) / 3 ≈ 0.1667."""
+    ind = RawIndicators(rate_direction=0.0, yield_curve_spread=53.0)
+    result = score_indicators(ind, fed_tone=0.0)
+    assert abs(result.fed_score - 0.1667) < 0.001, (
+        f"Expected fed_score ≈ 0.167, got {result.fed_score:.4f}"
+    )
