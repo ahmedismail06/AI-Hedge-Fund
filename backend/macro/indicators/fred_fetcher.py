@@ -34,13 +34,10 @@ FRED_SERIES: dict[str, str] = {
     "ppi":          "PPIACO",        # PPI all commodities
     "pce":          "PCEPI",         # PCE deflator
     "breakeven_5y": "T5YIE",         # 5Y breakeven inflation rate (daily)
-    # NAPM (ISM Mfg PMI) was removed from FRED by ISM due to licensing restrictions.
-    # We proxy it using the Philadelphia Fed Manufacturing Business Outlook Survey
-    # (GACDFSA066MSFRBPHI), a diffusion index centered at 0 (>0 = expansion).
-    # Scaled to PMI's 50-centered convention: pmi_proxy = 50 + philly_value.
-    # NMFBAI (ISM Services PMI) — re-added per user instruction; will degrade
-    # gracefully to None if ISM restricts access again.
-    "philly_mfg":   "GACDFSA066MSFRBPHI",    # Philadelphia Fed Mfg Business Outlook (proxy for ISM Mfg PMI)
+    # ISM Mfg PMI (NAPM) was removed from FRED by ISM due to licensing restrictions.
+    # Philadelphia Fed proxy also dropped — adding 50 to a 0-centered diffusion index
+    # produces garbage PMI-shaped numbers. Mfg PMI slot is empty until a real source is found.
+    # NMFBAI (ISM Services PMI) — will degrade gracefully to None if ISM restricts access.
     "ism_svc_raw":  "NMFBAI",                 # ISM Non-Manufacturing Business Activity Index (Services PMI)
     "jobless":      "ICSA",          # Initial jobless claims (weekly, actual headcount — NOT thousands)
     "payrolls":     "PAYEMS",        # Nonfarm payrolls (monthly, thousands)
@@ -351,11 +348,8 @@ def fetch_fred_block() -> FredBlock:
         logger.warning("Rate direction computation failed: %s", exc)
         direction = 0.0
 
-    # ── 6. ISM PMI proxies ───────────────────────────────────────────────────
-    # Manufacturing: Philadelphia Fed index (centered at 0) → PMI scale (50-centered).
-    philly = raw_values.get("philly_mfg")
-    raw_values["ism_mfg"] = float(50.0 + philly) if philly is not None else None
-    # Services: direct from NMFBAI if available; None on fetch failure.
+    # ── 6. PMI alias ─────────────────────────────────────────────────────────
+    # Services PMI: alias ism_svc_raw → ism_svc for downstream consumers.
     raw_values["ism_svc"] = raw_values.get("ism_svc_raw")
 
     return FredBlock(
