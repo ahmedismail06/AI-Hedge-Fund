@@ -39,7 +39,7 @@ from backend.macro.scorer import (
     score_indicators,
     build_indicator_scores,
 )
-from backend.models.macro_briefing import MacroBriefing, IndicatorScore
+from backend.models.macro_briefing import MacroBriefing, IndicatorScore, SectorTilt, UpcomingEvent
 from backend.memory.vector_store import _get_client
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,95 @@ AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
 
 class MacroAgentError(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Sector tilt builder
+# ---------------------------------------------------------------------------
+
+
+def _build_sector_tilts(regime: str, confidence: float) -> list[SectorTilt]:
+    """Build structured SectorTilt list from regime and confidence.
+
+    Returns deterministic tilts derived from the REGIME PORTFOLIO IMPLICATIONS
+    in the system prompt. When confidence is low (<7.0) or regime is Transitional,
+    all three sectors are held neutral — no tilts until signals clarify.
+
+    Parameters
+    ----------
+    regime:
+        Final classified regime string.
+    confidence:
+        regime_confidence score (0–10).
+
+    Returns
+    -------
+    list[SectorTilt]
+        One entry per sector in the universe (SaaS, Healthcare, Industrials).
+    """
+    low_conf_note = "Low regime confidence — holding neutral pending signal clarity"
+
+    if confidence < 7.0 or regime == "Transitional":
+        return [
+            SectorTilt(sector="SaaS", tilt="neutral", rationale=low_conf_note),
+            SectorTilt(sector="Healthcare", tilt="neutral", rationale=low_conf_note),
+            SectorTilt(sector="Industrials", tilt="neutral", rationale=low_conf_note),
+        ]
+    if regime == "Risk-On":
+        return [
+            SectorTilt(
+                sector="SaaS",
+                tilt="overweight",
+                rationale="Risk-On: revenue visibility and growth premium both supported",
+            ),
+            SectorTilt(
+                sector="Healthcare",
+                tilt="neutral",
+                rationale="Not the lead Risk-On sector; hold existing positions only",
+            ),
+            SectorTilt(
+                sector="Industrials",
+                tilt="overweight",
+                rationale="High-growth Industrials with book-to-bill > 1.0 favored in expansion",
+            ),
+        ]
+    if regime == "Risk-Off":
+        return [
+            SectorTilt(
+                sector="SaaS",
+                tilt="underweight",
+                rationale="Reduce high-multiple growth exposure in Risk-Off",
+            ),
+            SectorTilt(
+                sector="Healthcare",
+                tilt="overweight",
+                rationale="Asset-light Healthcare with pricing power preferred in Risk-Off",
+            ),
+            SectorTilt(
+                sector="Industrials",
+                tilt="neutral",
+                rationale="Favor only Industrials with confirmed backlog coverage > 12 months",
+            ),
+        ]
+    if regime == "Stagflation":
+        return [
+            SectorTilt(
+                sector="SaaS",
+                tilt="underweight",
+                rationale="Avoid high-multiple SaaS — valuation compression risk in Stagflation",
+            ),
+            SectorTilt(
+                sector="Healthcare",
+                tilt="overweight",
+                rationale="Healthcare with CMS reimbursement certainty defensible in Stagflation",
+            ),
+            SectorTilt(
+                sector="Industrials",
+                tilt="neutral",
+                rationale="Favor only Industrials with proven pricing power and backlog coverage",
+            ),
+        ]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -119,16 +208,30 @@ THINKING ORDER — complete these steps in sequence before producing any output:
    Write qualitative_summary (3-5 sentences, hard limit) that synthesizes the macro picture
    ACROSS all four dimensions (growth, inflation, Fed stance, market stress) into an integrated
    assessment. Do not write one sentence per dimension. Write sentences that connect dimensions
-   causally. The final sentence must name the single largest forward risk or tailwind.
+   causally.
+   CONTRADICTION RULE: If two or more dimensions point in opposing directions (e.g., strong
+   growth but rising inflation; Fed accommodative but stress elevated; PMI expanding but credit
+   spreads widening), you MUST name the specific tension explicitly and identify which dimension
+   is the BINDING CONSTRAINT for portfolio positioning. Do not average opposing signals into
+   hedged language like "while X persists, Y remains supportive." State which signal wins and why.
+   The final sentence must name the single largest forward risk or tailwind.
 
 6. KEY THEMES:
    Write 2-4 theme strings. Each must be a forward-looking statement written in institutional
-   research note style.
+   research note style. Themes must be specific to the current data — not generic observations
+   that could have been written any week in the past 18 months.
 
 7. PORTFOLIO GUIDANCE:
    Write 2-3 sentences directly naming the regime and its implications for: (a) gross exposure
    level, (b) sector preference within the universe (SaaS, Healthcare, Industrials), and
    (c) stop-loss posture.
+
+8. UPCOMING EVENTS:
+   List 2-4 macro events in the next 30 days relevant to regime assessment: FOMC meetings,
+   CPI/PCE releases, nonfarm payroll dates, or major GDP prints. Use your knowledge of the
+   standard Federal Reserve meeting schedule and BLS release calendar for the current date.
+   If you are uncertain of an exact date, provide an approximate date with "(approx)" noted
+   in the event name. Include why each event matters to the current regime in "relevance".
 
 ---
 
@@ -196,9 +299,13 @@ Required JSON schema:
   "override_reason": "string or null",
   "qualitative_summary": "3-5 sentences",
   "key_themes": ["theme1", "theme2"],
-  "portfolio_guidance": "2-3 sentences naming regime, exposure ceiling, sector tilt"
+  "portfolio_guidance": "2-3 sentences naming regime, exposure ceiling, sector tilt",
+  "upcoming_events": [
+    {"date": "YYYY-MM-DD", "event": "event name", "relevance": "why it matters to current regime"}
+  ]
 }
-HARD RULE: Single valid JSON object ONLY. The "regime" field is conditional — include only when override_flag is true."""
+HARD RULE: Single valid JSON object ONLY. The "regime" field is conditional — include only when override_flag is true.
+The "upcoming_events" array is required — provide 2-4 events. If dates are uncertain, use "(approx)" in the event name."""
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +391,7 @@ def _store_briefing(briefing: MacroBriefing) -> str:
 # ---------------------------------------------------------------------------
 
 # Category membership for formatting — keyed to names returned by build_indicator_scores
-_GROWTH_NAMES = {"GDP YoY", "ISM Mfg PMI (Philly proxy)", "ISM Svc PMI", "Jobless Claims", "Payrolls MoM"}
+_GROWTH_NAMES = {"GDP YoY", "ISM Svc PMI", "Jobless Claims", "Payrolls MoM"}
 _INFLATION_NAMES = {"CPI YoY", "Core CPI YoY", "PPI YoY", "PCE YoY", "5Y Breakeven"}
 _FED_NAMES = {"Yield Curve Spread"}
 _STRESS_NAMES = {"VIX", "HY Spread", "DXY"}
@@ -451,7 +558,7 @@ def _call_llm(
     fomc_section = (
         f"FOMC STATEMENT TEXT:\n{fomc_text.strip()}"
         if fomc_text.strip()
-        else "FOMC STATEMENT TEXT:\n[Not available — no recent statement scraped]"
+        else "FOMC STATEMENT TEXT:\n[EMPTY — no statement available. Per system prompt rules: fed_tone MUST be 0.0. Do not infer or score.]"
     )
 
     user_message = (
@@ -582,13 +689,13 @@ def _print_data_coverage(ind: RawIndicators, fomc_text: str) -> None:
     # Build sections
     growth_rows = [
         _row("GDP YoY",          ind.gdp_yoy,          "{:.2f}%"),
-        _row("ISM Mfg PMI (Philly proxy)", ind.ism_mfg,  "{:.1f}"),
+        _row("ISM Mfg PMI",     None,            ""),      # no source — slot empty
         _row("ISM Svc PMI",      ind.ism_svc,          "{:.1f}"),
         _row("Payrolls MoM %",   ind.payrolls_mom_pct, "{:+.2f}%"),
         _row("Jobless Claims",   ind.jobless_claims,   "{:,.0f}"),
     ]
     for label, val in [
-        ("GDP YoY", ind.gdp_yoy), ("ISM Mfg PMI (Philly proxy)", ind.ism_mfg),
+        ("GDP YoY", ind.gdp_yoy),
         ("ISM Svc PMI", ind.ism_svc), ("Payrolls MoM %", ind.payrolls_mom_pct),
         ("Jobless Claims", ind.jobless_claims),
     ]:
@@ -743,6 +850,15 @@ def run_macro_pipeline() -> MacroBriefing:
         logger.info("Phase 4: re-scoring with actual fed_tone")
         fed_tone = float(claude_resp.get("fed_tone", 0.0))
         fed_tone = max(-1.0, min(1.0, fed_tone))   # clamp to [-1.0, +1.0]
+        # Guard: if no FOMC statement was available, force fed_tone to 0.0 regardless of LLM
+        # output. The LLM can misinterpret the absence sentinel as scored content.
+        if not fomc_text.strip():
+            if fed_tone != 0.0:
+                logger.warning(
+                    "fed_tone overridden to 0.0: LLM returned %.2f but no FOMC statement was available.",
+                    fed_tone,
+                )
+            fed_tone = 0.0
         final_scores = score_indicators(raw_ind, fed_tone=fed_tone)
 
         logger.info(
@@ -781,6 +897,26 @@ def run_macro_pipeline() -> MacroBriefing:
         if regime_changed:
             logger.info("Regime changed: %s -> %s", previous_regime, final_regime)
 
+        # ── Confidence gate ────────────────────────────────────────────────────
+        # When confidence < 7.0 and regime is not already Transitional, the
+        # portfolio_guidance must reflect Transitional posture — signals are too
+        # mixed to act on the classified regime.
+        portfolio_guidance_text = claude_resp["portfolio_guidance"]
+        if final_scores.regime_confidence < 7.0 and final_regime != "Transitional":
+            portfolio_guidance_text = (
+                f"Signal confidence is {final_scores.regime_confidence:.1f}/10 — regime signals "
+                f"are mixed. Adopt Transitional posture regardless of {final_regime} "
+                f"classification: hold current book at reduced size, no new large positions, "
+                f"standard stops. Wait for confidence ≥ 7.0 before sizing to {final_regime} "
+                f"implications."
+            )
+            logger.info(
+                "Confidence gate triggered: confidence=%.1f < 7.0 — portfolio_guidance "
+                "overridden to Transitional posture (classified regime: %s)",
+                final_scores.regime_confidence,
+                final_regime,
+            )
+
         # ── Phase 7: Build IndicatorScore list ────────────────────────────────
         logger.info("Phase 7: building IndicatorScore list")
         raw_indicator_dicts = build_indicator_scores(raw_ind)
@@ -795,6 +931,18 @@ def run_macro_pipeline() -> MacroBriefing:
 
         # ── Phase 8: Assemble MacroBriefing ───────────────────────────────────
         logger.info("Phase 8: assembling MacroBriefing")
+
+        # Build sector tilts deterministically from regime + confidence
+        sector_tilts_list = _build_sector_tilts(final_regime, final_scores.regime_confidence)
+
+        # Parse upcoming_events from Claude response
+        upcoming_events_list: list[UpcomingEvent] = []
+        for ev in claude_resp.get("upcoming_events", []):
+            try:
+                upcoming_events_list.append(UpcomingEvent(**ev))
+            except Exception as exc:
+                logger.warning("Phase 8: failed to build UpcomingEvent from %s — %s", ev, exc)
+
         briefing = MacroBriefing(
             date=today.isoformat(),
             regime=final_regime,
@@ -803,7 +951,7 @@ def run_macro_pipeline() -> MacroBriefing:
             indicator_scores=indicator_scores_list,
             qualitative_summary=claude_resp["qualitative_summary"],
             key_themes=claude_resp["key_themes"],
-            portfolio_guidance=claude_resp["portfolio_guidance"],
+            portfolio_guidance=portfolio_guidance_text,
             override_reason=override_reason,
             previous_regime=previous_regime,
             regime_changed=regime_changed,
@@ -812,6 +960,8 @@ def run_macro_pipeline() -> MacroBriefing:
             fed_score=final_scores.fed_score,
             stress_score=final_scores.stress_score,
             regime_confidence=final_scores.regime_confidence,
+            sector_tilts=sector_tilts_list if sector_tilts_list else None,
+            upcoming_events=upcoming_events_list if upcoming_events_list else None,
         )
 
         # ── Phase 9: Store ────────────────────────────────────────────────────
