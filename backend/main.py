@@ -19,21 +19,25 @@ from backend.memory.vector_store import (
 )
 from backend.screener.scheduler import create_screener_scheduler
 from backend.macro.scheduler import create_macro_scheduler
+from backend.agents.research_scheduler import create_research_scheduler
 from backend.api.macro import router as macro_router
 
 _screener_scheduler = None
 _macro_scheduler = None
+_research_scheduler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _screener_scheduler, _macro_scheduler
+    global _screener_scheduler, _macro_scheduler, _research_scheduler
     _screener_scheduler = create_screener_scheduler()
     _macro_scheduler = create_macro_scheduler()
+    _research_scheduler = create_research_scheduler()
     _screener_scheduler.start()
     _macro_scheduler.start()
+    _research_scheduler.start()
     yield
-    for sched in (_screener_scheduler, _macro_scheduler):
+    for sched in (_screener_scheduler, _macro_scheduler, _research_scheduler):
         if sched and sched.running:
             sched.shutdown(wait=False)
 
@@ -102,6 +106,16 @@ def trigger_research(ticker: str, use_cache: bool = False):
         memo["_storage_error"] = str(exc)
 
     return memo
+
+
+@app.post("/research/run-queued")
+async def trigger_research_queue():
+    """Manually fire the research queue poller — processes today's queued_for_research tickers."""
+    import asyncio as _asyncio
+    from backend.agents.research_scheduler import _poll_research_queue
+    loop = _asyncio.get_event_loop()
+    processed = await loop.run_in_executor(None, _poll_research_queue)
+    return {"queued_tickers_processed": processed}
 
 
 @app.get("/research/history")
