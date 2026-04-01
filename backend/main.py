@@ -21,6 +21,7 @@ from backend.screener.scheduler import create_screener_scheduler
 from backend.macro.scheduler import create_macro_scheduler
 from backend.agents.research_scheduler import create_research_scheduler
 from backend.api.macro import router as macro_router
+from backend.api.portfolio import router as portfolio_router
 
 _screener_scheduler = None
 _macro_scheduler = None
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Hedge Fund API", version="0.1.0", lifespan=lifespan)
 app.include_router(macro_router)
+app.include_router(portfolio_router)
 
 app.add_middleware(
     CORSMiddleware,
