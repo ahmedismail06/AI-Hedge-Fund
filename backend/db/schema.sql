@@ -121,6 +121,51 @@ create index if not exists macro_briefings_created_idx
     on macro_briefings (created_at desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Portfolio Construction: positions table
+-- Stores every sizing recommendation produced by the Portfolio Construction Agent
+-- (Component 4). One row per position decision; status tracks the full lifecycle
+-- from PENDING_APPROVAL through OPEN to CLOSED.
+-- direction allowed values: 'LONG' | 'SHORT'
+-- status allowed values: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'OPEN' | 'CLOSED'
+-- size_label allowed values: 'large' | 'medium' | 'small' | 'micro'
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists positions (
+    id                  uuid primary key default gen_random_uuid(),
+    ticker              text not null,
+    memo_id             uuid references memos(id),
+    direction           text not null check (direction in ('LONG', 'SHORT')),
+    status              text not null default 'PENDING_APPROVAL'
+                            check (status in ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'OPEN', 'CLOSED')),
+    conviction_score    numeric(4, 2) not null,
+    kelly_fraction      numeric(6, 4) not null,
+    dollar_size         numeric(12, 2) not null,
+    share_count         numeric(10, 2) not null,
+    size_label          text not null check (size_label in ('large', 'medium', 'small', 'micro')),
+    pct_of_portfolio    numeric(6, 4) not null,
+    entry_price         numeric(12, 4),
+    current_price       numeric(12, 4),
+    stop_loss_price     numeric(12, 4),
+    target_price        numeric(12, 4),
+    risk_reward_ratio   numeric(6, 2),
+    sizing_rationale    text not null,
+    correlation_flag    boolean not null default false,
+    correlation_note    text,
+    sector              text,
+    regime_at_sizing    text not null,
+    portfolio_state_after jsonb,
+    pnl                 numeric(12, 2),
+    pnl_pct             numeric(8, 4),
+    opened_at           timestamptz,
+    closed_at           timestamptz,
+    created_at          timestamptz not null default now()
+);
+
+create index if not exists positions_ticker_idx on positions (ticker);
+create index if not exists positions_status_idx on positions (status);
+create index if not exists positions_created_idx on positions (created_at desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
 create or replace function match_document_chunks(
     query_embedding  vector(768),
