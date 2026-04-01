@@ -29,6 +29,7 @@ class InvestmentMemo(BaseModel):
     # ── Core fields (LLM-produced) ────────────────────────────────────────────
     ticker: str
     date: str  # YYYY-MM-DD
+    sector: Optional[str] = None
     company_overview: str
     bull_thesis: list[str]
     bear_thesis: list[str] = Field(min_length=4)

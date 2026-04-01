@@ -9,6 +9,7 @@ Fields returned:
   - consensus_eps_current_year/next_year    (yfinance)
   - consensus_revenue_current_year/next_year (yfinance, in millions)
   - next_earnings_date                      (yfinance)
+  - sector                                  (yfinance)
   - cash                                    (yfinance quarterly balance sheet)
   - ttm_operating_cash_flow                 (Polygon cash flow statement)
   - cash_runway_months                      (computed: cash / monthly burn)
@@ -42,6 +43,7 @@ def fetch_fmp(ticker: str) -> dict:
         "consensus_revenue_current_year": float | None,  # millions
         "consensus_revenue_next_year": float | None,     # millions
         "next_earnings_date": str | None,                # YYYY-MM-DD
+        "sector": str | None,
         "long_term_debt": float | None,                  # raw dollars
         "accounts_payable": float | None,                # raw dollars
         "market_cap": float | None,                      # raw dollars
@@ -61,6 +63,7 @@ def fetch_fmp(ticker: str) -> dict:
         "consensus_revenue_current_year": None,
         "consensus_revenue_next_year": None,
         "next_earnings_date": None,
+        "sector": None,
         "cash": None,
         "ttm_operating_cash_flow": None,
         "ocf_annualized": False,   # Bug 9: True when TTM OCF = single quarter × 4
@@ -84,6 +87,7 @@ def fetch_fmp(ticker: str) -> dict:
         result["days_to_cover"] = info.get("shortRatio")
         result["analyst_count"] = info.get("numberOfAnalystOpinions")
         result["target_mean_price"] = info.get("targetMeanPrice")
+        result["sector"] = info.get("sector")
 
         # Bug 10: yfinance marketCap is live (updated intraday); use as primary source.
         # Polygon /v3/reference/tickers returns a static reference field that can be

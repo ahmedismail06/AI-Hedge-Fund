@@ -1513,6 +1513,8 @@ def run_research(ticker: str, use_cache: bool = False) -> dict:
             )
 
     memo["ticker"] = ticker
+    if not memo.get("sector"):
+        memo["sector"] = fmp_data.get("sector") if isinstance(fmp_data, dict) else None
     validated = _validate_memo(memo)
     result = validated.model_dump(exclude_none=True)
 

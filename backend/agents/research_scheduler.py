@@ -60,15 +60,36 @@ def _poll_research_queue() -> list[str]:
         logger.info("_poll_research_queue: no tickers queued for research today")
         return []
 
+    import asyncio as _asyncio
+    import os as _os
+    from backend.agents.portfolio_agent import run_portfolio_sizing, PortfolioAgentError
+    from backend.memory.vector_store import store_memo
+
+    portfolio_value = float(_os.getenv("PORTFOLIO_VALUE", "25000"))
+
     logger.info("_poll_research_queue: processing %d tickers: %s", len(tickers), tickers)
     processed: list[str] = []
     for ticker in tickers:
         try:
-            run_research(ticker, use_cache=False)
+            memo = run_research(ticker, use_cache=False)
             processed.append(ticker)
             logger.info("_poll_research_queue: completed %s", ticker)
         except Exception as exc:
             logger.error("_poll_research_queue: run_research(%s) failed — %s", ticker, exc)
+            continue
+
+        # Trigger portfolio sizing immediately after each successful research run
+        try:
+            memo_id = store_memo(ticker, memo)
+            if memo_id:
+                _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
+                logger.info("_poll_research_queue: portfolio sizing complete for %s", ticker)
+            else:
+                logger.warning("_poll_research_queue: store_memo returned no id for %s — skipping sizing", ticker)
+        except PortfolioAgentError as exc:
+            logger.warning("_poll_research_queue: portfolio sizing skipped for %s — %s", ticker, exc)
+        except Exception as exc:
+            logger.error("_poll_research_queue: portfolio sizing failed for %s — %s", ticker, exc)
 
     # Clear the flag for all processed tickers regardless of individual success/failure
     if processed:
