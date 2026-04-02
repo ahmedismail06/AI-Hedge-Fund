@@ -22,23 +22,66 @@ from backend.macro.scheduler import create_macro_scheduler
 from backend.agents.research_scheduler import create_research_scheduler
 from backend.api.macro import router as macro_router
 from backend.api.portfolio import router as portfolio_router
+from backend.api.risk import router as risk_router
+from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics
 
 _screener_scheduler = None
 _macro_scheduler = None
 _research_scheduler = None
+_risk_monitor_scheduler = None
+_risk_metrics_scheduler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio as _asyncio
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+    from apscheduler.triggers.cron import CronTrigger
+
     global _screener_scheduler, _macro_scheduler, _research_scheduler
+    global _risk_monitor_scheduler, _risk_metrics_scheduler
+
     _screener_scheduler = create_screener_scheduler()
     _macro_scheduler = create_macro_scheduler()
     _research_scheduler = create_research_scheduler()
     _screener_scheduler.start()
     _macro_scheduler.start()
     _research_scheduler.start()
+
+    # Risk monitor: every 60 seconds (market-hours guard is inside run_risk_monitor)
+    _risk_monitor_scheduler = BackgroundScheduler()
+    _risk_monitor_scheduler.add_job(
+        lambda: _asyncio.run(run_risk_monitor()),
+        trigger=IntervalTrigger(seconds=60),
+        id="risk_monitor",
+        name="Risk Monitor (60s)",
+        replace_existing=True,
+    )
+    _risk_monitor_scheduler.start()
+
+    # Nightly metrics: 22:00 ET Mon–Fri
+    _risk_metrics_scheduler = BackgroundScheduler()
+    _risk_metrics_scheduler.add_job(
+        lambda: _asyncio.run(run_nightly_metrics()),
+        trigger=CronTrigger(
+            hour=22, minute=0, day_of_week="mon-fri", timezone="America/New_York"
+        ),
+        id="risk_nightly_metrics",
+        name="Nightly Portfolio Metrics",
+        replace_existing=True,
+    )
+    _risk_metrics_scheduler.start()
+
     yield
-    for sched in (_screener_scheduler, _macro_scheduler, _research_scheduler):
+
+    for sched in (
+        _screener_scheduler,
+        _macro_scheduler,
+        _research_scheduler,
+        _risk_monitor_scheduler,
+        _risk_metrics_scheduler,
+    ):
         if sched and sched.running:
             sched.shutdown(wait=False)
 
@@ -46,6 +89,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Hedge Fund API", version="0.1.0", lifespan=lifespan)
 app.include_router(macro_router)
 app.include_router(portfolio_router)
+app.include_router(risk_router)
 
 app.add_middleware(
     CORSMiddleware,

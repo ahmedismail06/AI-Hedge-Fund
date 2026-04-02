@@ -166,6 +166,51 @@ create index if not exists positions_status_idx on positions (status);
 create index if not exists positions_created_idx on positions (created_at desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Risk Agent: risk_alerts table
+-- Stores individual risk alerts produced by the Risk Agent (Component 5).
+-- tier: 1=position, 2=sector/strategy, 3=portfolio
+-- severity: WARN | BREACH | CRITICAL
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists risk_alerts (
+    id          uuid primary key default gen_random_uuid(),
+    ticker      text,                       -- NULL for portfolio-level alerts
+    tier        integer not null check (tier in (1, 2, 3)),
+    severity    text not null check (severity in ('WARN', 'BREACH', 'CRITICAL')),
+    trigger     text not null,              -- human-readable description
+    regime      text not null,              -- macro regime at time of alert
+    resolved    boolean not null default false,
+    resolved_at timestamptz,
+    created_at  timestamptz not null default now()
+);
+
+create index if not exists risk_alerts_resolved_idx on risk_alerts (resolved, created_at desc);
+create index if not exists risk_alerts_severity_idx on risk_alerts (severity, resolved);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Risk Agent: portfolio_metrics table
+-- Stores nightly computed performance metrics (Sharpe, Sortino, VaR, etc.).
+-- One authoritative record per trading day (UNIQUE on date).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists portfolio_metrics (
+    id              uuid primary key default gen_random_uuid(),
+    date            date not null unique,
+    sharpe_ratio    numeric(8, 4),
+    sortino_ratio   numeric(8, 4),
+    max_drawdown    numeric(8, 4),
+    var_95          numeric(8, 4),          -- Value at Risk 95% (historical sim)
+    var_99          numeric(8, 4),          -- Value at Risk 99% (historical sim)
+    beta            numeric(8, 4),
+    calmar_ratio    numeric(8, 4),
+    gross_exposure  numeric(8, 4),
+    net_exposure    numeric(8, 4),
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists portfolio_metrics_date_idx on portfolio_metrics (date desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
 create or replace function match_document_chunks(
     query_embedding  vector(768),
