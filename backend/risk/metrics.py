@@ -16,8 +16,10 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import os
+
 import numpy as np
-import yfinance as yf
+import requests
 from dotenv import load_dotenv
 
 from backend.models.risk import PortfolioMetrics
@@ -172,11 +174,15 @@ def _calmar(r: np.ndarray, max_dd: Optional[float]) -> Optional[float]:
 def _compute_beta(closed: list[dict]) -> Optional[float]:
     """
     Estimate beta vs SPY using the date range spanned by closed positions.
-    Maps each position's pnl_pct to a single-period return and aligns with
-    SPY returns over the same window. Falls back to None on any error.
+    Fetches SPY daily closes from Polygon /v2/aggs. Falls back to None on
+    any error or missing POLYGON_API_KEY.
     """
     try:
-        # Determine date range
+        polygon_key = os.getenv("POLYGON_API_KEY")
+        if not polygon_key:
+            logger.warning("POLYGON_API_KEY not set — beta not computed")
+            return None
+
         dates = []
         for pos in closed:
             for field in ("opened_at", "closed_at"):
@@ -193,16 +199,21 @@ def _compute_beta(closed: list[dict]) -> Optional[float]:
         start = min(dates) - timedelta(days=1)
         end = max(dates) + timedelta(days=1)
 
-        spy = yf.download("SPY", start=start.isoformat(), end=end.isoformat(),
-                          progress=False, auto_adjust=True)
-        if spy.empty or len(spy) < 2:
+        resp = requests.get(
+            f"https://api.polygon.io/v2/aggs/ticker/SPY/range/1/day"
+            f"/{start.isoformat()}/{end.isoformat()}",
+            params={"adjusted": "true", "sort": "asc", "limit": 500, "apiKey": polygon_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if len(results) < 2:
             return None
 
-        spy_returns = spy["Close"].pct_change().dropna().values.astype(float)
+        spy_closes = np.array([r["c"] for r in results], dtype=float)
+        spy_returns = np.diff(spy_closes) / spy_closes[:-1]
 
-        # Use portfolio returns (mean per trading day as proxy)
         port_returns = np.array(_build_returns(closed), dtype=float)
-        # Align lengths by taking min
         n = min(len(spy_returns), len(port_returns))
         if n < 2:
             return None

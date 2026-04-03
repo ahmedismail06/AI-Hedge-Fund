@@ -8,7 +8,7 @@ but cycles exit immediately when the market is closed.
 Each cycle:
   1. Check market hours (9:30–16:00 ET, Mon–Fri) — return early if closed
   2. Fetch all OPEN positions from Supabase
-  3. Refresh current prices via yfinance batch call
+  3. Refresh current prices via Polygon snapshot API
   4. Compute pnl_pct for each position against current price
   5. Run check_stops() → StopEvent list
   6. Run check_exposure_drift() → ExposureBreach list
@@ -18,10 +18,11 @@ Each cycle:
 """
 
 import logging
+import os
 from datetime import datetime, time
 
 import pytz
-import yfinance as yf
+import requests
 from dotenv import load_dotenv
 
 from backend.risk.alerts import build_alerts
@@ -118,38 +119,43 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 
 def _refresh_prices(positions: list[dict], tickers: list[str]) -> list[dict]:
     """
-    Batch-fetch latest prices from yfinance and update pnl_pct on each position.
-    Positions with no yfinance data are left unchanged (stale price).
+    Batch-fetch latest prices from Polygon snapshot endpoint and update
+    pnl_pct on each position. Positions with no Polygon data are left
+    unchanged (stale price).
+
+    Uses /v2/snapshot/locale/us/markets/stocks/tickers (batch, one call).
+    Prefers lastTrade.p (real-time during market hours), falls back to
+    day.c (session close).
     """
     if not tickers:
         return positions
 
+    polygon_key = os.getenv("POLYGON_API_KEY")
+    if not polygon_key:
+        logger.warning("POLYGON_API_KEY not set — position prices stale")
+        return positions
+
     try:
-        data = yf.download(
-            tickers, period="1d", interval="1m",
-            group_by="ticker", progress=False, auto_adjust=True
+        resp = requests.get(
+            "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
+            params={"tickers": ",".join(tickers), "apiKey": polygon_key},
+            timeout=10,
         )
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:
-        logger.warning("yfinance price refresh failed: %s", exc)
+        logger.warning("Polygon price refresh failed: %s", exc)
         return positions
 
     price_map: dict[str, float] = {}
-
-    if len(tickers) == 1:
-        ticker = tickers[0]
-        try:
-            close_col = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
-            last_price = float(close_col.dropna().iloc[-1])
-            price_map[ticker] = last_price
-        except Exception:
-            pass
-    else:
-        for ticker in tickers:
-            try:
-                last_price = float(data[ticker]["Close"].dropna().iloc[-1])
-                price_map[ticker] = last_price
-            except Exception:
-                pass
+    for item in data.get("tickers", []):
+        ticker = item.get("ticker")
+        last_price = (
+            (item.get("lastTrade") or {}).get("p")
+            or (item.get("day") or {}).get("c")
+        )
+        if ticker and last_price:
+            price_map[ticker] = float(last_price)
 
     updated = []
     for pos in positions:
