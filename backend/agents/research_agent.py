@@ -1185,6 +1185,8 @@ def _build_synthesis_message(
         f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
         f"{structured_block}\n\n"
         f"{chunks_section}\n\n"
+        "Valuation multiples rule: whenever you cite an EV/Revenue multiple, label it inline as either (FY2025E) or (FY2026E). "
+        "Never cite an EV/Revenue multiple without a year label.\n"
         f"Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.\n"
         f"Use today's date ({date.today().isoformat()}) for the \"date\" field.\n"
     )

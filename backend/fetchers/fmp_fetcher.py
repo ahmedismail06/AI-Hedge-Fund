@@ -13,11 +13,13 @@ Fields returned:
   - cash                                    (yfinance quarterly balance sheet)
   - ttm_operating_cash_flow                 (Polygon cash flow statement)
   - cash_runway_months                      (computed: cash / monthly burn)
+  - net_income, net_income_flag             (Polygon income statement, validation flag)
   - long_term_debt, accounts_payable        (Polygon /vX/reference/financials)
   - market_cap                              (Polygon /v3/reference/tickers)
 """
 
 import os
+import logging
 from datetime import date
 
 import requests
@@ -27,6 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 POLYGON_BASE = "https://api.polygon.io"
+logger = logging.getLogger(__name__)
 
 
 def fetch_fmp(ticker: str) -> dict:
@@ -44,6 +47,11 @@ def fetch_fmp(ticker: str) -> dict:
         "consensus_revenue_next_year": float | None,     # millions
         "next_earnings_date": str | None,                # YYYY-MM-DD
         "sector": str | None,
+        "cash": float | None,
+        "ttm_operating_cash_flow": float | None,
+        "cash_runway_months": float | None,
+        "net_income": float | None,
+        "net_income_flag": str | None,
         "long_term_debt": float | None,                  # raw dollars
         "accounts_payable": float | None,                # raw dollars
         "market_cap": float | None,                      # raw dollars
@@ -68,6 +76,8 @@ def fetch_fmp(ticker: str) -> dict:
         "ttm_operating_cash_flow": None,
         "ocf_annualized": False,   # Bug 9: True when TTM OCF = single quarter × 4
         "cash_runway_months": None,
+        "net_income": None,        # raw dollars (Polygon income statement)
+        "net_income_flag": None,   # e.g., "SUSPECT_NET_INCOME"
         "long_term_debt": None,
         "accounts_payable": None,
         "market_cap": None,
@@ -194,6 +204,25 @@ def fetch_fmp(ticker: str) -> dict:
                     if ap is not None:
                         result["accounts_payable"] = ap
 
+                    # Net income — prefer TTM filing if available
+                    net_income = None
+                    for filing in results:
+                        if filing.get("fiscal_period") == "TTM":
+                            inc = filing.get("financials", {}).get("income_statement", {})
+                            net_income = (
+                                inc.get("net_income_loss", {}).get("value")
+                                or inc.get("net_income", {}).get("value")
+                            )
+                            break
+                    if net_income is None:
+                        inc = results[0].get("financials", {}).get("income_statement", {})
+                        net_income = (
+                            inc.get("net_income_loss", {}).get("value")
+                            or inc.get("net_income", {}).get("value")
+                        )
+                    if net_income is not None:
+                        result["net_income"] = net_income
+
                     # TTM operating cash flow — prefer TTM filing, else annualise Q4
                     ttm_ocf = None
                     for filing in results:
@@ -214,6 +243,19 @@ def fetch_fmp(ticker: str) -> dict:
 
                     if ttm_ocf is not None:
                         result["ttm_operating_cash_flow"] = ttm_ocf
+
+                    # Validate net income vs. cash burn — flag suspect values without correcting
+                    if ttm_ocf is not None and ttm_ocf < 0 and result["net_income"] is not None:
+                        ttm_outflow = abs(ttm_ocf)
+                        if abs(result["net_income"]) < (ttm_outflow * 0.10):
+                            result["net_income_flag"] = "SUSPECT_NET_INCOME"
+                            logger.warning(
+                                "fetch_fmp(%s): SUSPECT_NET_INCOME — net_income=%s vs TTM OCF=%s; suppressing net_income",
+                                sym,
+                                result["net_income"],
+                                ttm_ocf,
+                            )
+                            result["net_income"] = None
 
                     # Compute runway: cash / monthly burn (only if burning cash)
                     cash = result.get("cash")

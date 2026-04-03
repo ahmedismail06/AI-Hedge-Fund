@@ -7,6 +7,12 @@ Optional extension fields are populated by skill integrations (see SKILLS_INTEGR
 
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
+try:
+    from pydantic import field_validator
+    _HAS_PYDANTIC_V2 = True
+except ImportError:  # Pydantic v1 fallback
+    from pydantic import validator as field_validator
+    _HAS_PYDANTIC_V2 = False
 
 
 class FinancialHealth(BaseModel):
@@ -62,3 +68,16 @@ class InvestmentMemo(BaseModel):
 
     # Red team — second LLM call that argues against the bull thesis
     red_team_risks: Optional[list[str]] = None
+
+    if _HAS_PYDANTIC_V2:
+        @field_validator("conviction_score", mode="before")
+        def _coerce_conviction_score(cls, v):
+            if isinstance(v, int):
+                return float(v)
+            return v
+    else:
+        @field_validator("conviction_score", pre=True)
+        def _coerce_conviction_score(cls, v):
+            if isinstance(v, int):
+                return float(v)
+            return v
