@@ -211,6 +211,66 @@ create table if not exists portfolio_metrics (
 create index if not exists portfolio_metrics_date_idx on portfolio_metrics (date desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Execution Agent: orders table
+-- Tracks IBKR order lifecycle from placement to fill/cancel.
+-- One order per APPROVED position (re-created on retry after timeout).
+-- order_type allowed values: 'LIMIT' | 'VWAP_30' | 'VWAP_DAY'
+-- status allowed values: 'PENDING' | 'SUBMITTED' | 'PARTIAL' | 'FILLED' | 'CANCELLED' | 'TIMEOUT' | 'ERROR'
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists orders (
+    id                  uuid primary key default gen_random_uuid(),
+    position_id         uuid not null references positions(id),
+    ticker              text not null,
+    direction           text not null check (direction in ('LONG', 'SHORT')),
+    order_type          text not null check (order_type in ('LIMIT', 'VWAP_30', 'VWAP_DAY')),
+    requested_qty       numeric(10, 2) not null,
+    limit_price         numeric(12, 4),
+    ibkr_order_id       integer,
+    ibkr_client_id      integer,
+    status              text not null default 'PENDING'
+                            check (status in ('PENDING', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'TIMEOUT', 'ERROR')),
+    total_filled_qty    numeric(10, 2) not null default 0,
+    avg_fill_price      numeric(12, 4),
+    submitted_at        timestamptz,
+    filled_at           timestamptz,
+    cancelled_at        timestamptz,
+    timeout_at          timestamptz,
+    error_message       text,
+    created_at          timestamptz not null default now()
+);
+
+create index if not exists orders_position_id_idx on orders (position_id);
+create index if not exists orders_status_idx on orders (status, created_at desc);
+create index if not exists orders_ibkr_order_id_idx on orders (ibkr_order_id) where ibkr_order_id is not null;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Execution Agent: fills table
+-- Records individual IBKR fill events per order.
+-- slippage_bps = (fill_price - intended_price) / intended_price * 10000
+-- intended_price is a snapshot of positions.entry_price at order placement.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists fills (
+    id              uuid primary key default gen_random_uuid(),
+    order_id        uuid not null references orders(id),
+    position_id     uuid not null references positions(id),
+    ticker          text not null,
+    fill_qty        numeric(10, 2) not null,
+    fill_price      numeric(12, 4) not null,
+    fill_time       timestamptz not null,
+    commission      numeric(8, 4),
+    exchange        text,
+    slippage_bps    numeric(8, 2),
+    intended_price  numeric(12, 4),
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists fills_order_id_idx on fills (order_id);
+create index if not exists fills_position_id_idx on fills (position_id);
+create index if not exists fills_ticker_idx on fills (ticker, fill_time desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
 create or replace function match_document_chunks(
     query_embedding  vector(768),
