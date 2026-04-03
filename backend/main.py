@@ -23,13 +23,16 @@ from backend.agents.research_scheduler import create_research_scheduler
 from backend.api.macro import router as macro_router
 from backend.api.portfolio import router as portfolio_router
 from backend.api.risk import router as risk_router
+from backend.api.execution import router as execution_router
 from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics
+from backend.agents.execution_agent import run_execution_cycle
 
 _screener_scheduler = None
 _macro_scheduler = None
 _research_scheduler = None
 _risk_monitor_scheduler = None
 _risk_metrics_scheduler = None
+_exec_scheduler = None
 
 
 @asynccontextmanager
@@ -40,7 +43,7 @@ async def lifespan(app: FastAPI):
     from apscheduler.triggers.cron import CronTrigger
 
     global _screener_scheduler, _macro_scheduler, _research_scheduler
-    global _risk_monitor_scheduler, _risk_metrics_scheduler
+    global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler
 
     _screener_scheduler = create_screener_scheduler()
     _macro_scheduler = create_macro_scheduler()
@@ -73,6 +76,17 @@ async def lifespan(app: FastAPI):
     )
     _risk_metrics_scheduler.start()
 
+    # Execution cycle: every 5 minutes, market-hours guard is inside run_execution_cycle
+    _exec_scheduler = BackgroundScheduler()
+    _exec_scheduler.add_job(
+        run_execution_cycle,
+        trigger=IntervalTrigger(seconds=300),
+        id="execution_cycle",
+        name="Execution Cycle (5m)",
+        replace_existing=True,
+    )
+    _exec_scheduler.start()
+
     yield
 
     for sched in (
@@ -81,15 +95,24 @@ async def lifespan(app: FastAPI):
         _research_scheduler,
         _risk_monitor_scheduler,
         _risk_metrics_scheduler,
+        _exec_scheduler,
     ):
         if sched and sched.running:
             sched.shutdown(wait=False)
+
+    # Disconnect IBKR on shutdown
+    try:
+        from backend.broker import ibkr as _ibkr
+        _ibkr.disconnect()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="AI Hedge Fund API", version="0.1.0", lifespan=lifespan)
 app.include_router(macro_router)
 app.include_router(portfolio_router)
 app.include_router(risk_router)
+app.include_router(execution_router)
 
 app.add_middleware(
     CORSMiddleware,
