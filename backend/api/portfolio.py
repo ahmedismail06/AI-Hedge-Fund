@@ -169,6 +169,31 @@ def approve_position(position_id: str):
     """
     try:
         client = _get_client()
+
+        # ── CRITICAL alert gate ───────────────────────────────────────────────
+        try:
+            critical_resp = (
+                client.table("risk_alerts")
+                .select("id,trigger")
+                .eq("severity", "CRITICAL")
+                .eq("resolved", False)
+                .execute()
+            )
+            if critical_resp.data:
+                triggers = [a.get("trigger", "unknown") for a in critical_resp.data]
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Approval blocked: {len(critical_resp.data)} unresolved CRITICAL "
+                        f"alert(s). Resolve all CRITICAL alerts before approving trades. "
+                        f"Triggers: {'; '.join(triggers)}"
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("CRITICAL alert check failed (non-blocking): %s", exc)
+
         result = (
             client.table("positions")
             .update({"status": "APPROVED"})
