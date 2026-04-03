@@ -133,13 +133,25 @@ def fetch_series_latest(series_id: str, lookback: int = 15) -> pd.Series:
     FredFetchError
         If the API call fails or the series is entirely empty after dropping NaNs.
     """
+    fred = _get_fred_client()
     try:
-        fred = _get_fred_client()
         raw: pd.Series = fred.get_series(series_id)
     except Exception as exc:
-        raise FredFetchError(
-            f"Failed to fetch FRED series '{series_id}': {exc}"
-        ) from exc
+        # Retry with a shorter history window to reduce payload size and
+        # avoid occasional upstream hiccups on large/long series.
+        try:
+            start = (pd.Timestamp.today() - pd.DateOffset(years=10)).date()
+            logger.warning(
+                "Retrying FRED series '%s' with observation_start=%s after error: %s",
+                series_id,
+                start,
+                exc,
+            )
+            raw = fred.get_series(series_id, observation_start=start)
+        except Exception as exc2:
+            raise FredFetchError(
+                f"Failed to fetch FRED series '{series_id}': {exc2}"
+            ) from exc2
 
     if raw is None or raw.empty:
         raise FredFetchError(f"FRED series '{series_id}' returned an empty result.")
