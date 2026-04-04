@@ -20,21 +20,24 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[Client] = None
 _embed_model: Optional["SentenceTransformer"] = None
 
 _EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
+# Credentials cached at module level — avoids repeated os.getenv calls
+# but never caches the client itself (stale httpx connections on macOS cause EAGAIN Errno 35)
+_SUPABASE_URL: Optional[str] = None
+_SUPABASE_KEY: Optional[str] = None
+
 
 def _get_client() -> Client:
-    global _client
-    if _client is None:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")
-        if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
-        _client = create_client(url, key)
-    return _client
+    global _SUPABASE_URL, _SUPABASE_KEY
+    if _SUPABASE_URL is None:
+        _SUPABASE_URL = os.getenv("SUPABASE_URL")
+        _SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+    if not _SUPABASE_URL or not _SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
+    return create_client(_SUPABASE_URL, _SUPABASE_KEY)
 
 
 def store_memo(ticker: str, memo_dict: dict) -> str:

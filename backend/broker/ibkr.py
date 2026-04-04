@@ -140,3 +140,34 @@ def get_loop() -> asyncio.AbstractEventLoop:
     """Return the dedicated ib_insync event loop, starting the background thread if needed."""
     _start_ib_thread()
     return _ib_loop
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Account summary
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ACCOUNT_TAGS_WANTED = {'NetLiquidation', 'TotalCashValue', 'UnrealizedPnL', 'RealizedPnL'}
+
+
+def get_account_summary() -> dict:
+    """
+    Return key IBKR account values from the cached accountValues() list.
+    ib_insync keeps this cache updated automatically once connected.
+    Returns empty dict if not connected or no data yet.
+    """
+    global _ib
+    with _lock:
+        if _ib is None or not _ib.isConnected():
+            return {}
+    try:
+        result = {}
+        for av in _ib.accountValues():
+            if av.tag in _ACCOUNT_TAGS_WANTED and av.currency == 'USD':
+                try:
+                    result[av.tag] = float(av.value)
+                except (ValueError, TypeError):
+                    pass
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch account summary: %s", exc)
+        return {}
