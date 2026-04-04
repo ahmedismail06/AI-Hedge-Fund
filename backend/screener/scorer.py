@@ -105,7 +105,11 @@ def _normalize_universe(
     if len(valid) < 2:
         return {t: 5.0 for t in values}
 
-    sorted_vals = sorted(valid.values())
+    # Round to 9 decimal places to avoid float precision issues where
+    # v == unique_val fails for values like 0.333... stored with different
+    # precision, causing an empty positions list and ZeroDivisionError.
+    rounded_valid = {t: round(v, 9) for t, v in valid.items()}
+    sorted_vals = sorted(rounded_valid.values())
     n = len(sorted_vals)
 
     if n == 1 or len(set(sorted_vals)) == 1:
@@ -116,6 +120,8 @@ def _normalize_universe(
     val_to_score: dict[float, float] = {}
     for unique_val in set(sorted_vals):
         positions = [i for i, v in enumerate(sorted_vals) if v == unique_val]
+        if not positions:
+            continue  # safety guard — should not happen after rounding
         avg_rank = sum(positions) / len(positions)
         pct = avg_rank / (n - 1)
         score = pct * 10.0
@@ -124,7 +130,7 @@ def _normalize_universe(
         val_to_score[unique_val] = round(score, 3)
 
     return {
-        t: val_to_score[valid[t]] if t in valid else 5.0
+        t: val_to_score.get(rounded_valid[t], 5.0) if t in rounded_valid else 5.0
         for t in values
     }
 

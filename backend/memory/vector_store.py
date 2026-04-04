@@ -20,21 +20,37 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[Client] = None
 _embed_model: Optional["SentenceTransformer"] = None
 
 _EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
+# Cache URL/key at module load so we don't re-read env on every call.
+# The client itself is NOT a singleton — httpx keep-alive connections become stale
+# and return EAGAIN (Errno 35 on macOS) when the server closes them between requests.
+# Creating a fresh client per call is cheap (httpx manages the TCP pool internally).
+_SUPABASE_URL: Optional[str] = None
+_SUPABASE_KEY: Optional[str] = None
+
+
+def _load_credentials() -> tuple[str, str]:
+    global _SUPABASE_URL, _SUPABASE_KEY
+    if _SUPABASE_URL and _SUPABASE_KEY:
+        return _SUPABASE_URL, _SUPABASE_KEY
+    url = os.getenv("SUPABASE_URL")
+    # Accept either SUPABASE_SERVICE_KEY (service-role) or SUPABASE_KEY (anon)
+    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_KEY) must be set in .env"
+        )
+    _SUPABASE_URL, _SUPABASE_KEY = url, key
+    return url, key
+
 
 def _get_client() -> Client:
-    global _client
-    if _client is None:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")
-        if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
-        _client = create_client(url, key)
-    return _client
+    """Return a fresh Supabase client per call to avoid stale httpx connections."""
+    url, key = _load_credentials()
+    return create_client(url, key)
 
 
 def store_memo(ticker: str, memo_dict: dict) -> str:

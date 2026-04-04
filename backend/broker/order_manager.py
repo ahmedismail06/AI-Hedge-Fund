@@ -199,18 +199,23 @@ def cancel_order(order_id: str) -> bool:
                 exc,
             )
 
-    # 4. Update Supabase to CANCELLED.
+    # 4. Update Supabase to PENDING (re-queue after manual cancel).
     try:
         _get_client().table("orders").update(
-            {"status": "CANCELLED", "cancelled_at": datetime.utcnow().isoformat()}
+            {
+                "status": "PENDING",
+                "cancelled_at": datetime.utcnow().isoformat(),
+                "ibkr_order_id": None,
+                "submitted_at": None,
+            }
         ).eq("id", order_id).execute()
     except Exception as exc:
         logger.error(
-            "Supabase update to CANCELLED failed (order_id=%s): %s", order_id, exc
+            "Supabase update to PENDING failed (order_id=%s): %s", order_id, exc
         )
         return False
 
-    logger.info("Order cancelled: order_id=%s", order_id)
+    logger.info("Order cancelled and reset to PENDING: order_id=%s", order_id)
     return True
 
 

@@ -167,6 +167,30 @@ def _fetch_form4_for_candidates(
 
 # ── Supabase write helpers ─────────────────────────────────────────────────────
 
+def _sanitize_float(v) -> float | None:
+    """Convert NaN/Inf to None so Supabase JSON serialization doesn't fail."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return None if (f != f or f == float("inf") or f == float("-inf")) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _sanitize_dict(d: dict) -> dict:
+    """Recursively replace NaN/Inf floats in a dict with None."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = _sanitize_dict(v)
+        elif isinstance(v, float):
+            out[k] = _sanitize_float(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -> None:
     """Bulk-upsert all screener results to the watchlist table."""
     try:
@@ -180,19 +204,19 @@ def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -
         rows.append({
             "run_date":        run_date.isoformat(),
             "ticker":          r.ticker,
-            "composite_score": float(r.composite_score),
-            "quality_score":   float(r.quality_score),
-            "value_score":     float(r.value_score),
-            "momentum_score":  float(r.momentum_score),
+            "composite_score": _sanitize_float(r.composite_score),
+            "quality_score":   _sanitize_float(r.quality_score),
+            "value_score":     _sanitize_float(r.value_score),
+            "momentum_score":  _sanitize_float(r.momentum_score),
             "rank":            r.rank,
-            "market_cap_m":    r.market_cap_m,
-            "adv_k":           r.adv_k,
+            "market_cap_m":    _sanitize_float(r.market_cap_m),
+            "adv_k":           _sanitize_float(r.adv_k),
             "sector":          r.sector,
             "regime":          regime,
-            "beneish_m_score": r.beneish_m_score,
+            "beneish_m_score": _sanitize_float(r.beneish_m_score),
             "beneish_flag":    r.beneish_flag if r.beneish_flag in ("EXCLUDED", "FLAGGED", "CLEAN", "INSUFFICIENT_DATA") else None,
             "insider_signal":  r.insider_signal,
-            "raw_factors":     r.raw_factors,
+            "raw_factors":     _sanitize_dict(r.raw_factors) if r.raw_factors else r.raw_factors,
             "queued_for_research": r.queued_for_research,
         })
 
@@ -275,68 +299,109 @@ def run_screening(regime: str | None = None) -> list[dict]:
     Returns:
         List of dicts for qualified tickers (composite_score ≥ 7.0), sorted descending.
     """
+    import time as _time
+    _t0 = _time.time()
+
     run_date = date.today()
     regime   = regime or _read_regime()
+    print(f"\n{'='*60}")
+    print(f"[SCREENER] Starting screening run | date={run_date} regime={regime}")
+    print(f"{'='*60}")
     logger.info("=== Screening run starting | date=%s regime=%s ===", run_date, regime)
 
     # Step 1: Build universe
+    print("[SCREENER] Step 1/8 — Building universe...")
     try:
         universe = build_universe()
     except Exception as exc:
+        print(f"[SCREENER] ERROR: Universe build failed: {exc}")
         raise ScreeningAgentError(f"Universe build failed: {exc}") from exc
 
     if not universe:
+        print("[SCREENER] WARNING: Universe is empty — aborting")
         logger.warning("Universe is empty — aborting screening run")
         return []
 
+    print(f"[SCREENER] Universe: {len(universe)} candidates")
     logger.info("Universe: %d candidates", len(universe))
 
     # Step 2: Batch-fetch all ticker data
+    print(f"[SCREENER] Step 2/8 — Fetching per-ticker data ({len(universe)} tickers, {_MAX_WORKERS} workers)...")
+    _t1 = _time.time()
     raw_data_map = _batch_fetch_ticker_data(universe)
+    print(f"[SCREENER] Fetch complete: {len(raw_data_map)} tickers in {_time.time()-_t1:.1f}s")
 
     # Step 3: Score each ticker (quality, value, momentum, beneish)
+    print(f"[SCREENER] Step 3/8 — Scoring factors for {len(raw_data_map)} tickers...")
     raw_factor_results: dict[str, dict] = {}
+    score_errors = 0
     for ticker, raw_data in raw_data_map.items():
-        raw_factor_results[ticker] = _score_ticker(ticker, raw_data)
+        scored = _score_ticker(ticker, raw_data)
+        raw_factor_results[ticker] = scored
+        # Check if all factor scorers returned empty (data issue)
+        if not scored.get("quality") and not scored.get("value") and not scored.get("momentum"):
+            score_errors += 1
+    print(f"[SCREENER] Scoring complete. Empty-data tickers: {score_errors}/{len(raw_data_map)}")
 
     # Step 4: First-pass composite estimate (without Form 4) to identify Form 4 candidates
-    # We do a lightweight score estimate using only quality sub-metrics as proxy
     form4_candidates: list[str] = []
+    excluded_count = 0
     for ticker, factors in raw_factor_results.items():
-        # Rough pre-filter: include if not EXCLUDED and has some quality data
         if factors.get("beneish", {}).get("gate_result") == "EXCLUDED":
+            excluded_count += 1
             continue
         gm = factors.get("quality", {}).get("raw_values", {}).get("gross_margin")
-        # Use gross_margin as a simple proxy — any ticker with margin data is a candidate
         if gm is not None:
             form4_candidates.append(ticker)
 
-    # Limit Form 4 calls to avoid excessive EDGAR requests (cap at 200)
     form4_candidates = form4_candidates[:200]
+    print(f"[SCREENER] Step 4/8 — Beneish gate: {excluded_count} EXCLUDED. Form 4 candidates: {len(form4_candidates)}")
 
     # Step 5: Fetch Form 4 insider buying for candidates
+    print(f"[SCREENER] Step 5/8 — Fetching Form 4 insider data for {len(form4_candidates)} tickers...")
     logger.info("Fetching Form 4 for %d candidates", len(form4_candidates))
     form4_results = _fetch_form4_for_candidates(form4_candidates)
+    insider_buy_count = sum(1 for v in form4_results.values() if v.get("insider_buy"))
+    print(f"[SCREENER] Form 4 complete: {insider_buy_count} tickers with insider buying signal")
 
     # Merge form4 into raw_factor_results
     for ticker, f4 in form4_results.items():
         raw_factor_results.setdefault(ticker, {})["form4"] = f4
 
     # Step 6: Compute composite scores
+    print("[SCREENER] Step 6/8 — Computing composite scores...")
     all_results = compute_composite(universe, raw_factor_results, regime)
 
-    # Step 7: Write all results to Supabase watchlist (including EXCLUDED for audit)
+    # Score distribution summary
+    scores = [r.composite_score for r in all_results if not r.excluded]
+    if scores:
+        above_5 = sum(1 for s in scores if s >= 5.0)
+        above_7 = sum(1 for s in scores if s >= _QUALIFY_THRESHOLD)
+        print(f"[SCREENER] Score distribution: {len(scores)} scored | ≥5.0: {above_5} | ≥{_QUALIFY_THRESHOLD}: {above_7}")
+        top5 = sorted(all_results, key=lambda r: r.composite_score, reverse=True)[:5]
+        print("[SCREENER] Top 5 by composite score:")
+        for r in top5:
+            print(f"  {r.ticker:6s}  composite={r.composite_score:.2f}  quality={r.quality_score:.2f}  value={r.value_score:.2f}  momentum={r.momentum_score:.2f}  sector={r.sector}  beneish={r.beneish_flag}")
+
+    # Step 7: Write all results to Supabase watchlist
+    print(f"[SCREENER] Step 7/8 — Writing {len(all_results)} results to Supabase watchlist...")
     try:
         _store_results(all_results, run_date, regime)
+        print("[SCREENER] Supabase write OK")
     except Exception as exc:
+        print(f"[SCREENER] ERROR: Supabase write failed: {exc}")
         logger.error("Failed to store screener results: %s", exc)
 
     # Step 8: Queue top N qualified tickers for research
     qualified = [r for r in all_results if not r.excluded and r.composite_score >= _QUALIFY_THRESHOLD]
+    print(f"[SCREENER] Step 8/8 — {len(qualified)} tickers qualify (score ≥ {_QUALIFY_THRESHOLD})")
     logger.info("%d tickers qualify (score ≥ %.1f)", len(qualified), _QUALIFY_THRESHOLD)
 
     queued = _queue_top_n_for_research(qualified, run_date)
 
+    elapsed = _time.time() - _t0
+    print(f"\n[SCREENER] Run complete in {elapsed:.1f}s | queued for research: {queued}")
+    print(f"{'='*60}\n")
     logger.info("=== Screening run complete | queued=%s ===", queued)
 
     return [
