@@ -25,6 +25,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -113,8 +114,11 @@ def _fetch_adv_k(ticker: str, polygon_key: str) -> Optional[float]:
     Returns value in $K, or None on failure.
     """
     try:
+        today = date.today()
+        from_date = (today - timedelta(days=45)).strftime("%Y-%m-%d")  # 45-day window to ensure 30 trading days
+        to_date = today.strftime("%Y-%m-%d")
         r = _polygon_get(
-            f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/day/30daysago/today",
+            f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/day/{from_date}/{to_date}",
             params={
                 "adjusted": "true",
                 "sort": "asc",

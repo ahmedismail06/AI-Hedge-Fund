@@ -17,6 +17,7 @@ agent-to-agent communication.
 """
 
 import logging
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -175,24 +176,34 @@ def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -
         logger.error("Supabase client unavailable — skipping watchlist write: %s", exc)
         return
 
+    def _sanitize(obj):
+        """Recursively replace NaN/Inf at any depth with None for JSON safety."""
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize(item) for item in obj]
+        return obj
+
     rows = []
     for r in results:
         rows.append({
             "run_date":        run_date.isoformat(),
             "ticker":          r.ticker,
-            "composite_score": float(r.composite_score),
-            "quality_score":   float(r.quality_score),
-            "value_score":     float(r.value_score),
-            "momentum_score":  float(r.momentum_score),
+            "composite_score": _sanitize(float(r.composite_score)),
+            "quality_score":   _sanitize(float(r.quality_score)),
+            "value_score":     _sanitize(float(r.value_score)),
+            "momentum_score":  _sanitize(float(r.momentum_score)),
             "rank":            r.rank,
             "market_cap_m":    r.market_cap_m,
             "adv_k":           r.adv_k,
             "sector":          r.sector,
             "regime":          regime,
-            "beneish_m_score": r.beneish_m_score,
+            "beneish_m_score": _sanitize(r.beneish_m_score) if r.beneish_m_score is not None else None,
             "beneish_flag":    r.beneish_flag if r.beneish_flag in ("EXCLUDED", "FLAGGED", "CLEAN", "INSUFFICIENT_DATA") else None,
             "insider_signal":  r.insider_signal,
-            "raw_factors":     r.raw_factors,
+            "raw_factors":     _sanitize(r.raw_factors),
             "queued_for_research": r.queued_for_research,
         })
 

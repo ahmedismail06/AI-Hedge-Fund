@@ -100,7 +100,8 @@ def _normalize_universe(
     Returns:
         {ticker: normalized_score_0_to_10}
     """
-    valid = {t: v for t, v in values.items() if v is not None}
+    import math
+    valid = {t: v for t, v in values.items() if v is not None and not math.isnan(v)}
 
     if len(valid) < 2:
         return {t: 5.0 for t in values}
