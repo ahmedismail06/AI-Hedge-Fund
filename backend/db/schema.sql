@@ -271,49 +271,6 @@ create index if not exists fills_position_id_idx on fills (position_id);
 create index if not exists fills_ticker_idx on fills (ticker, fill_time desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Orchestrator (Component 8): orchestrator_config table
--- Single-row config record tracking autonomous mode and daily suspension state.
--- ─────────────────────────────────────────────────────────────────────────────
-
-create table if not exists orchestrator_config (
-    id              uuid primary key default gen_random_uuid(),
-    mode            text not null default 'SUPERVISED'
-                        check (mode in ('SUPERVISED', 'AUTONOMOUS')),
-    suspended_until date,       -- if = today, auto-approve is disabled for the day
-    updated_at      timestamptz not null default now()
-);
-
--- Seed the single config row (no-op if already exists)
-insert into orchestrator_config (mode) values ('SUPERVISED') on conflict do nothing;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- Orchestrator (Component 8): orchestrator_log table
--- Append-only audit trail of every orchestrator decision.
--- event_type values: CYCLE_START | CYCLE_END | AUTO_APPROVE | CRITICAL_BLOCK
---                    | SUSPEND | MODE_CHANGE | AGENT_TRIGGERED | ERROR
--- ─────────────────────────────────────────────────────────────────────────────
-
-create table if not exists orchestrator_log (
-    id               uuid primary key default gen_random_uuid(),
-    run_date         date not null,
-    event_type       text not null
-                         check (event_type in (
-                             'CYCLE_START', 'CYCLE_END', 'AUTO_APPROVE', 'CRITICAL_BLOCK',
-                             'SUSPEND', 'MODE_CHANGE', 'AGENT_TRIGGERED', 'ERROR'
-                         )),
-    agent            text,            -- 'macro' | 'screening' | 'research' | 'portfolio' | 'orchestrator'
-    position_id      uuid,
-    ticker           text,
-    conviction_score numeric(4, 2),
-    detail           text,
-    mode_snapshot    text,
-    created_at       timestamptz not null default now()
-);
-
-create index if not exists orch_log_run_date_idx on orchestrator_log (run_date desc, created_at desc);
-create index if not exists orch_log_event_type_idx on orchestrator_log (event_type, run_date desc);
-
--- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
 create or replace function match_document_chunks(
     query_embedding  vector(768),

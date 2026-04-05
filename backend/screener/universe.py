@@ -28,8 +28,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import threading
-
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
@@ -37,10 +35,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-# Yahoo Finance rate-limits aggressively when hit with many parallel requests.
-# Cap concurrent yfinance calls at 3 regardless of how many workers are running.
-_YF_SEMAPHORE = threading.Semaphore(3)
 
 POLYGON_BASE = "https://api.polygon.io"
 
@@ -118,12 +112,9 @@ def _fetch_adv_k(ticker: str, polygon_key: str) -> Optional[float]:
     Compute 30-day average daily dollar volume using Polygon aggregate bars.
     Returns value in $K, or None on failure.
     """
-    import datetime
     try:
-        end_date   = datetime.date.today().isoformat()
-        start_date = (datetime.date.today() - datetime.timedelta(days=35)).isoformat()
         r = _polygon_get(
-            f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}",
+            f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/day/30daysago/today",
             params={
                 "adjusted": "true",
                 "sort": "asc",
@@ -150,8 +141,7 @@ def _fetch_adv_k(ticker: str, polygon_key: str) -> Optional[float]:
 def _fetch_analyst_count(ticker: str) -> Optional[int]:
     """Return analyst count from yfinance, or None on failure."""
     try:
-        with _YF_SEMAPHORE:
-            info = yf.Ticker(ticker).info or {}
+        info = yf.Ticker(ticker).info or {}
         return info.get("numberOfAnalystOpinions")
     except Exception as exc:
         logger.debug("%s: analyst count fetch failed: %s", ticker, exc)
@@ -263,9 +253,7 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
     if use_cache:
         cached = _load_universe_cache()
         if cached is not None:
-            print(f"[UNIVERSE] Cache hit: {len(cached)} candidates loaded from .universe_cache.json (skipping Polygon detail calls)")
             return cached
-        print("[UNIVERSE] No valid cache — running full Polygon build (this takes ~20 min on free tier)")
 
     # ── Phase 1: Collect all common-stock ticker symbols on target exchanges ────
     # The list endpoint only gives us ticker + exchange (no market_cap/sic_code).
@@ -310,56 +298,47 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
         else:
             next_url = None
 
-    print(f"[UNIVERSE] Polygon list: {len(all_symbols)} symbols from NYSE/NASDAQ/AMEX ({pages_fetched} pages)")
     logger.info(
         "Polygon list: %d common-stock symbols on NYSE/NASDAQ/AMEX (%d pages)",
         len(all_symbols), pages_fetched,
     )
 
-    # ── Phase 2: Parallel detail-fetch for market_cap + sic_code ─────────────
-    # Parallelized with 20 workers (Polygon Stocks Starter = unlimited API calls).
-    # For ~5000 symbols with 20 workers: ~30 seconds vs ~20 min sequential.
-    # Falls back gracefully to slower rate if 429s appear.
+    # ── Phase 2: Sequential detail-fetch for market_cap + sic_code ───────────
+    # Sequential (not parallel) to stay within Polygon rate limits.
+    # 0.25s between calls = ~4 req/sec. For ~5000 symbols: ~20 minutes.
+    # This phase is the bottleneck; the result is cached for 24 hours.
     candidates: list[UniverseCandidate] = []
-    print(f"[UNIVERSE] Fetching detail for {len(all_symbols)} symbols (parallel, 20 workers — ~1 min estimated)")
-    logger.info("Fetching detail for %d symbols (parallel, 20 workers)", len(all_symbols))
+    logger.info("Fetching detail for %d symbols (sequential, ~0.25s each — this takes ~20 min)", len(all_symbols))
 
-    _detail_lock = __import__("threading").Lock()
-    _progress = [0]
-
-    def _fetch_and_filter(ticker: str) -> Optional[UniverseCandidate]:
+    for i, ticker in enumerate(all_symbols):
         detail = _fetch_ticker_detail(ticker, polygon_key)
-        with _detail_lock:
-            _progress[0] += 1
-            if _progress[0] % 500 == 0:
-                print(f"[UNIVERSE]   Detail fetch: {_progress[0]}/{len(all_symbols)} symbols processed")
+        time.sleep(0.25)
+
         if detail is None:
-            return None
+            continue
         mc = detail.get("market_cap")
         if mc is None:
-            return None
+            continue
         mktcap_m = mc / 1_000_000
         if not (50 <= mktcap_m <= 2000):
-            return None
+            continue
         sic = detail.get("sic_code")
         sector = SECTOR_OVERRIDES.get(ticker) or _sic_to_sector(sic)
         if sector is None:
-            return None
-        return UniverseCandidate(
+            continue
+        candidates.append(UniverseCandidate(
             ticker=ticker,
             market_cap_m=round(mktcap_m, 2),
             sector=sector,
             sic_code=sic,
-        )
+        ))
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
-        futures = {pool.submit(_fetch_and_filter, t): t for t in all_symbols}
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                candidates.append(result)
+        if (i + 1) % 500 == 0:
+            logger.info(
+                "  Detail fetch progress: %d/%d symbols, %d candidates so far",
+                i + 1, len(all_symbols), len(candidates),
+            )
 
-    print(f"[UNIVERSE] Detail fetch done: {len(candidates)} sector-qualified (SaaS/Healthcare/Industrials) before ADV filter")
     logger.info("Polygon reference: %d sector-qualified candidates before ADV/analyst filter", len(candidates))
 
     # ── ADV filter (parallel) ─────────────────────────────────────────────────
@@ -378,7 +357,6 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
             if result is not None:
                 adv_qualified.append(result)
 
-    print(f"[UNIVERSE] After ADV ≥ $500K filter: {len(adv_qualified)} candidates")
     logger.info("After ADV ≥ $500K filter: %d candidates", len(adv_qualified))
 
     # ── Analyst count filter (parallel, yfinance) ─────────────────────────────
@@ -398,7 +376,6 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
             if result is not None:
                 final.append(result)
 
-    print(f"[UNIVERSE] Final universe after analyst ≤ 5 filter: {len(final)} candidates")
     logger.info("Final universe after analyst ≤ 5 filter: %d candidates", len(final))
 
     # ── Cache the final universe ───────────────────────────────────────────────
@@ -488,9 +465,25 @@ def fetch_ticker_data(ticker: str) -> dict:
         except Exception as exc:
             logger.warning("%s: Polygon price history failed: %s", ticker, exc)
 
-    # ── yfinance info — reuse what fmp_fetcher already fetched ───────────────
-    # fmp_fetcher calls yfinance once and caches the result in _yf_info_raw.
-    # Reusing it here avoids a second yfinance call per ticker (halves Yahoo requests).
-    result["yf_info"] = result["fmp"].pop("_yf_info_raw", {})
+    # ── yfinance info (analyst count, earnings history, sector) ──────────────
+    try:
+        t = yf.Ticker(ticker)
+        result["yf_info"] = t.info or {}
+
+        # Augment with earningsHistory for eps_beat_rate
+        try:
+            eh = t.earnings_history
+            if eh is not None and not eh.empty:
+                eh_list = []
+                for _, row in eh.iterrows():
+                    eh_list.append({
+                        "epsEstimate": row.get("epsEstimate"),
+                        "epsActual":   row.get("epsActual"),
+                    })
+                result["yf_info"]["earningsHistory"] = eh_list
+        except Exception as exc:
+            logger.debug("%s: earningsHistory fetch failed: %s", ticker, exc)
+    except Exception as exc:
+        logger.warning("%s: yfinance info failed: %s", ticker, exc)
 
     return result

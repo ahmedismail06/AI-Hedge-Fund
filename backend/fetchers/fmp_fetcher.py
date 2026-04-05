@@ -28,14 +28,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Import the shared semaphore from universe.py to coordinate yfinance concurrency
-# across both fetch paths that run inside the same ThreadPoolExecutor.
-try:
-    from backend.screener.universe import _YF_SEMAPHORE
-except ImportError:
-    import threading
-    _YF_SEMAPHORE = threading.Semaphore(3)
-
 POLYGON_BASE = "https://api.polygon.io"
 logger = logging.getLogger(__name__)
 
@@ -91,98 +83,83 @@ def fetch_fmp(ticker: str) -> dict:
         "market_cap": None,
         "market_cap_source": None, # Bug 10: "yfinance" (live) or "polygon_reference" (stale)
         "error": None,
-        "_yf_info_raw": {},        # raw yf.Ticker.info — reused by fetch_ticker_data to avoid double call
     }
 
     # ── yfinance ──────────────────────────────────────────────────────────────
-    # Semaphore (shared with universe.py) caps concurrent yfinance calls at 3.
     try:
-        with _YF_SEMAPHORE:
-            t = yf.Ticker(sym)
-            info = t.info or {}
-            result["_yf_info_raw"] = dict(info)  # cache for reuse by fetch_ticker_data
+        t = yf.Ticker(sym)
+        info = t.info or {}
 
-            # EarningsHistory — fetched here once so fetch_ticker_data doesn't need a second call
-            try:
-                eh = t.earnings_history
-                if eh is not None and not eh.empty:
-                    result["_yf_info_raw"]["earningsHistory"] = [
-                        {"epsEstimate": row.get("epsEstimate"), "epsActual": row.get("epsActual")}
-                        for _, row in eh.iterrows()
-                    ]
-            except Exception:
-                pass
+        # Short interest
+        si = info.get("shortPercentOfFloat")
+        if si is not None:
+            result["short_interest_pct"] = round(si * 100, 2)  # convert 0–1 → %
+        result["days_to_cover"] = info.get("shortRatio")
+        result["analyst_count"] = info.get("numberOfAnalystOpinions")
+        result["target_mean_price"] = info.get("targetMeanPrice")
+        result["sector"] = info.get("sector")
 
-            # Short interest
-            si = info.get("shortPercentOfFloat")
-            if si is not None:
-                result["short_interest_pct"] = round(si * 100, 2)  # convert 0–1 → %
-            result["days_to_cover"] = info.get("shortRatio")
-            result["analyst_count"] = info.get("numberOfAnalystOpinions")
-            result["target_mean_price"] = info.get("targetMeanPrice")
-            result["sector"] = info.get("sector")
+        # Bug 10: yfinance marketCap is live (updated intraday); use as primary source.
+        # Polygon /v3/reference/tickers returns a static reference field that can be
+        # months stale. Valuation multiples computed against stale market cap are wrong.
+        mktcap_yf = info.get("marketCap")
+        if mktcap_yf:
+            result["market_cap"] = float(mktcap_yf)
+            result["market_cap_source"] = "yfinance"
 
-            # Bug 10: yfinance marketCap is live (updated intraday); use as primary source.
-            # Polygon /v3/reference/tickers returns a static reference field that can be
-            # months stale. Valuation multiples computed against stale market cap are wrong.
-            mktcap_yf = info.get("marketCap")
-            if mktcap_yf:
-                result["market_cap"] = float(mktcap_yf)
-                result["market_cap_source"] = "yfinance"
+        # Consensus EPS estimates
+        try:
+            ee = t.earnings_estimate
+            if ee is not None and not ee.empty:
+                # rows indexed by period: 0q, +1q, 0y, +1y
+                if "0y" in ee.index:
+                    result["consensus_eps_current_year"] = ee.loc["0y", "avg"] if "avg" in ee.columns else None
+                if "+1y" in ee.index:
+                    result["consensus_eps_next_year"] = ee.loc["+1y", "avg"] if "avg" in ee.columns else None
+        except Exception:
+            pass
 
-            # Consensus EPS estimates
-            try:
-                ee = t.earnings_estimate
-                if ee is not None and not ee.empty:
-                    # rows indexed by period: 0q, +1q, 0y, +1y
-                    if "0y" in ee.index:
-                        result["consensus_eps_current_year"] = ee.loc["0y", "avg"] if "avg" in ee.columns else None
-                    if "+1y" in ee.index:
-                        result["consensus_eps_next_year"] = ee.loc["+1y", "avg"] if "avg" in ee.columns else None
-            except Exception:
-                pass
+        # Consensus revenue estimates
+        try:
+            re_ = t.revenue_estimate
+            if re_ is not None and not re_.empty:
+                if "0y" in re_.index:
+                    val = re_.loc["0y", "avg"] if "avg" in re_.columns else None
+                    if val is not None:
+                        result["consensus_revenue_current_year"] = round(val / 1_000_000, 1)
+                if "+1y" in re_.index:
+                    val = re_.loc["+1y", "avg"] if "avg" in re_.columns else None
+                    if val is not None:
+                        result["consensus_revenue_next_year"] = round(val / 1_000_000, 1)
+        except Exception:
+            pass
 
-            # Consensus revenue estimates
-            try:
-                re_ = t.revenue_estimate
-                if re_ is not None and not re_.empty:
-                    if "0y" in re_.index:
-                        val = re_.loc["0y", "avg"] if "avg" in re_.columns else None
-                        if val is not None:
-                            result["consensus_revenue_current_year"] = round(val / 1_000_000, 1)
-                    if "+1y" in re_.index:
-                        val = re_.loc["+1y", "avg"] if "avg" in re_.columns else None
-                        if val is not None:
-                            result["consensus_revenue_next_year"] = round(val / 1_000_000, 1)
-            except Exception:
-                pass
+        # Next earnings date
+        try:
+            cal = t.calendar or {}
+            earnings_dates = cal.get("Earnings Date", [])
+            today = date.today()
+            for d in (earnings_dates if isinstance(earnings_dates, list) else [earnings_dates]):
+                if hasattr(d, "date"):
+                    d = d.date()
+                if d >= today:
+                    result["next_earnings_date"] = str(d)
+                    break
+        except Exception:
+            pass
 
-            # Next earnings date
-            try:
-                cal = t.calendar or {}
-                earnings_dates = cal.get("Earnings Date", [])
-                today = date.today()
-                for d in (earnings_dates if isinstance(earnings_dates, list) else [earnings_dates]):
-                    if hasattr(d, "date"):
-                        d = d.date()
-                    if d >= today:
-                        result["next_earnings_date"] = str(d)
-                        break
-            except Exception:
-                pass
-
-            # Cash from quarterly balance sheet
-            try:
-                qbs = t.quarterly_balance_sheet
-                if qbs is not None and not qbs.empty:
-                    for row in ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"):
-                        if row in qbs.index:
-                            val = qbs.loc[row].iloc[0]
-                            if val is not None and val == val:  # not NaN
-                                result["cash"] = float(val)
-                                break
-            except Exception:
-                pass
+        # Cash from quarterly balance sheet
+        try:
+            qbs = t.quarterly_balance_sheet
+            if qbs is not None and not qbs.empty:
+                for row in ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"):
+                    if row in qbs.index:
+                        val = qbs.loc[row].iloc[0]
+                        if val is not None and val == val:  # not NaN
+                            result["cash"] = float(val)
+                            break
+        except Exception:
+            pass
 
     except Exception as exc:
         result["error"] = f"yfinance error: {exc}"

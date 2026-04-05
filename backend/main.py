@@ -24,7 +24,6 @@ from backend.api.macro import router as macro_router
 from backend.api.portfolio import router as portfolio_router
 from backend.api.risk import router as risk_router
 from backend.api.execution import router as execution_router
-from backend.api.orchestrator import router as orchestrator_router
 from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics
 from backend.agents.execution_agent import run_execution_cycle
 
@@ -34,7 +33,6 @@ _research_scheduler = None
 _risk_monitor_scheduler = None
 _risk_metrics_scheduler = None
 _exec_scheduler = None
-_orchestrator_scheduler = None
 
 
 @asynccontextmanager
@@ -46,7 +44,6 @@ async def lifespan(app: FastAPI):
 
     global _screener_scheduler, _macro_scheduler, _research_scheduler
     global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler
-    global _orchestrator_scheduler
 
     _screener_scheduler = create_screener_scheduler()
     _macro_scheduler = create_macro_scheduler()
@@ -90,11 +87,6 @@ async def lifespan(app: FastAPI):
     )
     _exec_scheduler.start()
 
-    # Orchestrator: approval pass every 5 minutes (same cadence as execution agent)
-    from backend.agents.orchestrator import create_orchestrator_scheduler
-    _orchestrator_scheduler = create_orchestrator_scheduler()
-    _orchestrator_scheduler.start()
-
     yield
 
     for sched in (
@@ -104,7 +96,6 @@ async def lifespan(app: FastAPI):
         _risk_monitor_scheduler,
         _risk_metrics_scheduler,
         _exec_scheduler,
-        _orchestrator_scheduler,
     ):
         if sched and sched.running:
             sched.shutdown(wait=False)
@@ -122,7 +113,6 @@ app.include_router(macro_router)
 app.include_router(portfolio_router)
 app.include_router(risk_router)
 app.include_router(execution_router)
-app.include_router(orchestrator_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -161,16 +151,6 @@ def health():
 # ── Research ─────────────────────────────────────────────────────────────────
 
 
-@app.post("/research/run-queued")
-async def trigger_research_queue():
-    """Manually fire the research queue poller — processes today's queued_for_research tickers."""
-    import asyncio as _asyncio
-    from backend.agents.research_scheduler import _poll_research_queue
-    loop = _asyncio.get_event_loop()
-    processed = await loop.run_in_executor(None, _poll_research_queue)
-    return {"queued_tickers_processed": processed}
-
-
 @app.post("/research/{ticker}")
 def trigger_research(ticker: str, use_cache: bool = False):
     """
@@ -195,6 +175,16 @@ def trigger_research(ticker: str, use_cache: bool = False):
         memo["_storage_error"] = str(exc)
 
     return memo
+
+
+@app.post("/research/run-queued")
+async def trigger_research_queue():
+    """Manually fire the research queue poller — processes today's queued_for_research tickers."""
+    import asyncio as _asyncio
+    from backend.agents.research_scheduler import _poll_research_queue
+    loop = _asyncio.get_event_loop()
+    processed = await loop.run_in_executor(None, _poll_research_queue)
+    return {"queued_tickers_processed": processed}
 
 
 @app.get("/research/history")

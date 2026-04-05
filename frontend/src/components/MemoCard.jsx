@@ -4,7 +4,6 @@ import { useState } from 'react';
 import ConvictionBadge from './ConvictionBadge';
 import ThesisBlock from './ThesisBlock';
 import { updateMemoStatus } from '../api/research';
-import { sizePosition } from '../api/portfolio';
 
 const VERDICT_COLORS = {
   LONG: 'bg-green-50 text-green-800 border-green-200',
@@ -23,8 +22,7 @@ function FinancialHealthRow({ label, value }) {
 
 export default function MemoCard({ memo, onStatusChange }) {
   const [status, setStatus] = useState(memo?.status ?? 'PENDING');
-  const [loading, setLoading] = useState(null); // 'APPROVED' | 'REJECTED' | 'WATCHLIST' | 'SIZING'
-  const [sizingState, setSizingState] = useState('idle'); // 'idle' | 'loading' | 'success' | 'error'
+  const [loading, setLoading] = useState(null); // 'APPROVED' | 'REJECTED' | 'WATCHLIST'
 
   if (!memo) return null;
 
@@ -40,17 +38,6 @@ export default function MemoCard({ memo, onStatusChange }) {
       if (onStatusChange) onStatusChange(memoId, newStatus);
     } finally {
       setLoading(null);
-    }
-  }
-
-  async function handleCreatePosition() {
-    if (!memoId) return;
-    setSizingState('loading');
-    try {
-      await sizePosition(memoId);
-      setSizingState('success');
-    } catch {
-      setSizingState('error');
     }
   }
 
@@ -142,23 +129,11 @@ export default function MemoCard({ memo, onStatusChange }) {
       </div>
 
       {/* Action Bar */}
-      <div className="flex items-center gap-3 border-t border-gray-100 bg-gray-50 px-5 py-3 flex-wrap">
+      <div className="flex items-center gap-3 border-t border-gray-100 bg-gray-50 px-5 py-3">
         {status !== 'PENDING' && (
           <span className="mr-auto text-xs font-medium text-gray-500 uppercase tracking-wide">
             Status: {status}
           </span>
-        )}
-        {memoData.verdict === 'LONG' && (
-          <button
-            disabled={!memoId || sizingState === 'loading' || sizingState === 'success'}
-            onClick={handleCreatePosition}
-            className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {sizingState === 'loading' && 'Sizing…'}
-            {sizingState === 'success' && '✓ Position Created'}
-            {sizingState === 'error' && 'Retry Size'}
-            {sizingState === 'idle' && 'Create Pending Position'}
-          </button>
         )}
         <button
           disabled={!memoId || !!loading || status === 'APPROVED'}
