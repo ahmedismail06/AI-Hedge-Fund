@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface text-on-surface font-body antialiased;
+  }
+  h1, h2, h3, .font-headline {
+    font-family: 'Manrope', sans-serif;
+  }
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+@layer utilities {
+  .signature-gradient {
+    background: linear-gradient(135deg, #004ac6 0%, #2563eb 100%);
+  }
+  .primary-gradient {
+    background: linear-gradient(135deg, #004ac6 0%, #2563eb 100%);
+  }
+  .ghost-border {
+    outline: 1px solid rgba(195, 198, 215, 0.15);
+  }
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(20px);
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
