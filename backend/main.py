@@ -24,6 +24,8 @@ from backend.api.macro import router as macro_router
 from backend.api.portfolio import router as portfolio_router
 from backend.api.risk import router as risk_router
 from backend.api.execution import router as execution_router
+from backend.api.orchestrator import router as orchestrator_router
+from backend.api.pm import router as pm_router
 from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics
 from backend.agents.execution_agent import run_execution_cycle
 
@@ -33,6 +35,7 @@ _research_scheduler = None
 _risk_monitor_scheduler = None
 _risk_metrics_scheduler = None
 _exec_scheduler = None
+_pm_scheduler = None
 
 
 @asynccontextmanager
@@ -43,7 +46,7 @@ async def lifespan(app: FastAPI):
     from apscheduler.triggers.cron import CronTrigger
 
     global _screener_scheduler, _macro_scheduler, _research_scheduler
-    global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler
+    global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler, _pm_scheduler
 
     _screener_scheduler = create_screener_scheduler()
     _macro_scheduler = create_macro_scheduler()
@@ -87,6 +90,11 @@ async def lifespan(app: FastAPI):
     )
     _exec_scheduler.start()
 
+    # AI PM Agent: 5-min decision cycle + macro/screener/research crons
+    from backend.agents.orchestrator import create_orchestrator_scheduler
+    _pm_scheduler = create_orchestrator_scheduler()
+    _pm_scheduler.start()
+
     yield
 
     for sched in (
@@ -96,6 +104,7 @@ async def lifespan(app: FastAPI):
         _risk_monitor_scheduler,
         _risk_metrics_scheduler,
         _exec_scheduler,
+        _pm_scheduler,
     ):
         if sched and sched.running:
             sched.shutdown(wait=False)
@@ -113,6 +122,8 @@ app.include_router(macro_router)
 app.include_router(portfolio_router)
 app.include_router(risk_router)
 app.include_router(execution_router)
+app.include_router(orchestrator_router)
+app.include_router(pm_router)
 
 app.add_middleware(
     CORSMiddleware,

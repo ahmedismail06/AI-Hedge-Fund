@@ -130,8 +130,12 @@ def execution_status():
 
     ibkr_connected = False
     try:
-        if _ibkr._ib is not None:
-            ibkr_connected = bool(_ibkr._ib.isConnected())
+        if _ibkr._ib is not None and _ibkr._ib.isConnected():
+            ibkr_connected = True
+        else:
+            # Not connected — try to reconnect (fast if Gateway is up)
+            _ibkr.connect()
+            ibkr_connected = True
     except Exception:
         ibkr_connected = False
 
@@ -148,10 +152,22 @@ def execution_status():
     except Exception:
         pass
 
+    account = {}
+    if ibkr_connected:
+        try:
+            from backend.broker.ibkr import get_account_summary
+            account = get_account_summary()
+        except Exception:
+            pass
+
     return {
         "ibkr_connected": ibkr_connected,
         "is_paper": _ibkr.is_paper(),
         "active_orders": active_orders,
+        "net_liquidation": account.get("NetLiquidation"),
+        "cash": account.get("TotalCashValue"),
+        "unrealized_pnl": account.get("UnrealizedPnL"),
+        "realized_pnl": account.get("RealizedPnL"),
     }
 
 
