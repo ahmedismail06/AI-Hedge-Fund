@@ -1,3 +1,10 @@
-// Risk API client
-// GET /risk/alerts — active alerts (refresh every 30s)
-// GET /risk/metrics — latest nightly performance metrics
+import axios from 'axios';
+
+const BASE = 'http://localhost:8000';
+
+export const getAlerts = () => axios.get(`${BASE}/risk/alerts`).then(r => r.data);
+export const getCriticalAlerts = () => axios.get(`${BASE}/risk/alerts/critical`).then(r => r.data);
+export const getMetrics = () => axios.get(`${BASE}/risk/metrics`).then(r => r.data);
+export const getMetricsHistory = () => axios.get(`${BASE}/risk/metrics/history`).then(r => r.data);
+export const runRiskMonitor = () => axios.post(`${BASE}/risk/monitor/run`).then(r => r.data);
+export const runNightlyMetrics = () => axios.post(`${BASE}/risk/metrics/run`).then(r => r.data);

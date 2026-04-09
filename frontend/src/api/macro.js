@@ -1,3 +1,9 @@
-// Macro API client
-// GET /macro/regime — current regime + briefing
-// GET /macro/indicators — latest indicator scores
+import axios from 'axios';
+
+const BASE = 'http://localhost:8000';
+
+export const getBriefing = () => axios.get(`${BASE}/macro/briefing`).then(r => r.data);
+export const getRegime = () => axios.get(`${BASE}/macro/regime`).then(r => r.data);
+export const getMacroHistory = () => axios.get(`${BASE}/macro/history`).then(r => r.data);
+export const getIndicators = () => axios.get(`${BASE}/macro/indicators`).then(r => r.data);
+export const runMacroAgent = () => axios.post(`${BASE}/macro/run`).then(r => r.data);

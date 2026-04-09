@@ -1,3 +1,6 @@
-// Screener API client
-// GET /screener/latest — fetch today's ranked watchlist
-// GET /screener/history — fetch historical screener runs
+import axios from 'axios';
+
+const BASE = 'http://localhost:8000';
+
+export const getWatchlist = () => axios.get(`${BASE}/screening/watchlist`).then(r => r.data);
+export const runScreener = () => axios.post(`${BASE}/screening/run`).then(r => r.data);
