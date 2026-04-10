@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef } from 'react';
 import MemoCard from '../components/MemoCard';
 import ConvictionBadge from '../components/ConvictionBadge';
-import { triggerResearch, getHistory } from '../api/research';
+import { triggerResearch, getHistory, getLatestMemo } from '../api/research';
 
 const VERDICT_DOT = {
   LONG: 'bg-green-500',
@@ -18,6 +18,7 @@ export default function Research() {
   const [activeMemo, setActiveMemo] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMemo, setLoadingMemo] = useState(false);
   const [error, setError] = useState(null);
   const inputRef = useRef(null);
 
@@ -68,10 +69,19 @@ export default function Research() {
     }
   }
 
-  function handleHistoryClick(row) {
-    // row contains only summary fields; load the full memo_json if available
-    // For now show what we have — the full memo is already in activeMemo after triggerResearch
-    setActiveMemo(row);
+  async function handleHistoryClick(row) {
+    setLoadingMemo(true);
+    setActiveMemo(null);
+    setError(null);
+    try {
+      const full = await getLatestMemo(row.ticker);
+      setActiveMemo(full);
+    } catch {
+      // Fall back to whatever summary data we have
+      setActiveMemo(row);
+    } finally {
+      setLoadingMemo(false);
+    }
   }
 
   function handleStatusChange(memoId, newStatus) {
@@ -134,8 +144,19 @@ export default function Research() {
           </div>
         )}
 
+        {/* Loading indicator for history-click memo fetch */}
+        {loadingMemo && (
+          <div className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
+            <svg className="h-4 w-4 animate-spin shrink-0 text-blue-500" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+            Loading memo…
+          </div>
+        )}
+
         {/* Active Memo */}
-        {activeMemo && !loading && (
+        {activeMemo && !loading && !loadingMemo && (
           <MemoCard memo={activeMemo} onStatusChange={handleStatusChange} />
         )}
 
