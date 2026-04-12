@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Optional
 
 from backend.memory.vector_store import _get_client
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,12 @@ def record_partial_fill_open(order_id: str) -> None:
             total_filled,
             avg_fill_price,
         )
+        notify_event("ORDER_FILLED", {
+            "ticker": order_row.get("ticker", "—"),
+            "fill_qty": total_filled,
+            "fill_price": round(avg_fill_price, 4),
+            "fill_type": "PARTIAL",
+        })
 
     except Exception as exc:
         logger.error(
@@ -302,6 +309,16 @@ def _update_order_aggregate(
         # Close the position loop once the order is fully filled.
         if is_filled and avg_price is not None:
             _close_position_loop(order_row["position_id"], avg_price)
+            notify_event("ORDER_FILLED", {
+                "ticker": order_row.get("ticker", "—"),
+                "fill_qty": total_qty,
+                "fill_price": round(avg_price, 4),
+                "fill_type": "FULL",
+                "slippage_bps": round(
+                    (avg_price - float(order_row.get("limit_price") or avg_price))
+                    / float(order_row.get("limit_price") or avg_price) * 10000, 2
+                ) if order_row.get("limit_price") else None,
+            })
 
     except Exception as exc:
         logger.error(

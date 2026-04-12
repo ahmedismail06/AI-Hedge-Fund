@@ -28,6 +28,7 @@ from backend.broker.schemas import ExecutionSummary
 from backend.broker.ibkr import IBKRConnectionError
 from backend.broker.order_builder import OrderBuildError
 from backend.broker.order_manager import OrderManagerError
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 _ET = pytz.timezone("America/New_York")
@@ -92,6 +93,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
     if _has_critical_alerts():
         logger.warning("Execution cycle blocked: unresolved CRITICAL risk alert(s)")
         summary.critical_blocked = True
+        notify_event("EXECUTION_BLOCKED", {"critical_count": "1+"})
         return summary
 
     client = _get_client()
@@ -176,18 +178,21 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 logger.error("IBKR connection failed for %s: %s", pos.get("ticker"), exc)
                 summary.orders_error += 1
                 summary.errors.append(f"{pos.get('ticker')}: IBKR connection error — {exc}")
+                notify_event("IBKR_CONNECTION_ERROR", {"ticker": pos.get("ticker", "—"), "error": str(exc)})
                 break  # IBKR is down; don't try more orders this cycle
 
             except OrderBuildError as exc:
                 logger.warning("Order build failed for %s: %s", pos.get("ticker"), exc)
                 summary.orders_error += 1
                 summary.errors.append(f"{pos.get('ticker')}: build error — {exc}")
+                notify_event("ORDER_ERROR", {"ticker": pos.get("ticker", "—"), "error": f"Build error: {exc}"})
                 continue
 
             except (OrderManagerError, Exception) as exc:
                 logger.error("Order placement failed for %s: %s", pos.get("ticker"), exc)
                 summary.orders_error += 1
                 summary.errors.append(f"{pos.get('ticker')}: placement error — {exc}")
+                notify_event("ORDER_ERROR", {"ticker": pos.get("ticker", "—"), "error": f"Placement error: {exc}"})
                 continue
 
         # ── G: Register fill handler and wait 60s for fill events ─────────────
@@ -233,12 +238,24 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         summary.errors.append(f"Cycle error: {exc}")
 
     finally:
-        # ── I: Always disconnect from IBKR at cycle end ───────────────────────
-        _ibkr.disconnect()
+        # ── I: Keep the connection alive — it is a shared singleton used by
+        # get_portfolio_value(), risk monitor, and account summary endpoints.
+        # Only disconnect if orders were actually placed (fill handler registered)
+        # so the session can be cleanly re-established on the next cycle.
+        if this_cycle_order_ids:
+            _ibkr.disconnect()
 
     logger.info(
         "Execution cycle complete — approved=%d placed=%d filled=%d partial=%d timeout=%d error=%d",
         summary.approved_found, summary.orders_placed, summary.orders_filled,
         summary.orders_partial, summary.orders_timeout, summary.orders_error,
     )
+    if summary.orders_placed or summary.orders_filled or summary.orders_error or summary.orders_timeout:
+        notify_event("EXECUTION_CYCLE_COMPLETE", {
+            "orders_placed":  summary.orders_placed,
+            "orders_filled":  summary.orders_filled,
+            "orders_partial": summary.orders_partial,
+            "orders_timeout": summary.orders_timeout,
+            "orders_error":   summary.orders_error,
+        })
     return summary

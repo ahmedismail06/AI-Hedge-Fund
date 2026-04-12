@@ -24,6 +24,7 @@ load_dotenv()
 from backend.broker.ibkr import IBKRConnectionError, connect, get_loop  # noqa: E402
 from backend.broker.schemas import OrderRequest, OrderStatus  # noqa: E402
 from backend.memory.vector_store import _get_client  # noqa: E402
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,13 @@ def place_order(req: OrderRequest, contract, ib_order) -> OrderStatus:
         order_db_id,
         perm_id,
     )
+    notify_event("ORDER_PLACED", {
+        "ticker": req.ticker,
+        "order_type": req.order_type,
+        "qty": req.requested_qty,
+        "limit_price": req.limit_price,
+        "ibkr_order_id": perm_id,
+    })
 
     # 8. Return lightweight status object.
     return OrderStatus(

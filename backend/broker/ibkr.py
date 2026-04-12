@@ -149,16 +149,52 @@ def get_loop() -> asyncio.AbstractEventLoop:
 _ACCOUNT_TAGS_WANTED = {'NetLiquidation', 'TotalCashValue', 'UnrealizedPnL', 'RealizedPnL'}
 
 
+def get_portfolio_value() -> float:
+    """
+    Return the live portfolio NAV (NetLiquidation) from IBKR.
+
+    Resolution order:
+      1. IBKR NetLiquidation (if connected and > 0)
+      2. PORTFOLIO_VALUE env-var
+      3. $25,000 (Phase-1 default)
+
+    This is the single source of truth for portfolio_value across all agents
+    and API endpoints.  Never hardcode or read from env directly — call this.
+    """
+    summary = get_account_summary()
+    nav = summary.get("NetLiquidation")
+    if nav and nav > 0:
+        logger.debug("portfolio_value from IBKR NetLiquidation: %.2f", nav)
+        return float(nav)
+
+    env_val = os.getenv("PORTFOLIO_VALUE")
+    if env_val:
+        try:
+            v = float(env_val)
+            if v > 0:
+                logger.debug("portfolio_value from PORTFOLIO_VALUE env-var: %.2f", v)
+                return v
+        except (ValueError, TypeError):
+            pass
+
+    logger.debug("portfolio_value: falling back to Phase-1 default $25,000")
+    return 25_000.0
+
+
 def get_account_summary() -> dict:
     """
     Return key IBKR account values from the cached accountValues() list.
     ib_insync keeps this cache updated automatically once connected.
-    Returns empty dict if not connected or no data yet.
+    Auto-reconnects silently if the connection was dropped (e.g. after an
+    execution cycle). Returns empty dict only if reconnect also fails.
     """
     global _ib
     with _lock:
         if _ib is None or not _ib.isConnected():
-            return {}
+            try:
+                _get_ib()  # attempt reconnect
+            except Exception:
+                return {}
     try:
         result = {}
         for av in _ib.accountValues():
