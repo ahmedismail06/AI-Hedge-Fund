@@ -7,23 +7,22 @@ Routing rules:
   CRITICAL → Supabase + Slack (if SLACK_WEBHOOK_URL is set)
 
 Email (ALERT_EMAIL) is deferred — a warning is logged if the env var is set.
+Slack delivery is handled by backend.notifications.events.notify_event().
 """
 
-import json
 import logging
 import os
 from datetime import datetime, timezone
 
-import requests
 from dotenv import load_dotenv
 
 from backend.models.risk import RiskAlert
+from backend.notifications.events import notify_event
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 _ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
 _PUSH_SEVERITIES = {"BREACH", "CRITICAL"}
@@ -47,10 +46,14 @@ def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
 
     # ── 2. Push BREACH / CRITICAL to Slack ────────────────────────────────────
     push_alerts = [a for a in alerts if _severity(a) in _PUSH_SEVERITIES]
-    if push_alerts and _SLACK_WEBHOOK_URL:
-        _post_slack(push_alerts)
-    elif push_alerts and not _SLACK_WEBHOOK_URL:
-        logger.debug("SLACK_WEBHOOK_URL not set — %d push alert(s) logged only", len(push_alerts))
+    for a in push_alerts:
+        sev = _severity(a)
+        event_type = "RISK_CRITICAL" if sev == "CRITICAL" else "RISK_BREACH"
+        notify_event(event_type, {
+            "ticker": a.ticker,
+            "trigger": a.trigger,
+            "regime": a.regime,
+        })
 
     # ── 3. Email stub ─────────────────────────────────────────────────────────
     if _ALERT_EMAIL:
@@ -86,26 +89,3 @@ def _severity(alert: RiskAlert) -> str:
     return tier_severity.get(alert.tier, "WARN")
 
 
-def _post_slack(alerts: list[RiskAlert]) -> None:
-    """POST a formatted Slack message for BREACH/CRITICAL alerts."""
-    lines = []
-    for a in alerts:
-        sev = _severity(a)
-        icon = ":rotating_light:" if sev == "CRITICAL" else ":warning:"
-        lines.append(f"{icon} *[{sev}]* {a.trigger} _(regime: {a.regime})_")
-
-    payload = {"text": "\n".join(lines)}
-
-    try:
-        resp = requests.post(
-            _SLACK_WEBHOOK_URL,
-            data=json.dumps(payload),
-            headers={"Content-Type": "application/json"},
-            timeout=5,
-        )
-        if resp.status_code != 200:
-            logger.warning("Slack webhook returned %d: %s", resp.status_code, resp.text)
-        else:
-            logger.info("posted %d alert(s) to Slack", len(alerts))
-    except requests.RequestException as exc:
-        logger.warning("Slack webhook failed: %s", exc)
