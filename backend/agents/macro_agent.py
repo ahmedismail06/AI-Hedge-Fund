@@ -41,6 +41,7 @@ from backend.macro.scorer import (
 )
 from backend.models.macro_briefing import MacroBriefing, IndicatorScore, SectorTilt, UpcomingEvent
 from backend.memory.vector_store import _get_client
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,60 @@ def _read_previous_regime() -> Optional[str]:
         return None
 
 
+def _trigger_regime_requeue(new_regime: str, prev_regime: Optional[str]) -> None:
+    """Queue all OPEN positions for full re-research (P1) when the regime changes.
+
+    Called from _store_briefing() after a successful upsert. Sets material_event=True
+    and priority=1 on each held ticker's watchlist entry so the research scheduler
+    processes them at the top of its next run.
+    Non-fatal — exceptions are logged and swallowed.
+    """
+    if not prev_regime or prev_regime == new_regime:
+        return
+
+    logger.info(
+        "Regime change %s → %s: queuing all held positions for P1 re-research",
+        prev_regime, new_regime,
+    )
+    try:
+        client = _get_client()
+        open_pos = (
+            client.table("positions")
+            .select("ticker")
+            .eq("status", "OPEN")
+            .execute()
+            .data
+        ) or []
+        tickers = [r["ticker"] for r in open_pos]
+        if not tickers:
+            logger.info("_trigger_regime_requeue: no open positions to re-queue")
+            return
+
+        today_str = date.today().isoformat()
+        reason = f"regime_change:{prev_regime}→{new_regime}"
+        for ticker in tickers:
+            try:
+                client.table("watchlist").update(
+                    {
+                        "material_event": True,
+                        "material_event_reason": reason,
+                        "queued_for_research": True,
+                        "priority": 1,
+                    }
+                ).eq("ticker", ticker).eq("run_date", today_str).execute()
+            except Exception as exc:
+                logger.warning(
+                    "_trigger_regime_requeue: watchlist update failed for %s — %s", ticker, exc
+                )
+
+        logger.info(
+            "_trigger_regime_requeue: queued %d tickers for P1 re-research: %s",
+            len(tickers), tickers,
+        )
+    except Exception as exc:
+        logger.warning("_trigger_regime_requeue: failed — %s", exc)
+
+
 def _store_briefing(briefing: MacroBriefing) -> str:
     """Upsert a MacroBriefing to the macro_briefings Supabase table.
 
@@ -379,8 +434,15 @@ def _store_briefing(briefing: MacroBriefing) -> str:
         client = _get_client()
         result = client.table("macro_briefings").upsert(row, on_conflict="date").execute()
         if result.data and result.data[0].get("id"):
-            return str(result.data[0]["id"])
-        return "stored"
+            stored_id = str(result.data[0]["id"])
+        else:
+            stored_id = "stored"
+
+        # Regime change re-queue: queue all held positions for P1 re-research
+        if briefing.regime_changed:
+            _trigger_regime_requeue(briefing.regime, briefing.previous_regime)
+
+        return stored_id
     except Exception as exc:
         logger.warning("_store_briefing: Supabase upsert failed — %s", exc)
         return "storage_failed"
@@ -896,6 +958,12 @@ def run_macro_pipeline() -> MacroBriefing:
         )
         if regime_changed:
             logger.info("Regime changed: %s -> %s", previous_regime, final_regime)
+            notify_event("REGIME_CHANGED", {
+                "previous_regime": previous_regime,
+                "new_regime": final_regime,
+                "confidence": round(final_scores.regime_confidence, 1),
+                "regime_score": round(final_scores.regime_score, 1),
+            })
 
         # ── Confidence gate ────────────────────────────────────────────────────
         # When confidence < 7.0 and regime is not already Transitional, the
@@ -973,6 +1041,11 @@ def run_macro_pipeline() -> MacroBriefing:
             briefing.regime_confidence,
             row_id,
         )
+        notify_event("MACRO_BRIEFING_COMPLETE", {
+            "regime": briefing.regime,
+            "confidence": round(briefing.regime_confidence, 1),
+            "portfolio_guidance": briefing.portfolio_guidance,
+        })
         return briefing
 
     except Exception as exc:

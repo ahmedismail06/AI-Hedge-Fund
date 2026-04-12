@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
 from openai import AzureOpenAI  # ReAct loop only
@@ -1352,9 +1352,237 @@ def _validate_memo(memo: dict) -> InvestmentMemo:
         raise ResearchAgentError(f"LLM response failed schema validation:\n{exc}")
 
 
+# ── Update Mode (incremental refresh for held positions) ─────────────────────
+
+def _run_update_mode(ticker: str, macro_context: Optional[str]) -> dict:
+    """Incremental research path for held positions with no material event.
+
+    Fetches only news + transcripts, then asks Claude to return only the fields
+    that have materially changed. Merges the delta into the existing memo.
+    Falls back to full research if no prior memo exists.
+    """
+    from backend.memory.vector_store import get_memo
+    logger.info("run_research(%s): entering update_mode", ticker)
+    print(f"\n{'─'*62}")
+    print(f"  UPDATE MODE — news + transcripts only ({ticker})")
+    print(f"{'─'*62}")
+
+    # Load existing memo — fall back to full research if none found
+    existing_raw = get_memo(ticker)
+    if not existing_raw or not existing_raw.get("memo_json"):
+        logger.info(
+            "run_research(%s): update_mode fallback — no existing memo; running full research",
+            ticker,
+        )
+        return run_research(ticker, use_cache=False, update_mode=False)
+
+    existing_memo = existing_raw.get("memo_json", {})
+    memo_date = str(existing_raw.get("date", date.today().isoformat()))
+
+    # Fetch only lightweight sources
+    new_news = fetch_news(ticker)
+    new_transcripts = fetch_transcripts(ticker)
+
+    # Build update prompt
+    update_message = _build_update_synthesis_message(existing_memo, new_news, new_transcripts, memo_date)
+
+    client = _build_client()
+    usage_log: list[dict] = []
+    print(f"\n{'─'*62}")
+    print(f"  UPDATE PHASE — incremental synthesis ({ticker})")
+    print(f"{'─'*62}")
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        temperature=0.3,
+        system=_build_update_system_prompt(),
+        messages=[{"role": "user", "content": update_message}],
+    )
+    raw_content = response.content[0].text if response.content else ""
+    usage_log.append({
+        "phase": "Update-mode synthesis (Claude)",
+        "input": response.usage.input_tokens,
+        "output": response.usage.output_tokens,
+    })
+
+    # Parse the delta JSON
+    cleaned = _strip_code_fences(raw_content)
+    try:
+        updated_fields = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        updated_fields = json.loads(match.group()) if match else {}
+
+    merged = _merge_updated_fields(existing_memo, updated_fields)
+    merged["ticker"] = ticker
+
+    _print_usage_summary(ticker, usage_log)
+
+    # Attach lightweight raw_docs so store_memo can persist them
+    merged["_raw_docs"] = {
+        "sec": existing_raw.get("raw_docs", {}).get("sec", {}),
+        "news": new_news,
+        "transcripts": new_transcripts,
+        "form4": existing_raw.get("raw_docs", {}).get("form4", {}),
+        "fmp": existing_raw.get("raw_docs", {}).get("fmp", {}),
+    }
+    return merged
+
+
+# ── Ticker Events Calendar ────────────────────────────────────────────────────
+
+def _populate_ticker_events(ticker: str, sec_data: dict) -> None:
+    """Upsert known filing events into ticker_events after a successful SEC fetch.
+
+    Marks document_fetched=True for whatever we just pulled from EDGAR so that
+    future runs can skip the API call and load from document_chunks instead.
+    Called after Phase 0 in full-research mode (skipped in update_mode).
+    Non-fatal — any failure is logged and swallowed.
+    """
+    from backend.memory.vector_store import _get_client
+    try:
+        client = _get_client()
+        today = date.today().isoformat()
+        rows = []
+
+        # Determine fiscal period labels from available data
+        # SEC metrics contain the filing date; we use it to derive fiscal period keys
+        for form_type, event_type in [("metrics_10k", "annual_filing"), ("metrics_10q", "quarterly_filing")]:
+            metrics = sec_data.get(form_type, {})
+            if not metrics:
+                continue
+            # Prefer explicit filing_date from metrics; fall back to today
+            filing_date_str = metrics.get("filing_date") or today
+            try:
+                filing_date = date.fromisoformat(filing_date_str[:10])
+            except (ValueError, TypeError):
+                filing_date = date.today()
+            # Derive fiscal period label: FY{year} for 10-K, Q{q}_{year} for 10-Q
+            if event_type == "annual_filing":
+                fiscal_period = f"FY{filing_date.year}"
+            else:
+                quarter = (filing_date.month - 1) // 3 + 1
+                fiscal_period = f"Q{quarter}_{filing_date.year}"
+
+            rows.append({
+                "ticker": ticker,
+                "event_type": event_type,
+                "event_date": filing_date_str[:10],
+                "fiscal_period": fiscal_period,
+                "document_available": True,
+                "document_fetched": True,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "source": "sec_edgar",
+            })
+
+        if rows:
+            client.table("ticker_events").upsert(
+                rows, on_conflict="ticker,event_type,fiscal_period"
+            ).execute()
+            logger.info("_populate_ticker_events(%s): upserted %d event rows", ticker, len(rows))
+    except Exception as exc:
+        logger.warning("_populate_ticker_events(%s): failed — %s", ticker, exc)
+
+
+# ── Update-mode helpers ───────────────────────────────────────────────────────
+
+def _build_update_system_prompt() -> str:
+    """Stripped system prompt for incremental memo updates (held positions)."""
+    return (
+        "You are an equity research analyst updating a prior investment memo with fresh news "
+        "and earnings transcript data. The underlying thesis, SEC filings, valuation, and "
+        "position sizing have NOT changed — only update fields where the new information "
+        "materially changes the view.\n\n"
+        "Return a JSON object containing ONLY the fields that have changed. Include all of these "
+        "if they need updating: bull_thesis, bear_thesis, key_risks, catalysts, conviction_score, "
+        "conviction_score_rationale, red_team_risks, summary.\n\n"
+        "Rules:\n"
+        "- If a field is unchanged, omit it entirely.\n"
+        "- Do NOT return verdict, variant_perception, repricing_catalyst, valuation_note, "
+        "price_target, or any position-sizing fields — those require full SEC re-analysis.\n"
+        "- conviction_score must remain between 0–10. Only change it if new information "
+        "materially shifts the risk/reward.\n"
+        "- Return valid JSON only. No markdown fences, no preamble."
+    )
+
+
+def _build_update_synthesis_message(
+    existing_memo: dict,
+    new_news: dict,
+    new_transcripts: dict,
+    memo_date: str,
+) -> str:
+    """Build the user message for an incremental memo update."""
+    lines = [
+        f"TICKER: {existing_memo.get('ticker', 'UNKNOWN')}",
+        f"PRIOR MEMO DATE: {memo_date}",
+        f"UPDATE DATE: {date.today().isoformat()}",
+        "",
+        "═══ PRIOR MEMO SUMMARY ═══",
+        f"Verdict: {existing_memo.get('verdict', 'N/A')}",
+        f"Conviction: {existing_memo.get('conviction_score', 'N/A')}",
+        f"Bull thesis: {existing_memo.get('bull_thesis', 'N/A')}",
+        f"Bear thesis: {existing_memo.get('bear_thesis', 'N/A')}",
+        f"Key risks: {json.dumps(existing_memo.get('key_risks', []))}",
+        f"Catalysts: {json.dumps(existing_memo.get('catalysts', []))}",
+        f"Summary: {existing_memo.get('summary', 'N/A')}",
+        "",
+        "═══ NEW NEWS ═══",
+    ]
+
+    articles = new_news.get("articles", [])
+    if articles:
+        for a in articles[:10]:
+            lines.append(f"• [{a.get('published_utc', '')[:10]}] {a.get('title', '')}")
+            if a.get("description"):
+                lines.append(f"  {a['description'][:200]}")
+    else:
+        lines.append("No new news articles.")
+
+    lines += ["", "═══ NEW TRANSCRIPT EXCERPTS ═══"]
+    transcripts = new_transcripts.get("transcripts", {})
+    if transcripts:
+        for qkey, tdata in list(transcripts.items())[:2]:
+            lines.append(f"\n{qkey} ({tdata.get('date', 'N/A')}):")
+            text = tdata.get("text", "")
+            lines.append(text[:3000] + ("…" if len(text) > 3000 else ""))
+    else:
+        lines.append("No new transcript data.")
+
+    lines += [
+        "",
+        "Based on the above, return a JSON object with only the fields that need updating. "
+        "If nothing material has changed, return an empty JSON object {}.",
+    ]
+    return "\n".join(lines)
+
+
+def _merge_updated_fields(existing_memo: dict, updated_fields: dict) -> dict:
+    """Merge Claude's incremental update into the existing memo dict."""
+    if not updated_fields:
+        return existing_memo
+
+    updatable = {
+        "bull_thesis", "bear_thesis", "key_risks", "catalysts",
+        "conviction_score", "conviction_score_rationale", "red_team_risks", "summary",
+    }
+    merged = dict(existing_memo)
+    for field, value in updated_fields.items():
+        if field in updatable:
+            merged[field] = value
+            logger.info("_merge_updated_fields: updated field '%s'", field)
+        else:
+            logger.debug("_merge_updated_fields: ignoring non-updatable field '%s'", field)
+
+    merged["_update_mode"] = True
+    merged["_update_date"] = date.today().isoformat()
+    return merged
+
+
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
-def run_research(ticker: str, use_cache: bool = False) -> dict:
+def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False) -> dict:
     """
     5-phase hybrid B+D pipeline:
       Phase 0: Fetch all 5 data sources (skipped when use_cache=True).
@@ -1368,11 +1596,22 @@ def run_research(ticker: str, use_cache: bool = False) -> dict:
     and skips all API fetching and pgvector re-indexing. pgvector chunks from the
     previous run are still queried in Phase 3.
 
+    update_mode=True: incremental path for held positions with no material event.
+      - Skips SEC, Form4, FMP fetchers (those don't change between filings).
+      - Runs news + transcripts only.
+      - Skips ReAct retrieval loop.
+      - Asks Claude to return only changed fields and merges them into existing memo.
+      - Falls back to full research if no existing memo is found.
+
     Raises ResearchAgentError on LLM parse / validation failure.
     Phase 1 and Phase 3 failures are non-fatal — degrade gracefully.
     """
     ticker = ticker.upper().strip()
     macro_context = _read_macro_context()  # None if macro pipeline hasn't run yet — non-blocking
+
+    # ── update_mode: incremental path for held positions ──────────────────────
+    if update_mode:
+        return _run_update_mode(ticker, macro_context)
 
     # ── Phase 0: Fetch (or load from cache) ──────────────────────────────────
     if use_cache:
@@ -1400,6 +1639,9 @@ def run_research(ticker: str, use_cache: bool = False) -> dict:
         transcript_data = fetch_transcripts(ticker)
         form4_data = fetch_form4(ticker)
         fmp_data = fetch_fmp(ticker)
+
+        # Populate ticker_events calendar from filing data (non-fatal)
+        _populate_ticker_events(ticker, sec_data)
 
         # ── Phase 1: Index narrative into pgvector ────────────────────────────
         try:

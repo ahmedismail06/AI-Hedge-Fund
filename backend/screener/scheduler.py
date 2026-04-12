@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from backend.notifications.events import notify_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,15 @@ async def run_screening_job() -> None:
     try:
         results = run_screening()
         logger.info("Screener job complete — %d qualified tickers", len(results))
+        top_tickers = [{"ticker": r["ticker"], "score": r["composite_score"]} for r in results[:5]]
+        notify_event("SCREENING_COMPLETE", {
+            "qualified_count": len(results),
+            "top_tickers": top_tickers,
+        })
+        if top_tickers:
+            notify_event("RESEARCH_QUEUED", {
+                "tickers": [t["ticker"] for t in top_tickers],
+            })
     except ScreeningAgentError as exc:
         logger.error("Screener pipeline error: %s", exc)
     except Exception as exc:
