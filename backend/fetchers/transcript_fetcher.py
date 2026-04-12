@@ -3,9 +3,19 @@ Transcript Fetcher
 Fetches the 2 most recent earnings call transcripts from Alpha Vantage.
 Tries quarters in descending order until 2 transcripts are collected.
 Free tier: 25 requests/day. Each ticker costs 1 request per quarter tried.
+
+Efficiency improvements (2026-04-10):
+  - ticker_events cache check: if document_fetched=True in Supabase, loads chunks
+    from document_chunks and skips the Alpha Vantage API call.
+  - Supabase-backed AV daily counter: persists across process restarts so the 25/day
+    quota is enforced even when uvicorn reloads. In-memory dict is used as a
+    session cache to avoid a Supabase round-trip on every quarter probe.
+  - After a successful AV fetch, marks document_fetched=True in ticker_events so
+    future runs for the same ticker+quarter are served from cache.
 """
 
 import datetime
+import logging
 import os
 import time
 import requests
@@ -13,8 +23,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 AV_BASE = "https://www.alphavantage.co/query"
 AV_DAILY_LIMIT = 25  # Free-tier hard cap
+AV_BUDGET_WARNING_THRESHOLD = 5  # Log warning when this many requests remain
 
 # Quarters to probe, most-recent first. Extend as needed each year.
 _QUARTERS_TO_TRY = [
@@ -22,29 +35,164 @@ _QUARTERS_TO_TRY = [
     "2024Q4", "2024Q3", "2024Q2", "2024Q1",
 ]
 
-# Bug 13: module-level daily request counter — resets automatically when date changes.
-# Prevents silent empty-transcript failures on the 26th+ ticker in a multi-ticker run.
-_av_usage: dict = {"date": None, "count": 0}
+# In-process session cache — reduces Supabase round-trips within a single run.
+# Supabase is the source of truth; this is only populated by _load_av_session_count().
+_av_session: dict = {"date": None, "count": 0, "loaded": False}
+
+
+def _load_av_session_count() -> int:
+    """Read today's AV request count from Supabase into the session cache.
+
+    Returns the current count (before any increment). Safe to call multiple
+    times — subsequent calls within the same day return the cached value.
+    """
+    today = datetime.date.today().isoformat()
+    if _av_session["loaded"] and _av_session["date"] == today:
+        return _av_session["count"]
+
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        row = (
+            client.table("pm_config")
+            .select("av_daily_count,av_daily_date")
+            .eq("id", 1)
+            .single()
+            .execute()
+            .data
+        )
+        if row and str(row.get("av_daily_date") or "") == today:
+            count = int(row.get("av_daily_count", 0))
+        else:
+            count = 0  # new day or first use
+    except Exception as exc:
+        logger.warning("_load_av_session_count: Supabase read failed — %s; using 0", exc)
+        count = 0
+
+    _av_session.update({"date": today, "count": count, "loaded": True})
+    return count
+
+
+def _persist_av_count(count: int) -> None:
+    """Write the current AV request count back to Supabase."""
+    today = datetime.date.today().isoformat()
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        client.table("pm_config").update(
+            {"av_daily_count": count, "av_daily_date": today}
+        ).eq("id", 1).execute()
+    except Exception as exc:
+        logger.warning("_persist_av_count: Supabase write failed — %s", exc)
 
 
 def _av_request_allowed() -> bool:
-    """Return True if we are under the daily AV request budget; increment counter."""
+    """Return True if we are under the daily AV request budget; increment session counter.
+
+    The session counter is only synced to Supabase at the end of fetch_transcripts()
+    to minimise round-trips. _load_av_session_count() must have been called first.
+    """
     today = datetime.date.today().isoformat()
-    if _av_usage["date"] != today:
-        _av_usage["date"] = today
-        _av_usage["count"] = 0
-    if _av_usage["count"] >= AV_DAILY_LIMIT:
+    if _av_session["date"] != today:
+        _av_session.update({"date": today, "count": 0, "loaded": False})
+    if _av_session["count"] >= AV_DAILY_LIMIT:
         return False
-    _av_usage["count"] += 1
+    _av_session["count"] += 1
     return True
 
 
 def av_requests_remaining() -> int:
     """How many AV requests are left today (useful for logging in multi-ticker runs)."""
     today = datetime.date.today().isoformat()
-    if _av_usage["date"] != today:
-        return AV_DAILY_LIMIT
-    return max(0, AV_DAILY_LIMIT - _av_usage["count"])
+    if _av_session["date"] != today or not _av_session["loaded"]:
+        _load_av_session_count()
+    return max(0, AV_DAILY_LIMIT - _av_session["count"])
+
+
+# ── ticker_events cache helpers ───────────────────────────────────────────────
+
+def _quarter_str_to_fiscal_period(quarter_str: str) -> str:
+    """Convert '2025Q4' → 'Q4_2025' (fiscal_period format used in ticker_events)."""
+    year = quarter_str[:4]
+    q = quarter_str[5]
+    return f"Q{q}_{year}"
+
+
+def _transcript_cached(ticker: str, quarter_str: str) -> dict | None:
+    """Check ticker_events for a cached transcript for this ticker + quarter.
+
+    Returns a transcript dict compatible with fetch_transcripts() output format
+    if the document has been fetched before (document_fetched=True in ticker_events
+    AND the chunks exist in document_chunks). Returns None if no cache hit.
+    """
+    fiscal_period = _quarter_str_to_fiscal_period(quarter_str)
+    try:
+        from backend.memory.vector_store import _get_client, search_similar
+        client = _get_client()
+        row = (
+            client.table("ticker_events")
+            .select("document_fetched,source,event_date")
+            .eq("ticker", ticker)
+            .eq("fiscal_period", fiscal_period)
+            .eq("event_type", "earnings_call")
+            .eq("document_fetched", True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not row:
+            return None
+
+        # Confirmed cached — load text from document_chunks
+        chunks = search_similar(
+            ticker=ticker,
+            query=f"earnings call {fiscal_period}",
+            doc_types=["transcript"],
+        )
+        if not chunks:
+            return None
+
+        combined_text = "\n\n".join(c.get("content", "") for c in chunks)
+        year_int = int(quarter_str[:4])
+        quarter_int = int(quarter_str[5])
+        logger.info(
+            "_transcript_cached: cache hit for %s %s (source=%s)",
+            ticker, fiscal_period, row[0].get("source", "cached"),
+        )
+        return {
+            "quarter": quarter_int,
+            "year": year_int,
+            "date": row[0].get("event_date"),
+            "text": combined_text,
+            "turns": [],  # chunks don't retain structured turns
+            "_from_cache": True,
+        }
+    except Exception as exc:
+        logger.warning("_transcript_cached: check failed for %s %s — %s", ticker, quarter_str, exc)
+        return None
+
+
+def _mark_transcript_fetched(ticker: str, quarter_str: str, event_date: str | None) -> None:
+    """Mark a transcript as fetched in ticker_events after a successful AV call."""
+    fiscal_period = _quarter_str_to_fiscal_period(quarter_str)
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        client.table("ticker_events").upsert(
+            {
+                "ticker": ticker,
+                "event_type": "earnings_call",
+                "fiscal_period": fiscal_period,
+                "event_date": event_date,
+                "document_available": True,
+                "document_fetched": True,
+                "fetched_at": datetime.datetime.utcnow().isoformat(),
+                "source": "alpha_vantage",
+            },
+            on_conflict="ticker,event_type,fiscal_period",
+        ).execute()
+    except Exception as exc:
+        logger.warning("_mark_transcript_fetched: failed for %s %s — %s", ticker, quarter_str, exc)
 
 
 def _turns_to_text(turns: list) -> str:
@@ -473,14 +621,37 @@ Thank you for your participation in today's conference. This does conclude the p
         result["warning"] = "ALPHA_VANTAGE_API_KEY not set — transcripts unavailable"
         return result
 
+    # Load today's AV count from Supabase once (session cache populated here)
+    _load_av_session_count()
+    remaining_before = av_requests_remaining()
+    if remaining_before <= AV_BUDGET_WARNING_THRESHOLD:
+        logger.warning(
+            "fetch_transcripts(%s): AV budget low — %d requests remaining today",
+            ticker, remaining_before,
+        )
+    av_calls_made = 0  # track how many new API calls this invocation makes
+
     try:
         # Probe quarters in descending order; collect up to 2 transcripts.
-        # Bug 13: debit the daily counter before each API call so multi-ticker runs
-        # never silently exhaust the 25-request daily budget.
         for quarter_str in _QUARTERS_TO_TRY:
             if result["fetched_count"] >= 2:
                 break
 
+            year_int = int(quarter_str[:4])
+            quarter_int = int(quarter_str[5])
+            key = f"Q{quarter_int}_{year_int}"
+
+            # ── ticker_events cache check — skip AV call if already fetched ──
+            cached = _transcript_cached(ticker.upper(), quarter_str)
+            if cached:
+                result["transcripts"][key] = cached
+                result["fetched_count"] += 1
+                logger.info(
+                    "fetch_transcripts(%s): cache hit %s — skipped AV call", ticker, key
+                )
+                continue
+
+            # ── AV daily budget check ─────────────────────────────────────────
             if not _av_request_allowed():
                 result["warning"] = (
                     f"Alpha Vantage daily limit ({AV_DAILY_LIMIT} requests) reached for "
@@ -500,6 +671,7 @@ Thank you for your participation in today's conference. This does conclude the p
             )
             resp.raise_for_status()
             data = resp.json()
+            av_calls_made += 1
 
             # Rate limit or invalid key — stop immediately
             if "Information" in data or "Note" in data:
@@ -513,19 +685,19 @@ Thank you for your participation in today's conference. This does conclude the p
                 time.sleep(1)
                 continue
 
-            # Parse "2025Q4" → quarter=4, year=2025
-            year_int = int(quarter_str[:4])
-            quarter_int = int(quarter_str[5])
-            key = f"Q{quarter_int}_{year_int}"
-
+            event_date = data.get("date")
             result["transcripts"][key] = {
                 "quarter": quarter_int,
                 "year": year_int,
-                "date": data.get("date"),
+                "date": event_date,
                 "text": _turns_to_text(turns),
                 "turns": turns,  # structured turns with per-turn sentiment
             }
             result["fetched_count"] += 1
+
+            # Mark fetched in ticker_events so future runs use cache
+            _mark_transcript_fetched(ticker.upper(), quarter_str, event_date)
+
             time.sleep(1)  # stay within free-tier rate limits
 
         if result["fetched_count"] == 0 and result["warning"] is None:
@@ -533,5 +705,13 @@ Thank you for your participation in today's conference. This does conclude the p
 
     except Exception as exc:
         result["warning"] = str(exc)
+
+    # Persist updated AV count to Supabase if any new API calls were made
+    if av_calls_made > 0:
+        _persist_av_count(_av_session["count"])
+        logger.info(
+            "fetch_transcripts(%s): made %d AV call(s); %d remaining today",
+            ticker, av_calls_made, av_requests_remaining(),
+        )
 
     return result

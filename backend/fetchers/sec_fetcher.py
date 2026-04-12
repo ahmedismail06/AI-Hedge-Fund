@@ -3,12 +3,22 @@ SEC Fetcher
 Fetches 10-K and 10-Q filings from SEC EDGAR for a given ticker.
 Extracts Items 1, 1A, 7 with reduced caps; drops Item 8 in favour of
 programmatically pre-extracted financial metrics.
+
+Efficiency improvement (2026-04-10):
+  ticker_events cache check — before downloading from EDGAR, check whether this
+  ticker + filing type was already fetched within the last 7 days and the document
+  is already in document_chunks. If so, load from pgvector and skip EDGAR entirely.
+  SEC filings do not change once published, so a 7-day staleness window is safe.
 """
 
+import datetime
+import logging
 import re
 import time
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 # Module-level CIK cache — populated on first call, reused thereafter
 _cik_cache: dict[str, str] = {}
@@ -304,6 +314,97 @@ def _extract_sections(text: str) -> tuple[dict[str, str], str]:
     return results, "\n\n".join(financial_text_parts)
 
 
+# ── ticker_events cache helpers ───────────────────────────────────────────────
+
+_FILING_CACHE_DAYS = 7  # SEC filings don't change after publication
+
+
+def _is_filing_cached(ticker: str, form_type: str) -> bool:
+    """Return True if this filing was fetched within the last 7 days and is in document_chunks."""
+    event_type = "annual_filing" if form_type == "10-K" else "quarterly_filing"
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        rows = (
+            client.table("ticker_events")
+            .select("fetched_at")
+            .eq("ticker", ticker)
+            .eq("event_type", event_type)
+            .eq("document_fetched", True)
+            .order("event_date", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not rows or not rows[0].get("fetched_at"):
+            return False
+        fetched_at = datetime.datetime.fromisoformat(
+            rows[0]["fetched_at"].replace("Z", "+00:00")
+        )
+        age_days = (datetime.datetime.now(datetime.timezone.utc) - fetched_at).days
+        return age_days < _FILING_CACHE_DAYS
+    except Exception as exc:
+        logger.warning("_is_filing_cached: check failed for %s %s — %s", ticker, form_type, exc)
+        return False
+
+
+def _load_cached_filing_text(ticker: str, form_type: str) -> str | None:
+    """Load filing text from document_chunks if available. Returns None on failure."""
+    try:
+        from backend.memory.vector_store import search_similar
+        doc_type = form_type  # '10-K' or '10-Q'
+        chunks = search_similar(
+            ticker=ticker,
+            query=f"{doc_type} business risk management",
+            doc_types=[doc_type],
+            match_count=12,
+        )
+        if not chunks:
+            return None
+        # Reassemble in chunk_index order if available
+        sorted_chunks = sorted(chunks, key=lambda c: (c.get("section") or "", c.get("chunk_index", 0)))
+        return "\n\n".join(c.get("content", "") for c in sorted_chunks)
+    except Exception as exc:
+        logger.warning("_load_cached_filing_text: failed for %s %s — %s", ticker, form_type, exc)
+        return None
+
+
+def _mark_filing_fetched(ticker: str, form_type: str, filing_date: str | None) -> None:
+    """Mark a filing as fetched in ticker_events after a successful EDGAR download."""
+    event_type = "annual_filing" if form_type == "10-K" else "quarterly_filing"
+    if filing_date:
+        try:
+            d = datetime.date.fromisoformat(filing_date[:10])
+            if form_type == "10-K":
+                fiscal_period = f"FY{d.year}"
+            else:
+                quarter = (d.month - 1) // 3 + 1
+                fiscal_period = f"Q{quarter}_{d.year}"
+        except (ValueError, TypeError):
+            fiscal_period = None
+    else:
+        fiscal_period = None
+
+    try:
+        from backend.memory.vector_store import _get_client
+        client = _get_client()
+        client.table("ticker_events").upsert(
+            {
+                "ticker": ticker,
+                "event_type": event_type,
+                "event_date": filing_date[:10] if filing_date else None,
+                "fiscal_period": fiscal_period,
+                "document_available": True,
+                "document_fetched": True,
+                "fetched_at": datetime.datetime.utcnow().isoformat(),
+                "source": "sec_edgar",
+            },
+            on_conflict="ticker,event_type,fiscal_period",
+        ).execute()
+    except Exception as exc:
+        logger.warning("_mark_filing_fetched: failed for %s %s — %s", ticker, form_type, exc)
+
+
 def _fetch_filing(cik: str, form_type: str) -> tuple[str, dict]:
     """Returns (sections_text_for_llm, financial_metrics_dict)."""
     meta = _get_filings_metadata(cik)
@@ -347,6 +448,40 @@ def _fetch_filing(cik: str, form_type: str) -> tuple[str, dict]:
     return text, metrics
 
 
+def _fetch_filing_cached(ticker: str, cik: str, form_type: str) -> tuple[str, dict]:
+    """Cache-aware wrapper around _fetch_filing().
+
+    Checks ticker_events first. If the filing was fetched within the last 7 days
+    and its text is in document_chunks, returns the cached text with empty metrics
+    (metrics are re-extracted from the cached text in a future improvement; for now
+    we return {} to avoid re-downloading). Falls back to full EDGAR fetch on miss.
+    """
+    if _is_filing_cached(ticker, form_type):
+        cached_text = _load_cached_filing_text(ticker, form_type)
+        if cached_text:
+            logger.info(
+                "fetch_sec_filings(%s): cache hit for %s — skipped EDGAR download",
+                ticker, form_type,
+            )
+            # Return cached text; metrics dict is empty (filing unchanged, metrics
+            # from prior run are still in Supabase via the research memo)
+            return cached_text, {}
+
+    # Cache miss — fetch from EDGAR and mark in ticker_events
+    text, metrics = _fetch_filing(cik, form_type)
+
+    # Determine filing date from EDGAR metadata for ticker_events upsert
+    try:
+        meta = _get_filings_metadata(cik)
+        filing = _find_latest_filing(meta, form_type)
+        filing_date = filing["date"] if filing else None
+    except Exception:
+        filing_date = None
+
+    _mark_filing_fetched(ticker, form_type, filing_date)
+    return text, metrics
+
+
 def fetch_sec_filings(ticker: str) -> dict:
     """
     Public entry point. Returns:
@@ -358,6 +493,7 @@ def fetch_sec_filings(ticker: str) -> dict:
         "error": None | "error message"
     }
     Never raises — errors are captured in the "error" field.
+    Checks ticker_events cache before downloading from EDGAR.
     """
     result = {
         "10-K": "[Not available]",
@@ -368,10 +504,10 @@ def fetch_sec_filings(ticker: str) -> dict:
     }
     try:
         cik = _resolve_cik(ticker)
-        # Small delay between EDGAR requests to be polite
-        result["10-K"], result["metrics_10k"] = _fetch_filing(cik, "10-K")
+        # Small delay between EDGAR requests to be polite (skipped on cache hits)
+        result["10-K"], result["metrics_10k"] = _fetch_filing_cached(ticker, cik, "10-K")
         time.sleep(0.5)
-        result["10-Q"], result["metrics_10q"] = _fetch_filing(cik, "10-Q")
+        result["10-Q"], result["metrics_10q"] = _fetch_filing_cached(ticker, cik, "10-Q")
     except Exception as exc:
         result["error"] = str(exc)
     return result
