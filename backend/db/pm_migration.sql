@@ -67,3 +67,13 @@ CREATE TABLE IF NOT EXISTS pm_calibration (
 );
 
 CREATE INDEX IF NOT EXISTS pm_calibration_decision_idx ON pm_calibration (decision_id);
+
+
+-- ── Research Efficiency Columns (added 2026-04-10) ───────────────────────────
+-- daily_research_count/date: tracks how many research runs fired today (cap=10)
+-- av_daily_count/date:       Supabase-persisted Alpha Vantage quota (25/day)
+
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS daily_research_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS daily_research_date  DATE;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS av_daily_count       INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS av_daily_date        DATE;

@@ -80,6 +80,12 @@ create table if not exists watchlist (
 create index if not exists watchlist_run_date_rank_idx on watchlist (run_date, rank asc);
 create index if not exists watchlist_ticker_idx on watchlist (ticker, run_date desc);
 
+-- Research efficiency columns (added 2026-04-10)
+-- priority: 1=held+material, 2=watchlist+material, 3=screener-nightly, 4=manual
+alter table watchlist add column if not exists material_event        boolean default false;
+alter table watchlist add column if not exists material_event_reason text;
+alter table watchlist add column if not exists priority              integer default 3;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Macro Intelligence Engine: macro_briefings table
 -- Stores daily MacroBriefing output from the Macro Agent (7AM ET).
@@ -269,6 +275,51 @@ create table if not exists fills (
 create index if not exists fills_order_id_idx on fills (order_id);
 create index if not exists fills_position_id_idx on fills (position_id);
 create index if not exists fills_ticker_idx on fills (ticker, fill_time desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Research efficiency: pm_config counter columns (added 2026-04-10)
+-- daily_research_count / daily_research_date: reset each day, hard cap 10/day
+-- av_daily_count / av_daily_date: Supabase-persisted Alpha Vantage quota tracker
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- pm_config lives in pm_migration.sql; these alter statements are safe to re-run
+-- (they are no-ops if the columns already exist).
+-- NOTE: pm_config table is created in backend/db/pm_migration.sql not here.
+-- The alter statements below must be run after pm_migration.sql has been applied.
+-- They are duplicated here for completeness; supabase apply is idempotent.
+
+-- alter table pm_config add column if not exists daily_research_count integer not null default 0;
+-- alter table pm_config add column if not exists daily_research_date  date;
+-- alter table pm_config add column if not exists av_daily_count       integer not null default 0;
+-- alter table pm_config add column if not exists av_daily_date        date;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Research efficiency: per-ticker event calendar (added 2026-04-10)
+-- Tracks earnings calls, SEC filings, dividends per ticker.
+-- document_fetched=TRUE means the document is already in document_chunks.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists ticker_events (
+    id                 serial primary key,
+    ticker             text not null,
+    event_type         text not null,
+        -- 'earnings_call' | 'quarterly_filing' | 'annual_filing' | 'dividend' | 'guidance_update'
+    event_date         date,
+    fiscal_period      text,               -- e.g. 'Q3_2025', 'FY2025'
+    document_available boolean default false,
+    document_fetched   boolean default false,
+    fetched_at         timestamptz,
+    source             text,               -- 'alpha_vantage' | 'sec_edgar' | 'polygon' | 'cached'
+    created_at         timestamptz default now(),
+    unique (ticker, event_type, fiscal_period)
+);
+
+create index if not exists ticker_events_lookup_idx
+    on ticker_events (ticker, event_type, fiscal_period);
+
+create index if not exists ticker_events_unfetched_idx
+    on ticker_events (ticker, document_fetched, event_date desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function for cosine similarity search
