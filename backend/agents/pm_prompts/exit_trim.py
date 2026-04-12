@@ -99,7 +99,7 @@ def build_exit_trim_prompt(
         "current_price": current,
         "pnl_pct": round(pnl_pct, 4),
         "pnl_dollar": round(pnl_dollar, 2),
-        "portfolio_weight": position.get("portfolio_weight"),
+        "pct_of_portfolio": position.get("pct_of_portfolio"),
         "conviction_score": position.get("conviction_score"),
         "stop_tier1": stop1,
         "stop_tier2": position.get("stop_tier2"),

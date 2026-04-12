@@ -77,7 +77,7 @@ def build_crisis_prompt(
         affected_positions.append({
             "ticker": p.get("ticker"),
             "direction": p.get("direction"),
-            "portfolio_weight": p.get("portfolio_weight"),
+            "pct_of_portfolio": p.get("pct_of_portfolio"),
             "pnl_pct": round(
                 ((float(p.get("current_price") or 0) - float(p.get("entry_price") or 1))
                  / float(p.get("entry_price") or 1)), 4

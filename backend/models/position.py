@@ -31,7 +31,7 @@ class Position(BaseModel):
     # Sizing inputs (from Portfolio Agent + Research Agent)
     conviction_score: float = Field(ge=0.0, le=10.0)
     kelly_fraction: float  # 25% fractional Kelly
-    portfolio_weight: float  # fraction of portfolio NAV, max 0.15
+    pct_of_portfolio: float  # fraction of portfolio NAV, max 0.15
 
     # Stop structure (3-tier, see CLAUDE.md)
     stop_tier1: Optional[float] = None  # position-level stop price

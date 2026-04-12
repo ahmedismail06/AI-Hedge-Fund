@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 import anthropic
 
 from backend.memory.vector_store import _get_client
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ def _check_hard_blocks(
 
     # Position size cap
     if sizing_rec:
-        weight = float(sizing_rec.get("portfolio_weight", 0) or 0)
+        weight = float(sizing_rec.get("pct_of_portfolio", 0) or 0)
         if weight > _MAX_POSITION_PCT:
             blocks["position_cap_ok"] = False
             logger.warning(
@@ -198,14 +199,17 @@ def _check_intraday_drawdown(portfolio_value: float) -> float:
 
     drawdown_pct = loss / portfolio_value
     if drawdown_pct > _DAILY_LOSS_HALT_PCT:
-        _set_halt(True, datetime.now(timezone.utc).replace(
-            hour=23, minute=59, second=59
-        ))
+        halted_until = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)
+        _set_halt(True, halted_until)
         logger.critical(
             "PM: daily loss halt triggered — intraday drawdown %.2f%% exceeds %.0f%% threshold",
             drawdown_pct * 100,
             _DAILY_LOSS_HALT_PCT * 100,
         )
+        notify_event("DAILY_LOSS_HALT", {
+            "drawdown_pct": round(drawdown_pct * 100, 2),
+            "halted_until": halted_until.isoformat(),
+        })
 
     return max(0.0, drawdown_pct)
 
@@ -362,6 +366,10 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", 1).execute()
             logger.warning("PM: CRISIS — halting new entries for 4 hours")
+            notify_event("CRISIS_MODE", {
+                "daily_loss_pct": action_details.get("daily_loss_pct", "—") if isinstance(action_details, dict) else "—",
+                "duration": "4 hours",
+            })
             return "SENT_TO_EXECUTION"
 
     except Exception as exc:
@@ -505,7 +513,8 @@ def run_pm_cycle(
     Called every 5 minutes by APScheduler, or reactively by handle_critical_alert().
     """
     if portfolio_value is None:
-        portfolio_value = float(os.getenv("PORTFOLIO_VALUE", "25000"))
+        from backend.broker.ibkr import get_portfolio_value as _get_pv
+        portfolio_value = _get_pv()
 
     cycle_id = _next_cycle_id()
     cycle_start = datetime.now(timezone.utc)
@@ -549,6 +558,12 @@ def run_pm_cycle(
     # ── Step 3: Build base context ────────────────────────────────────────────
     from backend.agents.pm_prompts.base_context import build_base_context
     base_ctx = build_base_context(_get_client())
+
+    # ── Step 3b: Event-driven research triggers (market hours only) ───────────
+    try:
+        _scan_event_triggers()
+    except Exception as exc:
+        logger.warning("PM cycle: event trigger scan failed — %s", exc)
 
     # ── Step 4: Scan actionable items ─────────────────────────────────────────
     items = _scan_actionable_items(base_ctx)
@@ -629,7 +644,7 @@ def run_pm_cycle(
                 action_details = decision_data.get("action_details", {})
                 post_blocks = _check_hard_blocks(
                     sizing_rec={
-                        "portfolio_weight": action_details.get("dollar_amount", 0) / portfolio_value
+                        "pct_of_portfolio": action_details.get("dollar_amount", 0) / portfolio_value
                         if action_details.get("dollar_amount")
                         else 0
                     },
@@ -975,6 +990,10 @@ def _set_mode(mode: str) -> Dict[str, Any]:
         pass
 
     cfg = _get_pm_config()
+    notify_event("ORCHESTRATOR_MODE_CHANGE", {
+        "mode": mode_upper,
+        "changed_by": "user",
+    })
     return {
         "mode": mode_upper,
         "suspended_until": cfg.get("halted_until"),
@@ -1114,7 +1133,353 @@ def create_orchestrator_scheduler():
         replace_existing=True,
     )
 
+    # Ticker events calendar refresh — 16:15 ET Mon–Fri
+    # Runs between screener (16:00) and research queue (16:30) so upcoming events
+    # are populated before the research scheduler fires.
+    scheduler.add_job(
+        _refresh_ticker_events_calendar,
+        trigger=CronTrigger(
+            hour=16, minute=15, day_of_week="mon-fri", timezone="America/New_York"
+        ),
+        id="pm_ticker_events_refresh",
+        name="PM → Ticker Events Calendar Refresh (4:15PM ET)",
+        replace_existing=True,
+    )
+
     return scheduler
+
+
+# ── Event-driven research triggers ───────────────────────────────────────────
+
+def _is_market_hours() -> bool:
+    """Return True if current ET time is within regular market hours (9:30–16:00)."""
+    from zoneinfo import ZoneInfo
+    et_now = datetime.now(ZoneInfo("America/New_York"))
+    if et_now.weekday() >= 5:
+        return False
+    market_open = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= et_now < market_close
+
+
+def _check_news_spike(ticker: str) -> bool:
+    """Return True if today's news count is > 3x the 30-day daily average."""
+    polygon_key = os.getenv("POLYGON_API_KEY")
+    if not polygon_key:
+        return False
+    try:
+        import requests as _req
+        cutoff = (date.today() - timedelta(days=30)).isoformat()
+        resp = _req.get(
+            "https://api.polygon.io/v2/reference/news",
+            params={
+                "ticker": ticker,
+                "published_utc.gte": cutoff,
+                "limit": 1000,
+                "apiKey": polygon_key,
+            },
+            timeout=10,
+        )
+        if not resp.ok:
+            return False
+        articles = resp.json().get("results", [])
+        if not articles:
+            return False
+
+        today_str = date.today().isoformat()
+        daily_counts: dict = {}
+        for a in articles:
+            d = str(a.get("published_utc", ""))[:10]
+            if d:
+                daily_counts[d] = daily_counts.get(d, 0) + 1
+
+        today_count = daily_counts.get(today_str, 0)
+        past_counts = [v for k, v in daily_counts.items() if k != today_str]
+        if not past_counts:
+            return False
+        avg = sum(past_counts) / len(past_counts)
+        spike = avg > 0 and today_count > 3 * avg
+        if spike:
+            logger.info("_check_news_spike(%s): today=%d avg=%.1f — SPIKE", ticker, today_count, avg)
+        return spike
+    except Exception as exc:
+        logger.warning("_check_news_spike(%s): failed — %s", ticker, exc)
+        return False
+
+
+def _check_intraday_move(ticker: str) -> bool:
+    """Return True if intraday price move exceeds 10%."""
+    polygon_key = os.getenv("POLYGON_API_KEY")
+    if not polygon_key:
+        return False
+    try:
+        import requests as _req
+        prev_resp = _req.get(
+            f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev",
+            params={"apiKey": polygon_key},
+            timeout=10,
+        )
+        if not prev_resp.ok:
+            return False
+        results = prev_resp.json().get("results", [])
+        if not results:
+            return False
+        prev_close = results[0].get("c")
+        if not prev_close:
+            return False
+
+        trade_resp = _req.get(
+            f"https://api.polygon.io/v2/last/trade/{ticker}",
+            params={"apiKey": polygon_key},
+            timeout=10,
+        )
+        if not trade_resp.ok:
+            return False
+        current = trade_resp.json().get("results", {}).get("p")
+        if not current:
+            return False
+
+        move = abs(float(current) / float(prev_close) - 1)
+        if move > 0.10:
+            logger.info("_check_intraday_move(%s): move=%.2f%% — TRIGGER", ticker, move * 100)
+            return True
+        return False
+    except Exception as exc:
+        logger.warning("_check_intraday_move(%s): failed — %s", ticker, exc)
+        return False
+
+
+def _check_earnings_just_dropped(client, ticker: str) -> bool:
+    """Return True if an earnings call document became available today."""
+    try:
+        today_str = date.today().isoformat()
+        result = (
+            client.table("ticker_events")
+            .select("id")
+            .eq("ticker", ticker)
+            .eq("event_type", "earnings_call")
+            .eq("event_date", today_str)
+            .eq("document_available", True)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as exc:
+        logger.warning("_check_earnings_just_dropped(%s): failed — %s", ticker, exc)
+        return False
+
+
+def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None:
+    """Set material_event flag on the most recent watchlist entry for this ticker."""
+    today_str = date.today().isoformat()
+    priority = 1 if is_held else 2
+    try:
+        client.table("watchlist").update(
+            {
+                "material_event": True,
+                "material_event_reason": reason,
+                "queued_for_research": True,
+                "priority": priority,
+            }
+        ).eq("ticker", ticker).eq("run_date", today_str).execute()
+        logger.info(
+            "_set_material_event(%s): reason='%s' priority=%d", ticker, reason, priority
+        )
+    except Exception as exc:
+        logger.warning("_set_material_event(%s): failed — %s", ticker, exc)
+
+
+def _scan_event_triggers() -> None:
+    """Check all watchlisted and held tickers for material events.
+
+    Runs inside the 5-minute PM cycle during market hours only.
+    Three triggers:
+      - News volume > 3x 30-day daily average
+      - Intraday price move > 10%
+      - Earnings call document became available today (from ticker_events)
+
+    When triggered, sets material_event=True and queues for research at P1 (held)
+    or P2 (watchlist-only) priority.
+    """
+    if not _is_market_hours():
+        return
+
+    client = _get_client()
+
+    # Collect candidate tickers: latest watchlist + all OPEN positions
+    tickers_to_check: set[str] = set()
+    try:
+        today_str = date.today().isoformat()
+        wl = (
+            client.table("watchlist")
+            .select("ticker")
+            .eq("run_date", today_str)
+            .execute()
+        )
+        for row in (wl.data or []):
+            tickers_to_check.add(row["ticker"])
+    except Exception as exc:
+        logger.warning("_scan_event_triggers: watchlist fetch failed — %s", exc)
+
+    open_tickers: set[str] = set()
+    try:
+        pos = (
+            client.table("positions")
+            .select("ticker")
+            .eq("status", "OPEN")
+            .execute()
+        )
+        for row in (pos.data or []):
+            open_tickers.add(row["ticker"])
+        tickers_to_check.update(open_tickers)
+    except Exception as exc:
+        logger.warning("_scan_event_triggers: positions fetch failed — %s", exc)
+
+    if not tickers_to_check:
+        return
+
+    for ticker in tickers_to_check:
+        is_held = ticker in open_tickers
+        trigger_reason: str | None = None
+
+        if _check_earnings_just_dropped(client, ticker):
+            trigger_reason = "earnings_call_available"
+        elif _check_news_spike(ticker):
+            trigger_reason = "news_volume_spike"
+        elif _is_market_hours() and _check_intraday_move(ticker):
+            trigger_reason = "intraday_move_gt10pct"
+
+        if trigger_reason:
+            _set_material_event(client, ticker, trigger_reason, is_held)
+
+
+# ── Ticker events calendar refresh ───────────────────────────────────────────
+
+def _refresh_ticker_events_calendar() -> None:
+    """Update ticker_events for all watchlisted and held tickers.
+
+    Runs at 16:15 ET (between screener at 16:00 and research at 16:30).
+    Upserts upcoming earnings and filing events with document_fetched=False
+    so the next research run knows to fetch them fresh.
+
+    Data sources (already in stack, no new dependencies):
+      - Polygon /vX/reference/financials  — upcoming earnings dates
+      - SEC EDGAR /submissions/{CIK}      — filing history
+    """
+    polygon_key = os.getenv("POLYGON_API_KEY")
+    client = _get_client()
+
+    # Collect tickers: latest watchlist + OPEN positions
+    tickers: set[str] = set()
+    try:
+        today_str = date.today().isoformat()
+        wl = client.table("watchlist").select("ticker").eq("run_date", today_str).execute()
+        for r in (wl.data or []):
+            tickers.add(r["ticker"])
+    except Exception as exc:
+        logger.warning("_refresh_ticker_events_calendar: watchlist read failed — %s", exc)
+
+    try:
+        pos = client.table("positions").select("ticker").eq("status", "OPEN").execute()
+        for r in (pos.data or []):
+            tickers.add(r["ticker"])
+    except Exception as exc:
+        logger.warning("_refresh_ticker_events_calendar: positions read failed — %s", exc)
+
+    if not tickers:
+        logger.info("_refresh_ticker_events_calendar: no tickers to refresh")
+        return
+
+    logger.info("_refresh_ticker_events_calendar: refreshing %d tickers", len(tickers))
+    rows_upserted = 0
+
+    for ticker in tickers:
+        # ── Polygon: upcoming earnings dates ─────────────────────────────────
+        if polygon_key:
+            try:
+                import requests as _req
+                resp = _req.get(
+                    f"https://api.polygon.io/vX/reference/financials",
+                    params={"ticker": ticker, "limit": 4, "apiKey": polygon_key},
+                    timeout=10,
+                )
+                if resp.ok:
+                    for fin in resp.json().get("results", []):
+                        filing_date = fin.get("filing_date")
+                        period = fin.get("fiscal_period")  # e.g. 'Q3' or 'FY'
+                        period_year = str(fin.get("fiscal_year", ""))[:4]
+                        if not filing_date or not period:
+                            continue
+                        fiscal_period = (
+                            f"{period}_{period_year}" if period_year else period
+                        )
+                        try:
+                            client.table("ticker_events").upsert(
+                                {
+                                    "ticker": ticker,
+                                    "event_type": "earnings_call",
+                                    "event_date": filing_date,
+                                    "fiscal_period": fiscal_period,
+                                    "document_available": False,
+                                    "document_fetched": False,
+                                    "source": "polygon",
+                                },
+                                on_conflict="ticker,event_type,fiscal_period",
+                                # Do NOT overwrite document_fetched=True rows
+                                # (ignore_duplicates equivalent — only insert new)
+                            ).execute()
+                            rows_upserted += 1
+                        except Exception:
+                            pass
+            except Exception as exc:
+                logger.warning(
+                    "_refresh_ticker_events_calendar: Polygon fetch failed for %s — %s",
+                    ticker, exc,
+                )
+
+        # ── SEC EDGAR: filing history ─────────────────────────────────────────
+        try:
+            from backend.fetchers.sec_fetcher import _resolve_cik, _get_filings_metadata, _find_latest_filing
+            cik = _resolve_cik(ticker)
+            meta = _get_filings_metadata(cik)
+            for form_type, event_type in [("10-K", "annual_filing"), ("10-Q", "quarterly_filing")]:
+                filing = _find_latest_filing(meta, form_type)
+                if not filing:
+                    continue
+                filing_date = filing.get("date")
+                if not filing_date:
+                    continue
+                try:
+                    d = date.fromisoformat(filing_date[:10])
+                    fiscal_period = f"FY{d.year}" if form_type == "10-K" else f"Q{(d.month-1)//3+1}_{d.year}"
+                except (ValueError, TypeError):
+                    fiscal_period = filing_date[:7]
+
+                try:
+                    client.table("ticker_events").upsert(
+                        {
+                            "ticker": ticker,
+                            "event_type": event_type,
+                            "event_date": filing_date[:10],
+                            "fiscal_period": fiscal_period,
+                            "document_available": True,
+                            "source": "sec_edgar",
+                        },
+                        on_conflict="ticker,event_type,fiscal_period",
+                    ).execute()
+                    rows_upserted += 1
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning(
+                "_refresh_ticker_events_calendar: EDGAR fetch failed for %s — %s",
+                ticker, exc,
+            )
+
+    logger.info(
+        "_refresh_ticker_events_calendar: upserted %d event rows for %d tickers",
+        rows_upserted, len(tickers),
+    )
 
 
 def _trigger_macro_agent() -> None:

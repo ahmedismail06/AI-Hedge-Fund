@@ -88,7 +88,7 @@ def build_pre_earnings_prompt(
         "entry_price": entry,
         "current_price": current,
         "pnl_pct": round(pnl_pct, 4),
-        "portfolio_weight": position.get("portfolio_weight"),
+        "pct_of_portfolio": position.get("pct_of_portfolio"),
         "conviction_score": position.get("conviction_score"),
         "next_earnings_date": str(position.get("next_earnings_date") or ""),
         "opened_at": str(position.get("opened_at") or ""),

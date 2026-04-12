@@ -72,7 +72,7 @@ def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
     sector_net: Dict[str, float] = {}
     for p in base_ctx["positions"]:
         sector = p.get("sector", "Unknown")
-        w = float(p.get("portfolio_weight") or 0.0)
+        w = float(p.get("pct_of_portfolio") or 0.0)
         direction = p.get("direction", "LONG")
         signed_w = w if direction == "LONG" else -abs(w)
         sector_gross[sector] = sector_gross.get(sector, 0.0) + abs(w)
@@ -106,7 +106,7 @@ def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
             {
                 "ticker": p.get("ticker"),
                 "direction": p.get("direction"),
-                "portfolio_weight": p.get("portfolio_weight"),
+                "pct_of_portfolio": p.get("pct_of_portfolio"),
                 "sector": p.get("sector"),
                 "conviction_score": p.get("conviction_score"),
                 "pnl_pct": round(

@@ -70,15 +70,15 @@ def _get_portfolio_summary() -> Dict[str, Any]:
         resp = (
             _get_client()
             .table("positions")
-            .select("ticker,direction,portfolio_weight,current_price,entry_price,share_count")
+            .select("ticker,direction,pct_of_portfolio,current_price,entry_price,share_count")
             .eq("status", "OPEN")
             .execute()
         )
         positions = resp.data or []
 
-        gross = sum(abs(float(p.get("portfolio_weight") or 0)) for p in positions)
+        gross = sum(abs(float(p.get("pct_of_portfolio") or 0)) for p in positions)
         net = sum(
-            float(p.get("portfolio_weight") or 0) * (1 if p.get("direction") == "LONG" else -1)
+            float(p.get("pct_of_portfolio") or 0) * (1 if p.get("direction") == "LONG" else -1)
             for p in positions
         )
 
@@ -429,10 +429,13 @@ def get_calibration():
 
 @router.post("/cycle/run")
 def trigger_pm_cycle(
-    portfolio_value: float = Query(default=25000.0, ge=0),
+    portfolio_value: Optional[float] = Query(default=None, ge=0),
 ):
-    """Manually trigger one PM decision cycle."""
+    """Manually trigger one PM decision cycle. portfolio_value resolved from IBKR if not provided."""
     from backend.agents.orchestrator import run_pm_cycle
+    if portfolio_value is None or portfolio_value <= 0:
+        from backend.broker.ibkr import get_portfolio_value as _get_pv
+        portfolio_value = _get_pv()
     try:
         result = run_pm_cycle(cycle_type="HUMAN_OVERRIDE", portfolio_value=portfolio_value)
         return result

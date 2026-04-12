@@ -62,7 +62,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             supabase_client.table("positions")
             .select(
                 "id,ticker,direction,share_count,entry_price,current_price,"
-                "conviction_score,portfolio_weight,stop_tier1,stop_tier2,stop_tier3,"
+                "conviction_score,pct_of_portfolio,stop_tier1,stop_tier2,stop_tier3,"
                 "sector,next_earnings_date,memo_id,opened_at,status"
             )
             .eq("status", "OPEN")
@@ -72,11 +72,11 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["positions"] = positions
         ctx["position_count"] = len(positions)
 
-        # Compute exposure from portfolio_weight (already normalised to portfolio)
+        # Compute exposure from pct_of_portfolio (already normalised to portfolio)
         gross = 0.0
         net = 0.0
         for p in positions:
-            w = float(p.get("portfolio_weight") or 0.0)
+            w = float(p.get("pct_of_portfolio") or 0.0)
             direction = p.get("direction", "LONG")
             gross += abs(w)
             net += w if direction == "LONG" else -w
@@ -86,12 +86,12 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["cash_pct"] = round(max(0.0, 1.0 - gross), 4)
 
         # Weighted unrealized P&L across all open positions (proxy for daily drawdown)
-        # = sum(portfolio_weight * position_pnl_pct) — approximate when weights are stale
+        # = sum(pct_of_portfolio * position_pnl_pct) — approximate when weights are stale
         portfolio_pnl = 0.0
         for p in positions:
             entry = float(p.get("entry_price") or 0)
             current = float(p.get("current_price") or 0)
-            weight = float(p.get("portfolio_weight") or 0.0)
+            weight = float(p.get("pct_of_portfolio") or 0.0)
             if entry > 0 and current > 0 and weight != 0:
                 pos_pnl = (current - entry) / entry
                 portfolio_pnl += weight * pos_pnl
