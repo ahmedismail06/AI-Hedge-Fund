@@ -5,47 +5,50 @@ import { getCriticalAlerts, getAlerts } from '../api/risk';
 import { getExecutionStatus } from '../api/execution';
 import { getPending } from '../api/portfolio';
 import { useSidebar } from '../context/SidebarContext';
+import { useTheme } from '../context/ThemeContext';
 import ConfirmDialog from './ConfirmDialog';
 import RiskAlert from './RiskAlert';
 
 const NAV_ITEMS = [
-  { to: '/',            label: 'Dashboard',    icon: 'dashboard' },
-  { to: '/portfolio',   label: 'Portfolio',    icon: 'account_balance_wallet' },
-  { to: '/execution',   label: 'Execution',    icon: 'bolt' },
-  { to: '/research',    label: 'Research',     icon: 'query_stats' },
-  { to: '/screener',    label: 'Screener',     icon: 'filter_list' },
-  { to: '/macro',       label: 'Macro',        icon: 'language' },
-  { to: '/risk',        label: 'Risk',         icon: 'security' },
-  { to: '/orchestrator',label: 'Orchestrator', icon: 'memory' },
+  { to: '/',             label: 'Dashboard',    icon: 'dashboard' },
+  { to: '/portfolio',    label: 'Portfolio',    icon: 'account_balance_wallet' },
+  { to: '/execution',    label: 'Execution',    icon: 'bolt' },
+  { to: '/research',     label: 'Research',     icon: 'query_stats' },
+  { to: '/screener',     label: 'Screener',     icon: 'filter_list' },
+  { to: '/macro',        label: 'Macro',        icon: 'language' },
+  { to: '/risk',         label: 'Risk',         icon: 'security' },
+  { to: '/orchestrator', label: 'Orchestrator', icon: 'memory' },
 ];
 
 export default function Sidebar() {
   const { collapsed, setCollapsed } = useSidebar();
-  const [status, setStatus] = useState(null);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [toggling, setToggling] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
+  const { theme, toggle: toggleTheme } = useTheme();
+  const [status, setStatus]             = useState(null);
+  const [showConfirm, setShowConfirm]   = useState(false);
+  const [toggling, setToggling]         = useState(false);
+  const [notifOpen, setNotifOpen]       = useState(false);
   const [recentAlerts, setRecentAlerts] = useState([]);
-  const [ibkrOk, setIbkrOk] = useState(null);
+  const [ibkrOk, setIbkrOk]            = useState(null);
   const [pendingCount, setPendingCount] = useState(0);
 
-  const loadStatus = () => {
+  const loadStatus = () =>
     getPMStatus().then(r => setStatus(r)).catch(() => {});
-  };
 
   const loadHealth = () => {
     getCriticalAlerts().catch(() => {});
     getExecutionStatus()
-      .then(r => { const d = r?.data || r || {}; setIbkrOk(d.connected ?? d.ibkr_connected ?? null); })
+      .then(r => {
+        const d = r?.data || r || {};
+        setIbkrOk(d.connected ?? d.ibkr_connected ?? null);
+      })
       .catch(() => {});
     getPending()
       .then(r => setPendingCount(Array.isArray(r) ? r.length : 0))
       .catch(() => {});
   };
 
-  const loadAlerts = () => {
+  const loadAlerts = () =>
     getAlerts().then(r => setRecentAlerts(Array.isArray(r) ? r.slice(0, 10) : [])).catch(() => {});
-  };
 
   useEffect(() => {
     loadStatus(); loadHealth(); loadAlerts();
@@ -54,10 +57,11 @@ export default function Sidebar() {
     return () => { clearInterval(id1); clearInterval(id2); };
   }, []);
 
-  const mode = status?.mode ?? 'autonomous';
-  const isHalted = status?.daily_loss_halt_triggered ?? false;
+  const mode          = status?.mode ?? 'autonomous';
+  const isHalted      = status?.daily_loss_halt_triggered ?? false;
   const criticalCount = status?.active_critical_alerts ?? 0;
-  const isAutonomous = mode === 'autonomous';
+  const isAutonomous  = mode === 'autonomous';
+  const isDark        = theme === 'dark';
 
   const handleConfirmToggle = async () => {
     setToggling(true);
@@ -70,41 +74,75 @@ export default function Sidebar() {
   };
 
   const modeLabel = isHalted ? 'HALTED' : mode.toUpperCase();
-  const modeColor = isHalted
-    ? 'bg-yellow-100 text-yellow-700 border-yellow-300'
-    : isAutonomous
-    ? 'bg-blue-600 text-white border-blue-600'
-    : 'bg-white text-gray-700 border-gray-300';
 
   return (
     <>
-      <aside className={`h-screen ${collapsed ? 'w-[60px]' : 'w-[220px]'} fixed left-0 top-0 bg-slate-100 dark:bg-slate-900 flex flex-col py-6 z-50 transition-all duration-200`}>
-        {/* Collapse Toggle */}
+      <aside
+        className={`
+          h-screen fixed left-0 top-0 z-50 flex flex-col py-5
+          transition-all duration-200
+          ${collapsed ? 'w-[56px]' : 'w-[212px]'}
+        `}
+        style={{
+          background:   'var(--sidebar-bg)',
+          borderRight:  '1px solid var(--sidebar-border)',
+        }}
+      >
+        {/* Collapse toggle */}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="absolute -right-3 top-8 w-6 h-6 rounded-full bg-white border border-gray-300 shadow-sm flex items-center justify-center text-gray-500 hover:bg-gray-50 z-10 text-xs"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className="absolute -right-3 top-7 w-6 h-6 rounded-full flex items-center justify-center text-[10px] transition-colors z-10"
+          style={{
+            background:  'var(--surface)',
+            border:      '1px solid var(--border-2)',
+            color:       'var(--text-2)',
+          }}
+          title={collapsed ? 'Expand' : 'Collapse'}
         >
           {collapsed ? '›' : '‹'}
         </button>
 
         {/* Logo */}
-        {!collapsed && (
-          <div className="px-6 mb-8">
-            <div className="text-xl font-bold text-slate-900 dark:text-white font-headline">Precision Ledger</div>
-            <div className="text-[10px] font-bold tracking-widest text-slate-500 uppercase mt-1">AI Hedge Fund</div>
-          </div>
-        )}
-        {collapsed && <div className="px-4 mb-8 mt-1 text-slate-700 font-bold text-xs text-center">PL</div>}
+        <div className={`${collapsed ? 'px-3 mb-7 mt-0' : 'px-5 mb-7'}`}>
+          {collapsed ? (
+            <div
+              className="w-8 h-8 rounded-md flex items-center justify-center font-data font-semibold text-xs"
+              style={{
+                background: 'var(--accent-muted)',
+                color:      'var(--accent)',
+                border:     '1px solid var(--accent-ring)',
+              }}
+            >
+              PL
+            </div>
+          ) : (
+            <div>
+              <div
+                className="text-[15px] font-bold tracking-tight"
+                style={{ fontFamily: 'Syne', color: 'var(--text)' }}
+              >
+                Precision Ledger
+              </div>
+              <div
+                className="text-[9px] font-bold tracking-[0.18em] mt-0.5 uppercase"
+                style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
+              >
+                AI Hedge Fund
+              </div>
+            </div>
+          )}
+        </div>
 
-        {/* Nav */}
-        <nav className="flex-1 px-2 space-y-1 overflow-hidden">
+        {/* Nav items */}
+        <nav className="flex-1 px-2 space-y-0.5 overflow-hidden">
           {NAV_ITEMS.map(({ to, label, icon }) => {
-            // Per-item status dot
-            let dotColor = null;
-            if (label === 'Execution') dotColor = ibkrOk === true ? 'bg-green-400' : ibkrOk === false ? 'bg-red-400' : null;
-            if (label === 'Risk') dotColor = criticalCount > 0 ? 'bg-red-500' : null;
-            if (label === 'Portfolio') dotColor = pendingCount > 0 ? 'bg-yellow-400' : null;
+            let dotStyle = null;
+            if (label === 'Execution')
+              dotStyle = ibkrOk === true ? 'dot-green' : ibkrOk === false ? 'dot-red' : null;
+            if (label === 'Risk')
+              dotStyle = criticalCount > 0 ? 'dot-red' : null;
+            if (label === 'Portfolio')
+              dotStyle = pendingCount > 0 ? 'dot-amber' : null;
 
             return (
               <NavLink
@@ -112,86 +150,165 @@ export default function Sidebar() {
                 to={to}
                 end={to === '/'}
                 title={collapsed ? label : undefined}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 text-[11px] font-bold tracking-wider uppercase transition-colors group rounded-lg ${
-                    isActive
-                      ? 'text-blue-700 dark:text-blue-400 bg-slate-200/60 dark:bg-slate-800/60'
-                      : 'text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800'
-                  }`
-                }
+                className={({ isActive }) => `
+                  relative flex items-center gap-2.5 px-2.5 py-2 rounded-md text-[11px] font-bold
+                  tracking-[0.06em] uppercase transition-all duration-150
+                  ${isActive ? '' : 'hover:opacity-80'}
+                `}
+                style={({ isActive }) => ({
+                  color:       isActive ? 'var(--accent)'  : 'var(--text-2)',
+                  background:  isActive ? 'var(--accent-muted)' : 'transparent',
+                  borderLeft:  isActive ? '2px solid var(--accent)' : '2px solid transparent',
+                  paddingLeft: isActive ? '8px' : '10px',
+                })}
               >
-                <span className="material-symbols-outlined text-[20px] flex-shrink-0" aria-hidden>{icon}</span>
+                <span
+                  className="material-symbols-outlined flex-shrink-0"
+                  style={{ fontSize: '18px' }}
+                  aria-hidden
+                >
+                  {icon}
+                </span>
                 {!collapsed && (
                   <>
-                    <span className="flex-1">{label}</span>
-                    {dotColor && <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />}
+                    <span className="flex-1" style={{ fontFamily: 'Syne', letterSpacing: '0.07em' }}>
+                      {label}
+                    </span>
+                    {dotStyle && (
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotStyle}`} />
+                    )}
                     {label === 'Portfolio' && pendingCount > 0 && (
-                      <span className="text-[9px] font-bold bg-yellow-100 text-yellow-700 px-1 rounded">{pendingCount}</span>
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm font-data"
+                        style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}
+                      >
+                        {pendingCount}
+                      </span>
                     )}
                   </>
                 )}
-                {collapsed && dotColor && (
-                  <span className={`absolute right-1 top-1 w-1.5 h-1.5 rounded-full ${dotColor}`} />
+                {collapsed && dotStyle && (
+                  <span className={`absolute right-1.5 top-1.5 w-1.5 h-1.5 rounded-full ${dotStyle}`} />
                 )}
               </NavLink>
             );
           })}
         </nav>
 
-        {/* Bottom Controls */}
-        <div className={`${collapsed ? 'px-2' : 'px-6'} mt-auto space-y-3`}>
+        {/* Bottom section */}
+        <div className={`${collapsed ? 'px-2' : 'px-3'} mt-auto space-y-2`}>
+          {/* Divider */}
+          <div style={{ height: '1px', background: 'var(--border)' }} />
+
           {/* Mode badge */}
           {!collapsed && (
             <button
               onClick={() => !toggling && setShowConfirm(true)}
               disabled={toggling}
-              className={`w-full border rounded-lg px-3 py-2 text-[10px] font-black tracking-widest text-center transition-colors ${modeColor}`}
+              className="w-full rounded-md px-3 py-2 text-[10px] font-bold tracking-[0.12em] uppercase text-center transition-all"
+              style={
+                isHalted
+                  ? { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)' }
+                  : isAutonomous
+                  ? { background: 'var(--accent-muted)', color: 'var(--accent)', border: '1px solid var(--accent-ring)' }
+                  : { background: 'transparent', color: 'var(--text-2)', border: '1px solid var(--border)' }
+              }
             >
               {modeLabel}
             </button>
           )}
 
           {criticalCount > 0 && !collapsed && (
-            <p className="text-[10px] font-semibold text-red-600 text-center">
+            <p className="text-[9px] font-bold text-center" style={{ color: 'var(--red)' }}>
               {criticalCount} CRITICAL alert{criticalCount > 1 ? 's' : ''}
             </p>
           )}
 
-          {/* Notification bell */}
-          <div className={`flex ${collapsed ? 'flex-col items-center gap-2' : 'gap-3 pt-3 border-t border-slate-200 dark:border-slate-800'} `}>
+          {/* Controls row: alerts + settings + theme toggle */}
+          <div className={`flex ${collapsed ? 'flex-col items-center gap-2' : 'items-center gap-1'}`}>
+            {/* Alert bell */}
             <button
               onClick={() => { setNotifOpen(v => !v); if (!notifOpen) loadAlerts(); }}
-              className="relative flex items-center gap-2 text-slate-500 hover:text-blue-600 transition-colors p-1 rounded-lg hover:bg-slate-200"
+              className="relative flex items-center gap-1.5 p-1.5 rounded-md transition-all flex-1"
+              style={{ color: 'var(--text-2)' }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--accent)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--text-2)'}
               title="Recent alerts"
             >
-              <span className="material-symbols-outlined text-[18px]">notifications</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>notifications</span>
               {recentAlerts.filter(a => !a.resolved).length > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full" />
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full dot-red" />
               )}
-              {!collapsed && <span className="text-[11px] font-bold tracking-wider uppercase">Alerts</span>}
+              {!collapsed && (
+                <span className="text-[10px] font-bold tracking-wide uppercase" style={{ fontFamily: 'Syne' }}>
+                  Alerts
+                </span>
+              )}
             </button>
+
+            {/* Theme toggle button */}
+            <button
+              onClick={toggleTheme}
+              className="relative p-1.5 rounded-md transition-all flex-shrink-0"
+              style={{ color: 'var(--text-2)' }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--accent)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--text-2)'}
+              title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                {isDark ? 'light_mode' : 'dark_mode'}
+              </span>
+            </button>
+
+            {/* Settings */}
             {!collapsed && (
-              <>
-                <a href="#" className="flex items-center gap-2 text-slate-500 hover:text-blue-600 transition-colors p-1">
-                  <span className="material-symbols-outlined text-[18px]">settings</span>
-                  <span className="text-[11px] font-bold tracking-wider uppercase">Settings</span>
-                </a>
-              </>
+              <a
+                href="#"
+                className="flex items-center p-1.5 rounded-md transition-all flex-shrink-0"
+                style={{ color: 'var(--text-2)' }}
+                onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
+                onMouseLeave={e => e.currentTarget.style.color = 'var(--text-2)'}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>settings</span>
+              </a>
             )}
           </div>
         </div>
       </aside>
 
-      {/* Notification Slide-Out Panel */}
+      {/* Notification slide-out panel */}
       {notifOpen && (
-        <div className={`fixed top-0 ${collapsed ? 'left-[60px]' : 'left-[220px]'} h-screen w-72 bg-white border-r border-gray-200 shadow-xl z-40 flex flex-col transition-all duration-200`}>
-          <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
-            <span className="text-sm font-semibold text-gray-900">Recent Alerts</span>
-            <button onClick={() => setNotifOpen(false)} className="text-gray-400 hover:text-gray-700 text-lg">×</button>
+        <div
+          className={`fixed top-0 ${collapsed ? 'left-[56px]' : 'left-[212px]'} h-screen w-72 z-40 flex flex-col animate-slide-down`}
+          style={{
+            background:   'var(--surface)',
+            borderRight:  '1px solid var(--border)',
+            boxShadow:    '8px 0 32px rgba(0,0,0,0.25)',
+          }}
+        >
+          <div
+            className="px-4 py-4 flex items-center justify-between"
+            style={{ borderBottom: '1px solid var(--border)' }}
+          >
+            <span
+              className="text-sm font-bold"
+              style={{ color: 'var(--text)', fontFamily: 'Syne' }}
+            >
+              Recent Alerts
+            </span>
+            <button
+              onClick={() => setNotifOpen(false)}
+              className="text-lg transition-colors"
+              style={{ color: 'var(--text-2)' }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--text-2)'}
+            >
+              ×
+            </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          <div className="flex-1 overflow-y-auto p-3 space-y-2 term-scroll">
             {recentAlerts.length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-6">No alerts</p>
+              <p className="text-sm text-center py-8" style={{ color: 'var(--text-2)' }}>No alerts</p>
             ) : (
               recentAlerts.map(a => <RiskAlert key={a.id} alert={a} compact />)
             )}

@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { SidebarProvider } from './context/SidebarContext';
+import { ThemeProvider } from './context/ThemeContext';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Portfolio from './pages/Portfolio';
@@ -12,20 +13,22 @@ import Orchestrator from './pages/Orchestrator';
 
 export default function App() {
   return (
-    <SidebarProvider>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="portfolio" element={<Portfolio />} />
-          <Route path="execution" element={<Execution />} />
-          <Route path="research" element={<Research />} />
-          <Route path="screener" element={<Screener />} />
-          <Route path="macro" element={<Macro />} />
-          <Route path="risk" element={<Risk />} />
-          <Route path="orchestrator" element={<Orchestrator />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </SidebarProvider>
+    <ThemeProvider>
+      <SidebarProvider>
+        <Routes>
+          <Route path="/" element={<Layout />}>
+            <Route index element={<Dashboard />} />
+            <Route path="portfolio" element={<Portfolio />} />
+            <Route path="execution" element={<Execution />} />
+            <Route path="research" element={<Research />} />
+            <Route path="screener" element={<Screener />} />
+            <Route path="macro" element={<Macro />} />
+            <Route path="risk" element={<Risk />} />
+            <Route path="orchestrator" element={<Orchestrator />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </SidebarProvider>
+    </ThemeProvider>
   );
 }

@@ -10,100 +10,156 @@ import RiskAlert from '../components/RiskAlert';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ConvictionBadge from '../components/ConvictionBadge';
 
-const REGIME_STYLES = {
-  'Risk-On':     { bg: 'bg-green-100',  border: 'border-green-300', text: 'text-green-700', dot: 'bg-green-500' },
-  'Risk-Off':    { bg: 'bg-red-100',    border: 'border-red-300',   text: 'text-red-700',   dot: 'bg-red-500' },
-  'Transitional':{ bg: 'bg-yellow-100', border: 'border-yellow-300',text: 'text-yellow-700',dot: 'bg-yellow-500' },
-  'Stagflation': { bg: 'bg-orange-100', border: 'border-orange-300',text: 'text-orange-700',dot: 'bg-orange-500' },
+/* ─── Regime config (CSS variables for both themes) ──────────────── */
+const REGIME_CONFIG = {
+  'Risk-On': {
+    cls: 'regime-risk-on', dotCls: 'dot-green',
+    colorVar: 'var(--regime-on-text)', label: 'RISK-ON',
+  },
+  'Risk-Off': {
+    cls: 'regime-risk-off', dotCls: 'dot-red',
+    colorVar: 'var(--regime-off-text)', label: 'RISK-OFF',
+  },
+  'Stagflation': {
+    cls: 'regime-stagflation', dotCls: 'dot-amber',
+    colorVar: 'var(--regime-st-text)', label: 'STAGFLATION',
+  },
+  'Transitional': {
+    cls: 'regime-transitional', dotCls: 'dot-blue',
+    colorVar: 'var(--regime-tr-text)', label: 'TRANSITIONAL',
+  },
 };
 
-const SUB_SCORE_LABELS = {
-  growth_score:    'Growth',
-  inflation_score: 'Inflation',
-  fed_score:       'Fed',
-  stress_score:    'Stress',
+const SUB_SCORES = [
+  { key: 'growth_score',    label: 'Growth' },
+  { key: 'inflation_score', label: 'Inflation' },
+  { key: 'fed_score',       label: 'Fed' },
+  { key: 'stress_score',    label: 'Stress' },
+];
+
+const VERDICT_STYLES = {
+  LONG:  { bgVar: 'var(--green-bg)',  colorVar: 'var(--green)' },
+  SHORT: { bgVar: 'var(--red-bg)',    colorVar: 'var(--red)' },
+  AVOID: { bgVar: 'var(--surface-2)', colorVar: 'var(--text-2)' },
 };
 
-const fmt$ = (v) =>
-  v == null ? '—'
-  : Math.abs(v) >= 1000000
-  ? `$${(v / 1000000).toFixed(2)}M`
-  : Math.abs(v) >= 1000
-  ? `$${(v / 1000).toFixed(1)}k`
-  : `$${v.toFixed(2)}`;
+/* ─── Formatters ─────────────────────────────────────────────────── */
+function fmt$(v) {
+  if (v == null) return '—';
+  const abs    = Math.abs(v);
+  const prefix = v < 0 ? '-' : '';
+  if (abs >= 1_000_000) return `${prefix}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000)     return `${prefix}$${(abs / 1_000).toFixed(1)}k`;
+  return `${prefix}$${abs.toFixed(2)}`;
+}
 
 function fmtAgo(ts) {
   if (!ts) return null;
   const diff = Math.round((Date.now() - new Date(ts)) / 1000);
-  if (diff < 60) return `${diff}s ago`;
+  if (diff < 60)   return `${diff}s ago`;
   if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
   return `${Math.round(diff / 3600)}h ago`;
 }
 
-function HealthDot({ ok, label, sub, badge, badgeColor, onClick }) {
+/* ─── PnL Card ───────────────────────────────────────────────────── */
+function PnLCard({ label, value, sub, colorVar }) {
   return (
     <div
-      className={`flex items-center gap-2 bg-white rounded-lg border border-gray-200 px-3 py-2.5 ${onClick ? 'cursor-pointer hover:bg-gray-50' : ''}`}
-      onClick={onClick}
+      className="rounded-lg p-4 card-hover"
+      style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
     >
-      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${ok ? 'bg-green-400' : ok === false ? 'bg-red-400' : 'bg-gray-300'}`} />
-      <div className="min-w-0">
-        <div className="text-xs font-medium text-gray-700 truncate">{label}</div>
-        {sub && <div className="text-xs text-gray-400 truncate">{sub}</div>}
+      <div className="section-label mb-2">{label}</div>
+      <div
+        className="text-2xl font-semibold font-data leading-none"
+        style={{ color: colorVar ?? 'var(--text)', fontFamily: 'JetBrains Mono' }}
+      >
+        {value ?? '—'}
       </div>
-      {badge != null && badge > 0 && (
-        <span className={`ml-auto text-xs font-bold px-1.5 py-0.5 rounded-full ${badgeColor ?? 'bg-blue-100 text-blue-700'}`}>
-          {badge}
-        </span>
-      )}
+      <div className="text-[10px] mt-1.5 font-data" style={{ color: 'var(--text-3)' }}>{sub}</div>
     </div>
   );
 }
 
-function SubScorePill({ label, value }) {
-  const isPos = (value ?? 0) >= 0;
+/* ─── Health Pill ────────────────────────────────────────────────── */
+function HealthPill({ ok, label, sub, badge, badgeStyle, onClick }) {
+  const dotCls = ok === true ? 'dot-green' : ok === false ? 'dot-red' : 'dot-gray';
+
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-2.5 rounded-md px-3 py-2.5 text-left w-full transition-all card-hover"
+      style={{ background: 'var(--surface)', border: '1px solid var(--border)', cursor: onClick ? 'pointer' : 'default' }}
+    >
+      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotCls}`} />
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] font-bold truncate" style={{ color: 'var(--text)', fontFamily: 'Syne' }}>
+          {label}
+        </div>
+        {sub && (
+          <div className="text-[10px] truncate font-data" style={{ color: 'var(--text-3)' }}>
+            {sub}
+          </div>
+        )}
+      </div>
+      {badge != null && badge > 0 && (
+        <span
+          className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm font-data flex-shrink-0"
+          style={badgeStyle}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/* ─── Sub-score bar ──────────────────────────────────────────────── */
+function SubScore({ label, value }) {
+  const v   = value ?? 0;
+  const pos = v >= 0;
+  const pct = Math.min(Math.abs(v) * 100, 100);
+
   return (
     <div className="text-center">
-      <div className="text-xs text-gray-500 mb-1">{label}</div>
-      <div className={`text-sm font-bold ${isPos ? 'text-green-600' : 'text-red-600'}`}>
-        {value != null ? `${isPos ? '+' : ''}${value.toFixed(1)}` : '—'}
+      <div className="section-label mb-1.5">{label}</div>
+      <div
+        className="text-sm font-semibold font-data"
+        style={{ color: pos ? 'var(--green)' : 'var(--red)', fontFamily: 'JetBrains Mono' }}
+      >
+        {value != null ? `${pos ? '+' : ''}${v.toFixed(2)}` : '—'}
       </div>
-      <div className="mt-1 h-1.5 rounded-full bg-gray-100 w-16 mx-auto">
+      <div
+        className="mt-1.5 h-1 rounded-full mx-auto"
+        style={{ width: '48px', background: 'var(--border)' }}
+      >
         <div
-          className={`h-full rounded-full ${isPos ? 'bg-green-400' : 'bg-red-400'}`}
-          style={{ width: `${Math.abs(value ?? 0) * 100}%` }}
+          className="h-full rounded-full"
+          style={{ width: `${pct}%`, background: pos ? 'var(--green)' : 'var(--red)', opacity: 0.8 }}
         />
       </div>
     </div>
   );
 }
 
-const VERDICT_COLORS = {
-  LONG:  'bg-green-100 text-green-700',
-  SHORT: 'bg-red-100 text-red-700',
-  AVOID: 'bg-gray-100 text-gray-600',
-};
-
+/* ─── Main component ─────────────────────────────────────────────── */
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [positions, setPositions] = useState([]);
-  const [pending, setPending] = useState([]);
-  const [exposure, setExposure] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [criticals, setCriticals] = useState([]);
-  const [metrics, setMetrics] = useState(null);
-  const [regime, setRegime] = useState(null);
-  const [briefing, setBriefing] = useState(null);
-  const [execStatus, setExecStatus] = useState(null);
+  const [positions,   setPositions]   = useState([]);
+  const [pending,     setPending]     = useState([]);
+  const [alerts,      setAlerts]      = useState([]);
+  const [criticals,   setCriticals]   = useState([]);
+  const [metrics,     setMetrics]     = useState(null);
+  const [regime,      setRegime]      = useState(null);
+  const [briefing,    setBriefing]    = useState(null);
+  const [execStatus,  setExecStatus]  = useState(null);
   const [memoHistory, setMemoHistory] = useState([]);
-  const [confirm, setConfirm] = useState(null);
+  const [confirm,     setConfirm]     = useState(null);
 
   const loadPnL = useCallback(async () => {
     try {
-      const [pos, pend, exp] = await Promise.all([getPositions(), getPending(), getExposure()]);
+      const [pos, pend] = await Promise.all([getPositions(), getPending()]);
       setPositions(Array.isArray(pos) ? pos : []);
       setPending(Array.isArray(pend) ? pend : []);
-      setExposure(exp);
     } catch {}
   }, []);
 
@@ -117,8 +173,9 @@ export default function Dashboard() {
 
   const loadHealth = useCallback(async () => {
     try {
-      const [met, reg, brief, exec] = await Promise.all([getMetrics(), getRegime(), getBriefing(), getExecutionStatus()]);
-      setMetrics(met);
+      const [, reg, brief, exec] = await Promise.all([
+        getMetrics(), getRegime(), getBriefing(), getExecutionStatus(),
+      ]);
       setRegime(reg);
       setBriefing(brief);
       setExecStatus(exec);
@@ -128,29 +185,29 @@ export default function Dashboard() {
   const loadMemos = useCallback(async () => {
     try {
       const data = await getHistory();
-      setMemoHistory(Array.isArray(data) ? data.slice(0, 3) : []);
+      setMemoHistory(Array.isArray(data) ? data.slice(0, 5) : []);
     } catch {}
   }, []);
 
   useEffect(() => {
     loadPnL(); loadAlerts(); loadHealth(); loadMemos();
-    const t1 = setInterval(loadPnL, 60000);
-    const t2 = setInterval(loadAlerts, 30000);
-    const t3 = setInterval(loadHealth, 300000);
+    const t1 = setInterval(loadPnL,    60_000);
+    const t2 = setInterval(loadAlerts, 30_000);
+    const t3 = setInterval(loadHealth, 300_000);
     return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
   }, [loadPnL, loadAlerts, loadHealth, loadMemos]);
 
-  const maxDrawdown = metrics?.max_drawdown;
   const regimeKey = regime?.regime ?? briefing?.regime;
-  const regStyle = REGIME_STYLES[regimeKey] || REGIME_STYLES['Transitional'];
-  const ibkrOk = execStatus?.ibkr_connected === true;
-  const isPaper = execStatus?.is_paper === true;
+  const regCfg    = REGIME_CONFIG[regimeKey] ?? null;
+  const ibkrOk    = execStatus?.ibkr_connected === true;
+  const isPaper   = execStatus?.is_paper === true;
 
-  // IBKR account values (live from broker when connected, null when disconnected)
   const portfolioValue = execStatus?.net_liquidation ?? null;
-  const cashBalance = execStatus?.cash ?? null;
-  const unrealizedPnl = execStatus?.unrealized_pnl ?? null;
-  const realizedPnl = execStatus?.realized_pnl ?? null;
+  const cashBalance    = execStatus?.cash             ?? null;
+  const unrealizedPnl  = execStatus?.unrealized_pnl   ?? null;
+  const realizedPnl    = execStatus?.realized_pnl     ?? null;
+
+  const pnlColor = (v) => v == null ? undefined : v >= 0 ? 'var(--green)' : 'var(--red)';
 
   const handleConfirm = async () => {
     if (!confirm) return;
@@ -163,105 +220,100 @@ export default function Dashboard() {
     } catch { loadPnL(); }
   };
 
-  // Build equity curve data from positions history (basic: just total unrealized over time)
-  // If no history endpoint returns chart data, show empty
-  const equityData = [];
-
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div className="p-5 space-y-4 max-w-[1400px] mx-auto animate-fade-in">
       {confirm && (
         <ConfirmDialog
-          title={confirm.action === 'approve' ? `Approve trade for ${confirm.ticker}?` : `Reject trade for ${confirm.ticker}?`}
-          message={confirm.action === 'approve'
-            ? 'This will send the order to the execution engine.'
-            : 'This will reject the sizing recommendation.'}
-          confirmLabel={confirm.action === 'approve' ? 'Yes, Approve' : 'Yes, Reject'}
+          title={confirm.action === 'approve' ? `Approve ${confirm.ticker}?` : `Reject ${confirm.ticker}?`}
+          message={
+            confirm.action === 'approve'
+              ? 'This will send the order to the execution engine for processing.'
+              : 'This will reject the sizing recommendation and remove it from the queue.'
+          }
+          confirmLabel={confirm.action === 'approve' ? 'Approve' : 'Reject'}
           destructive={confirm.action === 'reject'}
           onConfirm={handleConfirm}
           onCancel={() => setConfirm(null)}
         />
       )}
 
-      {/* CRITICAL Banner */}
+      {/* ── CRITICAL banner ───────────────────────────────────────── */}
       {criticals.length > 0 && (
         <div
-          className="rounded-xl bg-red-600 text-white px-5 py-3 flex items-center gap-3 cursor-pointer hover:bg-red-700 transition-colors"
+          className="rounded-lg px-5 py-3 flex items-center gap-3 cursor-pointer transition-opacity hover:opacity-90"
+          style={{
+            background:  'var(--red-bg)',
+            border:      '1px solid var(--red-border)',
+          }}
           onClick={() => navigate('/risk')}
         >
-          <span className="w-3 h-3 rounded-full bg-white animate-pulse flex-shrink-0" />
-          <span className="font-bold">CRITICAL ALERT — Trade approvals blocked.</span>
-          <span className="text-sm text-red-100 ml-1">{criticals[0]?.message}</span>
-          <span className="ml-auto text-sm underline">View Risk →</span>
+          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 dot-red pulse-critical" />
+          <span className="font-bold text-sm tracking-wide" style={{ color: 'var(--red)', fontFamily: 'Syne' }}>
+            CRITICAL ALERT — Trade approvals blocked.
+          </span>
+          <span className="text-[13px]" style={{ color: 'var(--text)' }}>
+            {criticals[0]?.message}
+          </span>
+          <span className="ml-auto text-[11px] font-bold underline" style={{ color: 'var(--red)' }}>
+            View Risk →
+          </span>
         </div>
       )}
 
-      {/* P&L Strip — sourced from IBKR when connected */}
+      {/* ── P&L Strip ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Portfolio Value</div>
-          <div className="text-2xl font-bold mt-1 text-gray-900">{fmt$(portfolioValue)}</div>
-          <div className="text-xs text-gray-400 mt-0.5">
-            {ibkrOk ? (isPaper ? 'Paper account · live from IBKR' : 'Live account · from IBKR') : 'IBKR disconnected'}
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Cash Available</div>
-          <div className="text-2xl font-bold mt-1 text-gray-900">{fmt$(cashBalance)}</div>
-          <div className="text-xs text-gray-400 mt-0.5">Buying power</div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Unrealized P&L</div>
-          <div className={`text-2xl font-bold mt-1 ${unrealizedPnl == null ? 'text-gray-900' : unrealizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {fmt$(unrealizedPnl)}
-          </div>
-          <div className="text-xs text-gray-400 mt-0.5">Open positions</div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Realized P&L</div>
-          <div className={`text-2xl font-bold mt-1 ${realizedPnl == null ? 'text-gray-900' : realizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-            {fmt$(realizedPnl)}
-          </div>
-          <div className="text-xs text-gray-400 mt-0.5">Session closed trades</div>
-        </div>
+        <PnLCard
+          label="Portfolio Value"
+          value={fmt$(portfolioValue)}
+          sub={ibkrOk ? (isPaper ? 'Paper · live IBKR' : 'Live · from IBKR') : 'IBKR disconnected'}
+        />
+        <PnLCard label="Cash Available" value={fmt$(cashBalance)} sub="Buying power" />
+        <PnLCard
+          label="Unrealized P&L"
+          value={fmt$(unrealizedPnl)}
+          sub="Open positions"
+          colorVar={pnlColor(unrealizedPnl)}
+        />
+        <PnLCard
+          label="Realized P&L"
+          value={fmt$(realizedPnl)}
+          sub="Session closed"
+          colorVar={pnlColor(realizedPnl)}
+        />
       </div>
 
-      {/* System Health Strip */}
+      {/* ── System health strip ───────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-        <HealthDot
+        <HealthPill
           ok={ibkrOk}
           label="IBKR Gateway"
-          sub={ibkrOk ? (isPaper ? 'Paper mode' : 'Live mode') : 'Disconnected'}
+          sub={ibkrOk ? (isPaper ? 'Paper' : 'Live') : 'Disconnected'}
           onClick={() => navigate('/execution')}
         />
-        <HealthDot
+        <HealthPill
           ok={briefing?.created_at ? true : null}
           label="Macro Engine"
           sub={briefing?.created_at ? fmtAgo(briefing.created_at) : 'No data'}
           onClick={() => navigate('/macro')}
         />
-        <HealthDot
-          ok={true}
-          label="Screener"
-          sub="Ready"
-          onClick={() => navigate('/screener')}
-        />
-        <HealthDot
+        <HealthPill ok={true} label="Screener" sub="Ready" onClick={() => navigate('/screener')} />
+        <HealthPill
           ok={alerts.length === 0 && criticals.length === 0}
           label="Risk Monitor"
           sub={criticals.length > 0 ? `${criticals.length} critical` : alerts.length > 0 ? `${alerts.length} alerts` : 'All clear'}
           badge={criticals.length || undefined}
-          badgeColor="bg-red-100 text-red-700"
+          badgeStyle={{ background: 'var(--red-bg)', color: 'var(--red)' }}
           onClick={() => navigate('/risk')}
         />
-        <HealthDot
+        <HealthPill
           ok={pending.length === 0}
-          label="Pending Approvals"
-          sub={pending.length > 0 ? 'Awaiting your review' : 'None'}
+          label="Pending"
+          sub={pending.length > 0 ? 'Awaiting review' : 'None'}
           badge={pending.length || undefined}
-          badgeColor="bg-yellow-100 text-yellow-700"
+          badgeStyle={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}
           onClick={() => navigate('/portfolio')}
         />
-        <HealthDot
+        <HealthPill
           ok={regimeKey != null}
           label="Regime"
           sub={regimeKey ?? 'Unknown'}
@@ -269,110 +321,208 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Regime Card */}
-      <div className={`rounded-xl border p-5 ${regStyle.bg} ${regStyle.border}`}>
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <span className={`w-4 h-4 rounded-full ${regStyle.dot}`} />
-            <div>
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Market Regime</p>
-              <p className={`text-2xl font-black ${regStyle.text}`}>{regimeKey ?? '—'}</p>
-            </div>
-            {regime?.regime_confidence != null && (
-              <div className="ml-4 text-sm text-gray-600">
-                Confidence <strong>{regime.regime_confidence}/10</strong>
+      {/* ── Regime card ───────────────────────────────────────────── */}
+      {regCfg ? (
+        <div
+          className={`rounded-lg border p-5 ${regCfg.cls}`}
+          style={{ borderWidth: '1px' }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <span className={`w-3 h-3 rounded-full ${regCfg.dotCls}`} />
+              <div>
+                <div className="section-label mb-0.5">Market Regime</div>
+                <div
+                  className="text-[22px] font-black tracking-tight leading-none"
+                  style={{ color: regCfg.colorVar, fontFamily: 'Syne' }}
+                >
+                  {regimeKey}
+                </div>
               </div>
-            )}
-          </div>
-          <div className="flex gap-6">
-            {Object.entries(SUB_SCORE_LABELS).map(([key, label]) => (
-              <SubScorePill key={key} label={label} value={regime?.[key] ?? briefing?.[key]} />
-            ))}
-          </div>
-          <button
-            onClick={() => navigate('/macro')}
-            className={`text-xs underline ${regStyle.text}`}
-          >
-            Full Macro View →
-          </button>
-        </div>
-      </div>
-
-      {/* Equity Curve + Pending Approvals */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
-        <div className="lg:col-span-3 bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-700">Portfolio Equity Curve</h2>
-            <span className="text-xs text-gray-400">Based on closed fill history</span>
-          </div>
-          <EquityCurveChart data={equityData} height={180} />
-        </div>
-
-        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-700">
-              Awaiting Your Approval
-              {pending.length > 0 && (
-                <span className="ml-2 bg-yellow-100 text-yellow-700 text-xs px-1.5 py-0.5 rounded-full">{pending.length}</span>
+              {regime?.regime_confidence != null && (
+                <div
+                  className="text-sm px-3 py-1 rounded-md font-data"
+                  style={{
+                    background: 'var(--accent-muted)',
+                    color:      'var(--accent)',
+                    border:     '1px solid var(--accent-ring)',
+                    fontFamily: 'JetBrains Mono',
+                  }}
+                >
+                  {regime.regime_confidence}/10 confidence
+                </div>
               )}
-            </h2>
+            </div>
+
+            <div className="flex gap-8">
+              {SUB_SCORES.map(({ key, label }) => (
+                <SubScore key={key} label={label} value={regime?.[key] ?? briefing?.[key]} />
+              ))}
+            </div>
+
+            <button
+              onClick={() => navigate('/macro')}
+              className="text-[11px] font-bold tracking-wide transition-opacity hover:opacity-70"
+              style={{ color: regCfg.colorVar, fontFamily: 'Syne' }}
+            >
+              Full Macro →
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          className="rounded-lg p-5"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+            No regime data — run macro agent.
+          </span>
+        </div>
+      )}
+
+      {/* ── Equity curve + Pending approvals ──────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        {/* Equity curve */}
+        <div
+          className="lg:col-span-3 rounded-lg p-5"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="section-label">Portfolio Equity Curve</div>
+            <span className="text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
+              Based on closed fills
+            </span>
+          </div>
+          <EquityCurveChart data={[]} height={180} />
+        </div>
+
+        {/* Pending approvals */}
+        <div
+          className="lg:col-span-2 rounded-lg p-5"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="section-label">Awaiting Approval</div>
+              {pending.length > 0 && (
+                <span
+                  className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm font-data"
+                  style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}
+                >
+                  {pending.length}
+                </span>
+              )}
+            </div>
             {pending.length > 3 && (
-              <button onClick={() => navigate('/portfolio')} className="text-xs text-blue-500 hover:underline">
+              <button
+                onClick={() => navigate('/portfolio')}
+                className="text-[11px] font-bold transition-opacity hover:opacity-70"
+                style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
+              >
                 See All →
               </button>
             )}
           </div>
+
           {pending.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 text-gray-400">
-              <span className="text-2xl mb-1">✓</span>
-              <p className="text-sm">No pending approvals</p>
+            <div
+              className="flex flex-col items-center justify-center gap-2"
+              style={{ height: 160, color: 'var(--text-3)' }}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>
+                check_circle
+              </span>
+              <p className="text-[12px]">No pending approvals</p>
             </div>
           ) : (
-            <div className="space-y-3">
-              {pending.slice(0, 3).map(item => (
-                <div key={item.id} className="border border-gray-100 rounded-lg p-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="font-mono font-bold text-gray-900">{item.ticker}</span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${VERDICT_COLORS[item.verdict] || 'bg-gray-100 text-gray-600'}`}>
-                      {item.verdict}
-                    </span>
-                    <ConvictionBadge score={item.conviction_score} />
-                    {item.size_label && (
-                      <span className="text-xs text-gray-500 ml-auto">{item.size_label}</span>
-                    )}
+            <div className="space-y-2.5">
+              {pending.slice(0, 3).map(item => {
+                const vs = VERDICT_STYLES[item.verdict] || VERDICT_STYLES.AVOID;
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-md p-3"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+                  >
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <span
+                        className="font-bold text-sm font-data"
+                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                      >
+                        {item.ticker}
+                      </span>
+                      <span
+                        className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
+                        style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}
+                      >
+                        {item.verdict}
+                      </span>
+                      <ConvictionBadge score={item.conviction_score} />
+                      {item.size_label && (
+                        <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-2)' }}>
+                          {item.size_label}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setConfirm({ action: 'approve', id: item.id, ticker: item.ticker })}
+                        className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-opacity hover:opacity-80"
+                        style={{
+                          background: 'var(--green-bg)',
+                          border:     '1px solid var(--green-border)',
+                          color:      'var(--green)',
+                          fontFamily: 'Syne',
+                        }}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => setConfirm({ action: 'reject', id: item.id, ticker: item.ticker })}
+                        className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-all"
+                        style={{
+                          background: 'var(--surface)',
+                          border:     '1px solid var(--border)',
+                          color:      'var(--text-2)',
+                          fontFamily: 'Syne',
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--red-border)'; e.currentTarget.style.color = 'var(--red)'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-2)'; }}
+                      >
+                        Reject
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setConfirm({ action: 'approve', id: item.id, ticker: item.ticker })}
-                      className="flex-1 py-1.5 text-xs font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => setConfirm({ action: 'reject', id: item.id, ticker: item.ticker })}
-                      className="flex-1 py-1.5 text-xs font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
       </div>
 
-      {/* Alerts + Recent Memos */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-700">Recent Risk Alerts</h2>
-            <button onClick={() => navigate('/risk')} className="text-xs text-blue-500 hover:underline">See All →</button>
+      {/* ── Alerts + Recent Memos ──────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Risk alerts */}
+        <div
+          className="rounded-lg p-5"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="section-label">Recent Risk Alerts</div>
+            <button
+              onClick={() => navigate('/risk')}
+              className="text-[11px] font-bold transition-opacity hover:opacity-70"
+              style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
+            >
+              See All →
+            </button>
           </div>
           {alerts.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-24 text-gray-400">
-              <span className="text-xl mb-1">✓</span>
-              <p className="text-sm">No active alerts</p>
+            <div className="flex flex-col items-center justify-center gap-2" style={{ height: 96 }}>
+              <span className="material-symbols-outlined" style={{ fontSize: '24px', color: 'var(--border-2)' }}>
+                shield
+              </span>
+              <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>No active alerts</p>
             </div>
           ) : (
             <div className="space-y-2">
@@ -381,33 +531,65 @@ export default function Dashboard() {
           )}
         </div>
 
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-700">Recent Research Memos</h2>
-            <button onClick={() => navigate('/research')} className="text-xs text-blue-500 hover:underline">See All →</button>
+        {/* Research memos */}
+        <div
+          className="rounded-lg p-5"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="section-label">Recent Research</div>
+            <button
+              onClick={() => navigate('/research')}
+              className="text-[11px] font-bold transition-opacity hover:opacity-70"
+              style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
+            >
+              See All →
+            </button>
           </div>
           {memoHistory.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-24 text-gray-400">
-              <p className="text-sm">No research memos yet</p>
+            <div className="flex flex-col items-center justify-center gap-2" style={{ height: 96 }}>
+              <span className="material-symbols-outlined" style={{ fontSize: '24px', color: 'var(--border-2)' }}>
+                query_stats
+              </span>
+              <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>No research memos yet</p>
             </div>
           ) : (
-            <div className="space-y-2">
-              {memoHistory.map((memo, i) => (
-                <div
-                  key={memo.id ?? i}
-                  className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors"
-                  onClick={() => navigate('/research')}
-                >
-                  <span className="font-mono font-bold text-gray-900 w-16">{memo.ticker}</span>
-                  <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${VERDICT_COLORS[memo.verdict] || 'bg-gray-100 text-gray-600'}`}>
-                    {memo.verdict}
-                  </span>
-                  <ConvictionBadge score={memo.conviction_score} />
-                  <span className="text-xs text-gray-400 ml-auto">
-                    {memo.date ? new Date(memo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
-                  </span>
-                </div>
-              ))}
+            <div className="space-y-1.5">
+              {memoHistory.map((memo, i) => {
+                const vs = VERDICT_STYLES[memo.verdict] || VERDICT_STYLES.AVOID;
+                return (
+                  <div
+                    key={memo.id ?? i}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-md cursor-pointer transition-colors"
+                    onClick={() => navigate('/research')}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.background = 'var(--surface-2)';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.background = 'transparent';
+                    }}
+                  >
+                    <span
+                      className="font-bold text-[13px] font-data w-16 flex-shrink-0"
+                      style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                    >
+                      {memo.ticker}
+                    </span>
+                    <span
+                      className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
+                      style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}
+                    >
+                      {memo.verdict}
+                    </span>
+                    <ConvictionBadge score={memo.conviction_score} />
+                    <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
+                      {memo.date
+                        ? new Date(memo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                        : ''}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

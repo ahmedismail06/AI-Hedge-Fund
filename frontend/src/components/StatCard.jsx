@@ -1,39 +1,55 @@
 import Tooltip from './Tooltip';
 
-const STATUS_COLORS = {
-  ok: 'bg-green-50 border-green-200',
-  warn: 'bg-yellow-50 border-yellow-200',
-  critical: 'bg-red-50 border-red-200',
-  neutral: 'bg-white border-gray-200',
-};
-
 const STATUS_DOT = {
-  ok: 'bg-green-400',
-  warn: 'bg-yellow-400',
-  critical: 'bg-red-500',
-  neutral: 'bg-gray-300',
+  ok:       { cls: 'dot-green', accentVar: 'var(--green)' },
+  warn:     { cls: 'dot-amber', accentVar: 'var(--amber)' },
+  critical: { cls: 'dot-red',   accentVar: 'var(--red)' },
+  neutral:  { cls: 'dot-gray',  accentVar: null },
 };
 
 export default function StatCard({ label, plainLabel, value, tooltip, delta, status = 'neutral' }) {
-  const cardClass = STATUS_COLORS[status] || STATUS_COLORS.neutral;
-  const dotClass = STATUS_DOT[status] || STATUS_DOT.neutral;
+  const s = STATUS_DOT[status] || STATUS_DOT.neutral;
 
   return (
-    <div className={`relative rounded-xl border p-4 ${cardClass}`}>
-      <div className="absolute top-3 right-3">
-        <span className={`inline-block w-2.5 h-2.5 rounded-full ${dotClass}`} />
-      </div>
-      <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-0.5">
-        {tooltip ? (
-          <Tooltip text={tooltip}>{label}</Tooltip>
-        ) : label}
+    <div
+      className="relative rounded-lg p-4 card-hover"
+      style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
+      {/* Status dot */}
+      <span className={`absolute top-3 right-3 w-2 h-2 rounded-full ${s.cls}`} />
+
+      {/* Label */}
+      <div className="section-label mb-1">
+        {tooltip ? <Tooltip text={tooltip}>{label}</Tooltip> : label}
       </div>
       {plainLabel && (
-        <div className="text-xs text-gray-400 mb-2">{plainLabel}</div>
+        <div className="text-[11px] mb-1.5" style={{ color: 'var(--text-2)' }}>{plainLabel}</div>
       )}
-      <div className="text-2xl font-bold text-gray-900 mt-1">{value ?? '—'}</div>
+
+      {/* Value */}
+      <div
+        className="text-2xl font-semibold mt-1 font-data"
+        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+      >
+        {value ?? '—'}
+      </div>
+
+      {/* Delta */}
       {delta && (
-        <div className="text-xs text-gray-500 mt-1">{delta}</div>
+        <div className="text-[11px] mt-1 font-data" style={{ color: 'var(--text-2)' }}>
+          {delta}
+        </div>
+      )}
+
+      {/* Bottom accent line for non-neutral status */}
+      {status !== 'neutral' && s.accentVar && (
+        <div
+          className="absolute bottom-0 left-0 h-[2px] w-full rounded-b-lg"
+          style={{
+            background: `linear-gradient(90deg, ${s.accentVar} 0%, transparent 100%)`,
+            opacity: 0.5,
+          }}
+        />
       )}
     </div>
   );
