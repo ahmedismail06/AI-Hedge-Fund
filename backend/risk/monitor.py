@@ -90,7 +90,8 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
     stop_events = check_stops(positions, regime)
 
     # ── 4. Check exposure drift ───────────────────────────────────────────────
-    exposure_breaches = check_exposure_drift(positions, regime)
+    from backend.broker.ibkr import get_portfolio_value as _get_portfolio_value
+    exposure_breaches = check_exposure_drift(positions, regime, _get_portfolio_value())
 
     # ── 5. Build alerts ───────────────────────────────────────────────────────
     alerts = build_alerts(stop_events, exposure_breaches, regime)

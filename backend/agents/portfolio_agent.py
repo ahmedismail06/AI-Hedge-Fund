@@ -29,12 +29,12 @@ load_dotenv()
 from backend.memory.vector_store import _get_client
 from backend.portfolio import correlation, exposure_tracker, sizing_engine
 from backend.portfolio.schemas import PortfolioSnapshot, SizingRecommendation
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level fallbacks ────────────────────────────────────────────────────
 
-_DEFAULT_PORTFOLIO_VALUE: float = float(os.getenv("PORTFOLIO_VALUE", "25000"))
 _VALID_REGIMES = {"Risk-On", "Risk-Off", "Transitional", "Stagflation"}
 
 
@@ -256,8 +256,9 @@ async def run_portfolio_sizing(
         price, sizing engine ValueError, or exposure-limit breach.
     """
     if portfolio_value is None or portfolio_value <= 0:
-        portfolio_value = _DEFAULT_PORTFOLIO_VALUE
-        logger.info("portfolio_value not supplied — using default $%.2f", portfolio_value)
+        from backend.broker.ibkr import get_portfolio_value
+        portfolio_value = get_portfolio_value()
+        logger.info("portfolio_value resolved from broker/env: $%.2f", portfolio_value)
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -329,6 +330,13 @@ async def run_portfolio_sizing(
         logger.info(
             "Phase 4: correlation Rule 2 fired for %s — downgrading to micro", ticker
         )
+        notify_event("CORRELATION_FLAG", {
+            "ticker": ticker,
+            "rule": "Rule 2 — Sector Concentration",
+            "size_before": size_label,
+            "size_after": "micro",
+            "note": correlation_note or "3+ positions >25% gross in same sector",
+        })
         try:
             micro_sizing = sizing_engine.calculate_size(
                 conviction_score=5.0,
@@ -363,6 +371,13 @@ async def run_portfolio_sizing(
         logger.info(
             "Phase 4: correlation Rule 1 fired for %s — reducing size by 50%%", ticker
         )
+        notify_event("CORRELATION_FLAG", {
+            "ticker": ticker,
+            "rule": "Rule 1 — Pair Correlation > 0.75",
+            "size_before": size_label,
+            "size_after": f"{size_label} (50% reduced)",
+            "note": correlation_note or "60-day Pearson correlation > 0.75 with existing position",
+        })
         dollar_size = round(dollar_size * 0.5, 2)
         share_count = float(int(dollar_size // entry_price))
         pct_of_portfolio = round(dollar_size / portfolio_value, 6)
@@ -457,5 +472,14 @@ async def run_portfolio_sizing(
         dollar_size,
         pct_of_portfolio * 100,
     )
+    notify_event("PORTFOLIO_SIZING_GENERATED", {
+        "ticker": ticker,
+        "size_label": size_label,
+        "dollar_size": dollar_size,
+        "pct_of_portfolio": pct_of_portfolio,
+        "conviction_score": conviction_score,
+        "stop_loss_price": stop_loss_price,
+        "regime": regime,
+    })
 
     return recommendation

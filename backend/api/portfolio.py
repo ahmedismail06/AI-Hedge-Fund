@@ -19,11 +19,13 @@ import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 from pydantic import BaseModel
 
 from backend.agents.portfolio_agent import PortfolioAgentError, run_portfolio_sizing
 from backend.memory.vector_store import _get_client
 from backend.portfolio.exposure_tracker import REGIME_CAPS, get_current_exposure
+from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 class SizeRequest(BaseModel):
     memo_id: str
-    portfolio_value: float = 25000.0
+    portfolio_value: Optional[float] = None  # resolved from IBKR if not provided
 
 
 # ── POST /portfolio/size ──────────────────────────────────────────────────────
@@ -109,13 +111,18 @@ def get_pending_positions():
 
 
 @router.get("/exposure")
-def get_exposure(portfolio_value: float = Query(25000.0, gt=0)):
+def get_exposure(portfolio_value: Optional[float] = Query(None, gt=0)):
     """
     Return current gross/net/sector exposure summary.
 
     Reads all OPEN positions and the latest macro regime, then computes
     live exposure fractions and compares them against regime-gated caps.
+    portfolio_value is resolved from IBKR NetLiquidation if not provided.
     """
+    if portfolio_value is None or portfolio_value <= 0:
+        from backend.broker.ibkr import get_portfolio_value as _get_pv
+        portfolio_value = _get_pv()
+
     try:
         client = _get_client()
 
@@ -211,6 +218,14 @@ def approve_position(position_id: str):
         )
 
     logger.info("Position %s approved", position_id)
+    pos = result.data[0] if result.data else {}
+    notify_event("POSITION_APPROVED", {
+        "ticker": pos.get("ticker", "—"),
+        "size_label": pos.get("size_label", "—"),
+        "dollar_size": pos.get("dollar_size", 0),
+        "share_count": pos.get("share_count", "—"),
+        "entry_price": pos.get("entry_price", "—"),
+    })
     return {"status": "approved", "position_id": position_id}
 
 
@@ -243,6 +258,11 @@ def reject_position(position_id: str):
         )
 
     logger.info("Position %s rejected", position_id)
+    pos = result.data[0] if result.data else {}
+    notify_event("POSITION_REJECTED", {
+        "ticker": pos.get("ticker", "—"),
+        "position_id": position_id,
+    })
     return {"status": "rejected", "position_id": position_id}
 
 

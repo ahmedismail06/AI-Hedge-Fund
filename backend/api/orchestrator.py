@@ -15,7 +15,7 @@ load_dotenv()
 
 import logging
 from datetime import date
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -104,11 +104,15 @@ def get_orchestrator_status():
 
 
 @router.post("/cycle/run")
-async def trigger_cycle(portfolio_value: float = Query(25000.0, gt=0)):
+async def trigger_cycle(portfolio_value: Optional[float] = Query(None, gt=0)):
     """
     Manually trigger one orchestrator approval-pass cycle.
     Useful for testing or recovering from a missed schedule window.
+    portfolio_value resolved from IBKR NetLiquidation if not provided.
     """
+    if portfolio_value is None or portfolio_value <= 0:
+        from backend.broker.ibkr import get_portfolio_value as _get_pv
+        portfolio_value = _get_pv()
     try:
         result = await run_orchestrator_cycle(portfolio_value=portfolio_value)
     except Exception as exc:
