@@ -25,9 +25,9 @@ import re
 from datetime import date
 from typing import Optional
 
-# CLAUDE SWAP — switched to Azure OpenAI for testing
+# CLAUDE SWAP — switched to OpenAI for testing
 # import anthropic
-from openai import AzureOpenAI
+from openai import OpenAI
 
 from backend.macro.indicators.fred_fetcher import fetch_fred_block, FredFetchError
 from backend.macro.indicators.market_fetcher import fetch_market_block
@@ -45,15 +45,11 @@ from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
-# CLAUDE SWAP — Azure OpenAI for testing
-def _build_azure_client() -> AzureOpenAI:
-    return AzureOpenAI(
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    )
+# CLAUDE SWAP — OpenAI for testing
+def _build_openai_client() -> OpenAI:
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
 
 class MacroAgentError(Exception):
@@ -640,7 +636,7 @@ def _call_llm(
         len(fomc_text),
     )
 
-    # CLAUDE SWAP — Azure OpenAI for testing
+    # CLAUDE SWAP — OpenAI for testing
     # client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     # response = client.messages.create(
     #     model="claude-sonnet-4-6",
@@ -650,9 +646,9 @@ def _call_llm(
     #     messages=[{"role": "user", "content": user_message}],
     # )
     # raw = response.content[0].text
-    azure_client = _build_azure_client()
-    response = azure_client.chat.completions.create(
-        model=AZURE_DEPLOY,
+    openai_client = _build_openai_client()
+    response = openai_client.chat.completions.create(
+        model=OPENAI_MODEL,
         max_tokens=1500,
         temperature=0.3,
         messages=[

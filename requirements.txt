@@ -4,7 +4,7 @@ uvicorn[standard]
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 anthropic                     # Claude API (active)
-openai                        # Azure OpenAI — kept for reference; no longer called
+openai                        # OpenAI API (ReAct loop in research + macro overlay)
 
 # ── Data Sources ──────────────────────────────────────────────────────────────
 polygon-api-client

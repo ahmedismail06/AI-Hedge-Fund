@@ -11,7 +11,7 @@ Phase 5: Red team — adversarial second call to harden the bull thesis.
 Fallback: If Phase 1 indexing fails (missing deps, pgvector not ready) → retrieved_chunks=[]
           → synthesis proceeds with structured block only (same quality as v1).
 
-Azure OpenAI is used for the ReAct retrieval loop (Phase 3) only.
+OpenAI is used for the ReAct retrieval loop (Phase 3) only.
 Synthesis (Phase 4) and red team (Phase 5) run on Claude (claude-sonnet-4-6).
 """
 
@@ -23,7 +23,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
-from openai import AzureOpenAI  # ReAct loop only
+from openai import OpenAI  # ReAct loop only
 from pydantic import ValidationError
 
 from backend.fetchers.sec_fetcher import fetch_sec_filings
@@ -45,15 +45,11 @@ class ResearchAgentError(Exception):
 
 # ── LLM Clients ──────────────────────────────────────────────────────────────
 
-# Azure OpenAI — ReAct retrieval loop only (Phase 3)
-def _build_azure_client() -> AzureOpenAI:
-    return AzureOpenAI(
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    )
+# OpenAI — ReAct retrieval loop only (Phase 3)
+def _build_openai_client() -> OpenAI:
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-AZURE_DEPLOY = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 
 # Claude API — synthesis (Phase 4) + red team (Phase 5)
 def _build_client() -> anthropic.Anthropic:
@@ -1001,12 +997,12 @@ def _format_retrieved_chunks(chunks: list[dict]) -> str:
 def _run_agentic_retrieval(
     ticker: str,
     structured_block: str,
-    azure_client: AzureOpenAI,
+    openai_client: OpenAI,
 ) -> tuple[list[dict], dict]:
     """
     ReAct agentic retrieval loop.
-    Azure OpenAI iteratively issues search_documents tool calls against pgvector.
-    Returns (deduplicated chunks, azure_usage_dict).
+    OpenAI iteratively issues search_documents tool calls against pgvector.
+    Returns (deduplicated chunks, openai_usage_dict).
 
     On any failure: logs warning, returns ([], {}) so caller falls back gracefully.
     """
@@ -1022,13 +1018,13 @@ def _run_agentic_retrieval(
     messages = [{"role": "user", "content": initial_user_msg}]
     all_chunks: list[dict] = []
     seen_chunk_ids: set[str] = set()
-    azure_input_tokens = 0
-    azure_output_tokens = 0
+    openai_input_tokens = 0
+    openai_output_tokens = 0
 
     try:
         for turn in range(MAX_TURNS):
-            response = azure_client.chat.completions.create(
-                model=AZURE_DEPLOY,
+            response = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
                 messages=[{"role": "system", "content": system_prompt}] + messages,
                 tools=[SEARCH_TOOL],
                 tool_choice="auto",
@@ -1038,8 +1034,8 @@ def _run_agentic_retrieval(
 
             # Accumulate token usage per turn
             if response.usage:
-                azure_input_tokens += response.usage.prompt_tokens
-                azure_output_tokens += response.usage.completion_tokens
+                openai_input_tokens += response.usage.prompt_tokens
+                openai_output_tokens += response.usage.completion_tokens
                 print(
                     f"  [ReAct turn {turn+1}] "
                     f"in={response.usage.prompt_tokens:,}  "
@@ -1131,7 +1127,7 @@ def _run_agentic_retrieval(
         return [], {}
 
     logger.info("_run_agentic_retrieval(%s): collected %d unique chunks", ticker, len(all_chunks))
-    usage = {"phase": "ReAct retrieval (Azure)", "input": azure_input_tokens, "output": azure_output_tokens}
+    usage = {"phase": "ReAct retrieval (OpenAI)", "input": openai_input_tokens, "output": openai_output_tokens}
     return all_chunks, usage
 
 
@@ -1588,7 +1584,7 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
       Phase 0: Fetch all 5 data sources (skipped when use_cache=True).
       Phase 1: Index narrative into pgvector (skipped when use_cache=True).
       Phase 2: Build structured block.
-      Phase 3: ReAct agentic retrieval loop (Azure OpenAI; fallback-safe).
+      Phase 3: ReAct agentic retrieval loop (OpenAI; fallback-safe).
       Phase 4: Synthesis call — Claude (claude-sonnet-4-6).
       Phase 5: Red team call — Claude (claude-sonnet-4-6).
 
@@ -1668,8 +1664,8 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
         print(f"  PHASE 3 — ReAct retrieval ({ticker})")
         print(f"{'─'*62}")
         try:
-            azure_client = _build_azure_client()
-            retrieved_chunks, react_usage = _run_agentic_retrieval(ticker, structured_block, azure_client)
+            openai_client = _build_openai_client()
+            retrieved_chunks, react_usage = _run_agentic_retrieval(ticker, structured_block, openai_client)
             if react_usage:
                 usage_log.append(react_usage)
         except Exception as exc:
@@ -1717,11 +1713,11 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     })
 
     # ── CLAUDE SWAP ───────────────────────────────────────────────────────────
-    # Azure OpenAI synthesis — commented out
+    # OpenAI synthesis — commented out
     #
-    # azure = _build_azure_client()
-    # az_response = azure.chat.completions.create(
-    #     model=AZURE_DEPLOY,
+    # openai_client = _build_openai_client()
+    # oai_response = openai_client.chat.completions.create(
+    #     model=OPENAI_MODEL,
     #     messages=[
     #         {"role": "system", "content": _build_system_prompt()},
     #         {"role": "user", "content": synthesis_message},
@@ -1729,12 +1725,12 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     #     temperature=0.3,
     #     max_tokens=4000,
     # )
-    # raw_content = az_response.choices[0].message.content or ""
-    # if az_response.usage:
+    # raw_content = oai_response.choices[0].message.content or ""
+    # if oai_response.usage:
     #     usage_log.append({
-    #         "phase": "Synthesis (Azure)",
-    #         "input": az_response.usage.prompt_tokens,
-    #         "output": az_response.usage.completion_tokens,
+    #         "phase": "Synthesis (OpenAI)",
+    #         "input": oai_response.usage.prompt_tokens,
+    #         "output": oai_response.usage.completion_tokens,
     #     })
     # ─────────────────────────────────────────────────────────────────────────
 
