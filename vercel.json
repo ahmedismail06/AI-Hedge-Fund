@@ -1,6 +1,11 @@
 {
   "buildCommand": "cd frontend && npm install && npm run build",
   "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/[...path].js": {
+      "memory": 1024
+    }
+  },
   "rewrites": [
     { "source": "/((?!api).*)", "destination": "/index.html" }
   ]
