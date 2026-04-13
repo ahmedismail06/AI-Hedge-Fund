@@ -1,9 +1,13 @@
-const BACKEND = process.env.BACKEND_URL;
+const BACKEND = (process.env.BACKEND_URL || '').trim();
 
 module.exports = async function handler(req, res) {
   const segments = req.query.path || [];
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
   const url = `${BACKEND}/${segments.join('/')}${qs}`;
+
+  if (!BACKEND) {
+    return res.status(502).json({ error: 'BACKEND_URL env var not set' });
+  }
 
   try {
     const options = {
