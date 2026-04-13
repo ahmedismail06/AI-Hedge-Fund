@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BASE = 'http://localhost:8000';
+const BASE = import.meta.env.VITE_API_BASE_URL;
 
 export const getAlerts = () => axios.get(`${BASE}/risk/alerts`).then(r => r.data);
 export const getCriticalAlerts = () => axios.get(`${BASE}/risk/alerts/critical`).then(r => r.data);

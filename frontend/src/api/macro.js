@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BASE = 'http://localhost:8000';
+const BASE = import.meta.env.VITE_API_BASE_URL;
 
 export const getBriefing = () => axios.get(`${BASE}/macro/briefing`).then(r => r.data);
 export const getRegime = () => axios.get(`${BASE}/macro/regime`).then(r => r.data);

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BASE = 'http://localhost:8000';
+const BASE = import.meta.env.VITE_API_BASE_URL;
 
 export const getOrders = () => axios.get(`${BASE}/execution/orders`).then(r => r.data);
 export const getFills = () => axios.get(`${BASE}/execution/fills`).then(r => r.data);
