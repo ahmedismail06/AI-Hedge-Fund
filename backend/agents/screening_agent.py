@@ -31,6 +31,7 @@ from backend.screener.factors.value import score_value
 from backend.screener.factors.momentum import score_momentum
 from backend.screener.scorer import ScreenerResult, compute_composite
 from backend.memory.vector_store import _get_client
+from backend.notifications.events import notify_event
 
 load_dotenv()
 
@@ -349,6 +350,20 @@ def run_screening(regime: str | None = None) -> list[dict]:
     queued = _queue_top_n_for_research(qualified, run_date)
 
     logger.info("=== Screening run complete | queued=%s ===", queued)
+
+    # Slack notifications
+    notify_event("SCREENING_COMPLETE", {
+        "regime":          regime,
+        "qualified_count": len(qualified),
+        "universe_size":   len(universe),
+        "date":            run_date.isoformat(),
+        "top_tickers": [
+            {"ticker": r.ticker, "score": r.composite_score}
+            for r in qualified[:5]
+        ],
+    })
+    if queued:
+        notify_event("RESEARCH_QUEUED", {"tickers": queued})
 
     return [
         {

@@ -1,11 +1,15 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState } from 'react';
 
-const SidebarContext = createContext({ collapsed: false, setCollapsed: () => {} });
+const SidebarContext = createContext({
+  collapsed: false, setCollapsed: () => {},
+  mobileOpen: false, setMobileOpen: () => {},
+});
 
 export function SidebarProvider({ children }) {
   const [collapsed, setCollapsedState] = useState(() => {
     try { return localStorage.getItem('sidebar_collapsed') === 'true'; } catch { return false; }
   });
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const setCollapsed = (val) => {
     setCollapsedState(val);
@@ -13,7 +17,7 @@ export function SidebarProvider({ children }) {
   };
 
   return (
-    <SidebarContext.Provider value={{ collapsed, setCollapsed }}>
+    <SidebarContext.Provider value={{ collapsed, setCollapsed, mobileOpen, setMobileOpen }}>
       {children}
     </SidebarContext.Provider>
   );

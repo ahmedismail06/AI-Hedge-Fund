@@ -369,6 +369,21 @@
     -webkit-backdrop-filter: blur(20px);
   }
 
+  /* ── Mobile table wrapper ────────────────────────── */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Touch-friendly min height ───────────────────── */
+  @media (max-width: 767px) {
+    button, a[role="button"] {
+      min-height: 44px;
+    }
+    .p-5 { padding: 0.875rem !important; }
+    .px-5 { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+  }
+
   /* ── Critical pulse ──────────────────────────────── */
   @keyframes criticalPulse {
     0%, 100% { box-shadow: var(--dot-red-shadow); }

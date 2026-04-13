@@ -161,12 +161,15 @@ def _handle_empty_portfolio_deploy(
     today_str = date.today().isoformat()
     top_tickers: List[str] = []
 
+    # Only pick rows that haven't been queued yet so we don't re-trigger research
+    # that's already in-flight or completed.
     try:
         resp = (
             _get_client()
             .table("watchlist")
             .select("ticker,composite_score")
             .eq("run_date", today_str)
+            .eq("queued_for_research", False)
             .order("composite_score", desc=True)
             .limit(3)
             .execute()
@@ -176,6 +179,15 @@ def _handle_empty_portfolio_deploy(
         logger.warning("_handle_empty_portfolio_deploy: watchlist query failed — %s", exc)
 
     if top_tickers:
+        # Mark rows as queued BEFORE triggering so a concurrent cycle can't double-queue.
+        try:
+            _get_client().table("watchlist").update({"queued_for_research": True}).in_(
+                "ticker", top_tickers
+            ).eq("run_date", today_str).execute()
+        except Exception as exc:
+            logger.error(
+                "_handle_empty_portfolio_deploy: failed to set queued_for_research — %s", exc
+            )
         action = "triggered_research_queue"
         detail = f"top candidates: {top_tickers}"
         try:
@@ -185,8 +197,10 @@ def _handle_empty_portfolio_deploy(
                 "_handle_empty_portfolio_deploy: research queue trigger failed — %s", exc
             )
     else:
+        # No unqueued results for today — kick off the screener. The NEXT PM cycle
+        # (≈5 min later) will land in the `top_tickers` branch above once it has data.
         action = "triggered_screener_run"
-        detail = "no screener results found for today"
+        detail = "no unqueued screener results found for today"
         try:
             _trigger_screener()
         except Exception as exc:
