@@ -1,25 +1,27 @@
 const BACKEND = process.env.BACKEND_URL;
 
-export default async function handler(req, res) {
-  const { path = [] } = req.query;
-  const url = `${BACKEND}/${path.join('/')}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`;
+module.exports = async function handler(req, res) {
+  const segments = req.query.path || [];
+  const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  const url = `${BACKEND}/${segments.join('/')}${qs}`;
 
   try {
-    const upstream = await fetch(url, {
+    const options = {
       method: req.method,
-      headers: {
-        'content-type': req.headers['content-type'] || 'application/json',
-      },
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body),
-    });
+      headers: { 'content-type': req.headers['content-type'] || 'application/json' },
+    };
+    if (!['GET', 'HEAD'].includes(req.method) && req.body) {
+      options.body = JSON.stringify(req.body);
+    }
 
-    const data = await upstream.text();
+    const upstream = await fetch(url, options);
+    const text = await upstream.text();
+
     res.status(upstream.status);
-    upstream.headers.forEach((value, key) => {
-      if (!['transfer-encoding', 'connection'].includes(key)) res.setHeader(key, value);
-    });
-    res.send(data);
+    const ct = upstream.headers.get('content-type');
+    if (ct) res.setHeader('content-type', ct);
+    res.send(text);
   } catch (err) {
     res.status(502).json({ error: 'Bad gateway', detail: err.message });
   }
-}
+};
