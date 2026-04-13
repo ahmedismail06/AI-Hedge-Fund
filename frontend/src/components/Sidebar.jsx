@@ -21,7 +21,7 @@ const NAV_ITEMS = [
 ];
 
 export default function Sidebar() {
-  const { collapsed, setCollapsed } = useSidebar();
+  const { collapsed, setCollapsed, mobileOpen, setMobileOpen } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
   const [status, setStatus]             = useState(null);
   const [showConfirm, setShowConfirm]   = useState(false);
@@ -77,21 +77,32 @@ export default function Sidebar() {
 
   return (
     <>
+      {/* Mobile backdrop */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 md:hidden"
+          style={{ background: 'var(--modal-backdrop)' }}
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
       <aside
         className={`
           h-screen fixed left-0 top-0 z-50 flex flex-col py-5
           transition-all duration-200
-          ${collapsed ? 'w-[56px]' : 'w-[212px]'}
+          ${collapsed ? 'md:w-[56px]' : 'md:w-[212px]'}
+          w-[212px]
+          ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
         `}
         style={{
           background:   'var(--sidebar-bg)',
           borderRight:  '1px solid var(--sidebar-border)',
         }}
       >
-        {/* Collapse toggle */}
+        {/* Collapse toggle — desktop only */}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="absolute -right-3 top-7 w-6 h-6 rounded-full flex items-center justify-center text-[10px] transition-colors z-10"
+          className="absolute -right-3 top-7 w-6 h-6 rounded-full items-center justify-center text-[10px] transition-colors z-10 hidden md:flex"
           style={{
             background:  'var(--surface)',
             border:      '1px solid var(--border-2)',
@@ -100,6 +111,16 @@ export default function Sidebar() {
           title={collapsed ? 'Expand' : 'Collapse'}
         >
           {collapsed ? '›' : '‹'}
+        </button>
+
+        {/* Close button — mobile only */}
+        <button
+          onClick={() => setMobileOpen(false)}
+          className="absolute right-3 top-4 w-8 h-8 rounded-md flex items-center justify-center md:hidden"
+          style={{ color: 'var(--text-2)', background: 'var(--surface-2)' }}
+          aria-label="Close menu"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
         </button>
 
         {/* Logo */}
