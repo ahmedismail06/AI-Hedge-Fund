@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "http://REDACTED:8000/:path*"
+      "destination": "@BACKEND_URL/:path*"
     },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
