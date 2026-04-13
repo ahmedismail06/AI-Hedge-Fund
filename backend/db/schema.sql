@@ -10,7 +10,7 @@ create table if not exists memos (
     memo_json       jsonb not null,
     raw_docs        jsonb,
     status          text not null default 'PENDING'
-                        check (status in ('PENDING', 'APPROVED', 'REJECTED', 'WATCHLIST')),
+                        check (status in ('PENDING', 'PENDING_PM_REVIEW', 'APPROVED', 'REJECTED', 'WATCHLIST')),
     created_at      timestamptz not null default now()
 );
 
@@ -221,7 +221,7 @@ create index if not exists portfolio_metrics_date_idx on portfolio_metrics (date
 -- Tracks IBKR order lifecycle from placement to fill/cancel.
 -- One order per APPROVED position (re-created on retry after timeout).
 -- order_type allowed values: 'LIMIT' | 'VWAP_30' | 'VWAP_DAY'
--- status allowed values: 'PENDING' | 'SUBMITTED' | 'PARTIAL' | 'FILLED' | 'CANCELLED' | 'TIMEOUT' | 'ERROR'
+-- status allowed values: 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'PARTIAL' | 'FILLED' | 'CANCELLED' | 'REJECTED'
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create table if not exists orders (
@@ -234,8 +234,8 @@ create table if not exists orders (
     limit_price         numeric(12, 4),
     ibkr_order_id       integer,
     ibkr_client_id      integer,
-    status              text not null default 'PENDING'
-                            check (status in ('PENDING', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'TIMEOUT', 'ERROR')),
+    status              text not null default 'PENDING_APPROVAL'
+                            check (status in ('PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'REJECTED')),
     total_filled_qty    numeric(10, 2) not null default 0,
     avg_fill_price      numeric(12, 4),
     submitted_at        timestamptz,

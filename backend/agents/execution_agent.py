@@ -107,7 +107,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 client.table("orders")
                 .select("*")
                 .eq("position_id", pos_id)
-                .eq("status", "TIMEOUT")
+                .eq("status", "REJECTED")
                 .order("created_at", desc=True)
                 .limit(1)
                 .execute()

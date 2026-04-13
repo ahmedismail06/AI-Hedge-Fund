@@ -201,13 +201,8 @@ def _poll_research_queue() -> list[str]:
         logger.info("_poll_research_queue: no tickers queued for research today")
         return []
 
-    import asyncio as _asyncio
-    import os as _os
-    from backend.agents.portfolio_agent import run_portfolio_sizing, PortfolioAgentError
     from backend.memory.vector_store import store_memo
 
-    from backend.broker.ibkr import get_portfolio_value as _get_portfolio_value
-    portfolio_value = _get_portfolio_value()
     tickers = [row["ticker"] for row in rows]
     logger.info(
         "_poll_research_queue: %d tickers in queue (priority order): %s",
@@ -265,10 +260,14 @@ def _poll_research_queue() -> list[str]:
         # Clear material event flag after successful research
         _clear_material_event(client, ticker, today)
 
-        # ── Portfolio sizing ──────────────────────────────────────────────────
+        # ── Hand off to PM agent — set status to PENDING_PM_REVIEW ──────────
         try:
             memo_id = store_memo(ticker, memo)
             if memo_id:
+                # Update memo status so the PM cycle picks it up on its next 5-min poll
+                client.table("memos").update(
+                    {"status": "PENDING_PM_REVIEW"}
+                ).eq("id", memo_id).execute()
                 notify_event("RESEARCH_MEMO_COMPLETED", {
                     "ticker": ticker,
                     "verdict": memo.get("verdict"),
@@ -276,16 +275,17 @@ def _poll_research_queue() -> list[str]:
                     "sector": memo.get("sector"),
                     "price_target": memo.get("price_target"),
                 })
-                _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
-                logger.info("_poll_research_queue: portfolio sizing complete for %s", ticker)
+                logger.info(
+                    "_poll_research_queue: memo %s for %s set to PENDING_PM_REVIEW",
+                    memo_id, ticker,
+                )
             else:
                 logger.warning(
-                    "_poll_research_queue: store_memo returned no id for %s — skipping sizing", ticker
+                    "_poll_research_queue: store_memo returned no id for %s — skipping PM handoff",
+                    ticker,
                 )
-        except PortfolioAgentError as exc:
-            logger.warning("_poll_research_queue: portfolio sizing skipped for %s — %s", ticker, exc)
         except Exception as exc:
-            logger.error("_poll_research_queue: portfolio sizing failed for %s — %s", ticker, exc)
+            logger.error("_poll_research_queue: PM handoff failed for %s — %s", ticker, exc)
 
     # Clear queued_for_research for processed + staleness-skipped tickers
     to_clear = processed + staleness_skipped

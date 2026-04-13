@@ -83,7 +83,7 @@ class TestSchemas:
         """OrderStatus fields total_filled_qty and avg_fill_price have correct defaults."""
         status = OrderStatus(
             order_id="order-uuid-001",
-            status="PENDING",
+            status="PENDING_APPROVAL",
         )
         assert status.total_filled_qty == 0.0
         assert status.avg_fill_price is None
