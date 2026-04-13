@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Custom exception
 # ──────────────────────────────────────────────────────────────────────────────
 
-TERMINAL_STATUSES = {"FILLED", "CANCELLED", "TIMEOUT", "ERROR"}
+TERMINAL_STATUSES = {"FILLED", "CANCELLED", "REJECTED"}
 
 
 class OrderManagerError(Exception):
@@ -288,14 +288,14 @@ def check_timeouts() -> List[str]:
                     exc,
                 )
 
-        # 2b. Mark TIMEOUT in Supabase.
+        # 2b. Mark REJECTED in Supabase (timed out without fill).
         try:
-            _get_client().table("orders").update({"status": "TIMEOUT"}).eq(
+            _get_client().table("orders").update({"status": "REJECTED"}).eq(
                 "id", order_id
             ).execute()
         except Exception as exc:
             logger.error(
-                "Supabase update to TIMEOUT failed (order_id=%s): %s", order_id, exc
+                "Supabase update to REJECTED failed (order_id=%s): %s", order_id, exc
             )
             # Continue processing remaining expired orders.
             continue

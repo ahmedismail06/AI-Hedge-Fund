@@ -71,18 +71,24 @@ def build_new_entry_prompt(
     Returns:
         (system_prompt, user_message) tuple for the Claude API call
     """
-    # Trim memo to only the fields needed for an entry decision — drop raw source chunks
+    # Analysis fields live inside memo_json (the JSONB blob); top-level columns
+    # only carry ticker/verdict/conviction_score/status. Merge so the field
+    # lookup finds everything regardless of nesting depth.
+    memo_json = memo.get("memo_json") or {}
+    _merged = {**memo_json, **{k: v for k, v in memo.items() if k != "memo_json"}}
+
     _ENTRY_FIELDS = (
         "ticker", "verdict", "conviction_score", "conviction_score_rationale",
         "variant_perception", "repricing_catalyst",
         "bull_thesis", "bear_thesis", "red_team_risks",
+        "summary", "catalysts",
         "financial_health", "valuation_note", "cash_runway_months",
         "sector", "market_cap", "price_target",
     )
-    memo_slim = {k: memo[k] for k in _ENTRY_FIELDS if k in memo}
+    memo_slim = {k: _merged[k] for k in _ENTRY_FIELDS if k in _merged}
 
     # Compute simple correlation proxy: how many existing positions share the same sector?
-    memo_sector = memo.get("sector", "Unknown")
+    memo_sector = _merged.get("sector", "Unknown")
     sector_overlap = [
         p["ticker"]
         for p in base_ctx["positions"]
