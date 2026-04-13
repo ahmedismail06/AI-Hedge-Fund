@@ -3,6 +3,13 @@ FastAPI application entry point.
 Registers all agent routers and starts the server.
 """
 
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
