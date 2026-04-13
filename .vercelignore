@@ -1,0 +1,4 @@
+backend/
+.venv/
+requirements.txt
+*.py
