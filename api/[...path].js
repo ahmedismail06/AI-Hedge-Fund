@@ -1,31 +1,43 @@
-const BACKEND = (process.env.BACKEND_URL || '').trim();
+const BACKEND = (process.env.BACKEND_URL || 'http://34.59.81.82:8000').trim().replace(/\/$/, '');
 
 module.exports = async function handler(req, res) {
-  const segments = req.query.path || [];
+  const segments = Array.isArray(req.query.path)
+    ? req.query.path
+    : req.query.path
+    ? [req.query.path]
+    : [];
+
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
   const url = `${BACKEND}/${segments.join('/')}${qs}`;
 
-  if (!BACKEND) {
-    return res.status(502).json({ error: 'BACKEND_URL env var not set' });
-  }
+  const forwardHeaders = { ...req.headers };
+  delete forwardHeaders['host'];        // must not forward — causes GCP routing failure
+  delete forwardHeaders['connection'];  // hop-by-hop, must not forward per HTTP spec
 
   try {
     const options = {
       method: req.method,
-      headers: { 'content-type': req.headers['content-type'] || 'application/json' },
+      headers: forwardHeaders,
     };
+
     if (!['GET', 'HEAD'].includes(req.method) && req.body) {
-      options.body = JSON.stringify(req.body);
+      options.body = typeof req.body === 'string'
+        ? req.body
+        : JSON.stringify(req.body);
     }
 
     const upstream = await fetch(url, options);
     const text = await upstream.text();
 
     res.status(upstream.status);
-    const ct = upstream.headers.get('content-type');
-    if (ct) res.setHeader('content-type', ct);
+    upstream.headers.forEach((value, key) => {
+      if (!['transfer-encoding', 'connection', 'keep-alive'].includes(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    });
     res.send(text);
   } catch (err) {
+    console.error('[proxy] upstream error:', err.message, 'url:', url);
     res.status(502).json({ error: 'Bad gateway', detail: err.message });
   }
 };
