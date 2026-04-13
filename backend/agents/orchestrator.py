@@ -229,15 +229,85 @@ def _handle_empty_portfolio_deploy(
     }
 
 
+# ── Portfolio value (NAV) ─────────────────────────────────────────────────────
+
+_PAPER_TRADING_NAV = 1_000_000.0   # fallback until real NAV tracking exists
+
+
+def _compute_portfolio_value() -> float:
+    """Return best-available portfolio NAV from Supabase data.
+
+    Method:
+      1. Sum share_count * current_price for all OPEN positions.
+      2. Add cash balance from pm_config (column: cash_balance) if present.
+      3. Fall back to _PAPER_TRADING_NAV if neither source is available.
+
+    Never raises — returns fallback on any error.
+    """
+    try:
+        client = _get_client()
+
+        # Invested value: sum OPEN positions
+        invested = 0.0
+        try:
+            pos_resp = (
+                client.table("positions")
+                .select("share_count,current_price")
+                .eq("status", "OPEN")
+                .execute()
+            )
+            for row in (pos_resp.data or []):
+                qty = float(row.get("share_count") or 0)
+                price = float(row.get("current_price") or 0)
+                invested += qty * price
+        except Exception as exc:
+            logger.warning("_compute_portfolio_value: positions query failed — %s", exc)
+
+        # Cash balance from pm_config
+        cash = 0.0
+        try:
+            cfg_resp = (
+                client.table("pm_config")
+                .select("cash_balance")
+                .eq("id", 1)
+                .single()
+                .execute()
+            )
+            cash_raw = (cfg_resp.data or {}).get("cash_balance")
+            if cash_raw is not None:
+                cash = float(cash_raw)
+        except Exception as exc:
+            logger.debug("_compute_portfolio_value: cash_balance not in pm_config — %s", exc)
+
+        nav = invested + cash
+        if nav <= 0:
+            logger.info(
+                "_compute_portfolio_value: NAV computed as %.2f — using paper trading fallback $%.0f",
+                nav, _PAPER_TRADING_NAV,
+            )
+            return _PAPER_TRADING_NAV
+        return nav
+
+    except Exception as exc:
+        logger.warning("_compute_portfolio_value: unexpected error — %s; using fallback", exc)
+        return _PAPER_TRADING_NAV
+
+
 # ── Hard-block enforcement ────────────────────────────────────────────────────
 
 def _check_hard_blocks(
     sizing_rec: Optional[Dict[str, Any]] = None,
     base_ctx: Optional[Dict[str, Any]] = None,
+    dollar_amount: Optional[float] = None,
 ) -> Dict[str, bool]:
     """
     Pre-Claude hard block checks. Returns dict of check_name → passed (bool).
     Any False means execution must not proceed.
+
+    Position cap precedence (most-to-least reliable):
+      1. dollar_amount / _compute_portfolio_value()  — used when Claude returns dollar_amount
+      2. sizing_rec["dollar_size"] / _compute_portfolio_value() — pre-computed sizing row
+      3. sizing_rec["pct_of_portfolio"] — only as a last resort (may be stale)
     """
     blocks = {
         "position_cap_ok": True,
@@ -246,13 +316,29 @@ def _check_hard_blocks(
         "daily_loss_ok": True,
     }
 
-    # Position size cap
-    if sizing_rec:
+    # Position size cap — always recompute weight from NAV
+    dollar_to_check = dollar_amount
+    if dollar_to_check is None and sizing_rec:
+        dollar_to_check = float(sizing_rec.get("dollar_size") or 0) or None
+
+    if dollar_to_check:
+        nav = _compute_portfolio_value()
+        weight = dollar_to_check / nav
+        if weight > _MAX_POSITION_PCT:
+            blocks["position_cap_ok"] = False
+            logger.warning(
+                "Hard block: position weight %.1f%% (${:,.0f} / ${:,.0f}) exceeds 15%% cap".format(
+                    dollar_to_check, nav
+                ),
+                weight * 100,
+            )
+    elif sizing_rec:
+        # Fallback: use stored pct_of_portfolio only when no dollar figure available
         weight = float(sizing_rec.get("pct_of_portfolio", 0) or 0)
         if weight > _MAX_POSITION_PCT:
             blocks["position_cap_ok"] = False
             logger.warning(
-                "Hard block: position weight %.1f%% exceeds 15%% cap",
+                "Hard block: stored pct_of_portfolio %.1f%% exceeds 15%% cap",
                 weight * 100,
             )
 
@@ -825,12 +911,9 @@ def run_pm_cycle(
             # Post-Claude hard block re-check for execution decisions
             if decision in ("EXECUTE", "MODIFY_SIZE") and category == "NEW_ENTRY":
                 action_details = decision_data.get("action_details", {})
+                claude_dollar = action_details.get("dollar_amount")
                 post_blocks = _check_hard_blocks(
-                    sizing_rec={
-                        "pct_of_portfolio": action_details.get("dollar_amount", 0) / portfolio_value
-                        if action_details.get("dollar_amount")
-                        else 0
-                    },
+                    dollar_amount=float(claude_dollar) if claude_dollar else None,
                     base_ctx=base_ctx,
                 )
                 if not all(post_blocks.values()):
