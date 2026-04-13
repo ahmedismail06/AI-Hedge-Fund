@@ -1,9 +1,5 @@
 {
   "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "@BACKEND_URL/:path*"
-    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
