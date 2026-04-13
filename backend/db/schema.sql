@@ -10,7 +10,8 @@ create table if not exists memos (
     memo_json       jsonb not null,
     raw_docs        jsonb,
     status          text not null default 'PENDING'
-                        check (status in ('PENDING', 'PENDING_PM_REVIEW', 'APPROVED', 'REJECTED', 'WATCHLIST')),
+                        check (status in ('PENDING', 'PENDING_PM_REVIEW', 'APPROVED', 'REJECTED', 'WATCHLIST', 'DEFERRED')),
+    deferred_until  timestamptz,
     created_at      timestamptz not null default now()
 );
 

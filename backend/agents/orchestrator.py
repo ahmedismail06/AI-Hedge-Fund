@@ -479,6 +479,50 @@ def _snapshot(base_ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ── Memo status update (runs unconditionally after every Claude decision) ─────
+
+_DECISION_TO_MEMO_STATUS = {
+    "EXECUTE":      "APPROVED",
+    "MODIFY_SIZE":  "APPROVED",
+    "DEFER":        "DEFERRED",
+    "REJECT":       "REJECTED",
+    "WATCHLIST":    "WATCHLIST",
+}
+
+
+def _update_memo_after_decision(ticker: str, decision: str) -> None:
+    """Set memos.status to reflect the PM's decision so the row is not re-evaluated.
+
+    Called unconditionally after every Claude call regardless of mode (autonomous /
+    supervised / market-closed).  Only touches NEW_ENTRY decisions; other categories
+    (EXIT_TRIM, REBALANCE, etc.) are not memo-driven.
+
+    For DEFER also sets deferred_until = NOW() + 24h so a future staleness gate
+    can re-queue the ticker when the deferral window expires.
+    """
+    memo_status = _DECISION_TO_MEMO_STATUS.get(decision)
+    if not memo_status:
+        return  # NO_ACTION / HOLD / etc. — memo stays where it is
+
+    try:
+        update: Dict[str, Any] = {"status": memo_status}
+        if memo_status == "DEFERRED":
+            update["deferred_until"] = (
+                datetime.now(timezone.utc) + timedelta(hours=24)
+            ).isoformat()
+
+        _get_client().table("memos").update(update).eq(
+            "ticker", ticker
+        ).eq("status", "PENDING_PM_REVIEW").execute()
+
+        logger.info("_update_memo_after_decision: %s → memos.status=%s", ticker, memo_status)
+    except Exception as exc:
+        logger.warning(
+            "_update_memo_after_decision: failed for %s (decision=%s) — %s",
+            ticker, decision, exc,
+        )
+
+
 # ── Decision routing ──────────────────────────────────────────────────────────
 
 def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, Any]) -> str:
@@ -494,9 +538,8 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
         client = _get_client()
 
         if category == "NEW_ENTRY" and decision == "EXECUTE":
-            # Mark the memo as approved so the portfolio agent (already ran) or
-            # direct position update can proceed. The position with PENDING_APPROVAL
-            # status was created by the portfolio sizing agent — approve it.
+            # Approve the PENDING_APPROVAL position so the execution agent picks it up.
+            # Memo status is already set to APPROVED by _update_memo_after_decision.
             if ticker:
                 resp = (
                     client.table("positions")
@@ -511,7 +554,8 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "MODIFY_SIZE":
-            # Update the pending position with the new size from action_details
+            # Approve and resize the pending position.
+            # Memo status is already set to APPROVED by _update_memo_after_decision.
             action = decision_data.get("action_details", {})
             new_dollar = action.get("dollar_amount")
             new_shares = action.get("shares")
@@ -527,28 +571,20 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "DEFER":
-            if ticker:
-                client.table("memos").update({"status": "DEFERRED"}).eq(
-                    "ticker", ticker
-                ).eq("status", "PENDING_PM_REVIEW").execute()
+            # Memo status + deferred_until handled by _update_memo_after_decision.
             return "DEFERRED"
 
         elif category == "NEW_ENTRY" and decision == "REJECT":
             if ticker:
-                client.table("memos").update({"status": "REJECTED"}).eq(
-                    "ticker", ticker
-                ).eq("status", "PENDING_PM_REVIEW").execute()
-                # Also reject the pending position
+                # Memo status handled by _update_memo_after_decision.
+                # Also reject the pending position so it doesn't linger.
                 client.table("positions").update({"status": "REJECTED"}).eq(
                     "ticker", ticker
                 ).eq("status", "PENDING_APPROVAL").execute()
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "WATCHLIST":
-            if ticker:
-                client.table("memos").update({"status": "WATCHLIST"}).eq(
-                    "ticker", ticker
-                ).eq("status", "PENDING_PM_REVIEW").execute()
+            # Memo status handled by _update_memo_after_decision.
             return "DEFERRED"
 
         elif category == "EXIT_TRIM" and decision in ("TRIM", "CLOSE"):
@@ -939,7 +975,12 @@ def run_pm_cycle(
                 execution_status="PENDING_HUMAN",  # filled below
             )
 
-            # Route decision (actual Supabase updates)
+            # Always update memo status so this memo is not re-evaluated next cycle
+            final_decision = decision_data.get("decision", decision)
+            if category == "NEW_ENTRY" and ticker:
+                _update_memo_after_decision(ticker, final_decision)
+
+            # Route decision (actual Supabase updates — positions/config)
             if mode == "autonomous" and _is_market_open():
                 execution_status = _route_decision(decision_data, record_template)
             elif mode == "supervised":

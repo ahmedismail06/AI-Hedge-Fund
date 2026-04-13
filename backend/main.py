@@ -239,13 +239,13 @@ def get_latest_memo(ticker: str):
 
 
 class StatusUpdate(BaseModel):
-    status: str  # APPROVED | REJECTED | WATCHLIST
+    status: str  # APPROVED | REJECTED | WATCHLIST | DEFERRED | PENDING_PM_REVIEW
 
 
 @app.post("/research/{memo_id}/status")
 def update_status(memo_id: str, body: StatusUpdate):
     """Updates the review status of a memo."""
-    valid = {"APPROVED", "REJECTED", "WATCHLIST"}
+    valid = {"APPROVED", "REJECTED", "WATCHLIST", "DEFERRED", "PENDING_PM_REVIEW"}
     if body.status not in valid:
         raise HTTPException(
             status_code=400,
