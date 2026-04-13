@@ -47,6 +47,13 @@ _DAILY_LOSS_HALT_PCT = 0.10       # -10% intraday drawdown → halt all trading
 _STOP_PROXIMITY_TRIGGER = 0.03    # Trigger EXIT_TRIM review when within 3% of stop
 _EARNINGS_LOOKAHEAD_DAYS = 14     # Pre-earnings review window
 
+# ── Cycle deduplication state (Change 2) ─────────────────────────────────────
+_FINGERPRINT_TTL_SECONDS = 1800   # 30 minutes before forced re-evaluation
+_last_cycle_state: Dict[str, Any] = {
+    "fingerprint": None,
+    "timestamp": None,
+}
+
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -101,6 +108,111 @@ def _next_decision_id() -> str:
 def _next_cycle_id() -> str:
     now = datetime.now(timezone.utc)
     return f"cycle_{now.strftime('%Y%m%d_%H%M')}"
+
+
+# ── Pre-Claude gating helpers (Changes 1–3) ───────────────────────────────────
+
+def _count_pending_memos() -> int:
+    """Count memos with status PENDING_PM_REVIEW. Returns 0 on error."""
+    try:
+        resp = (
+            _get_client()
+            .table("memos")
+            .select("id", count="exact")
+            .eq("status", "PENDING_PM_REVIEW")
+            .execute()
+        )
+        return resp.count or 0
+    except Exception as exc:
+        logger.warning("_count_pending_memos: failed — %s", exc)
+        return 0
+
+
+def _build_cycle_fingerprint(base_ctx: Dict[str, Any], pending_memo_count: int) -> Dict[str, Any]:
+    """Build a hashable snapshot of the fields that determine whether a cycle is redundant."""
+    return {
+        "position_count": base_ctx.get("position_count", 0),
+        "pending_memo_count": pending_memo_count,
+        "active_alert_count": sum(
+            1 for a in base_ctx.get("active_alerts", [])
+            if a.get("severity") in ("CRITICAL", "BREACH")
+        ),
+        "regime": base_ctx.get("macro_regime", ""),
+    }
+
+
+def _fingerprints_match(fp_a: Dict[str, Any], fp_b: Dict[str, Any]) -> bool:
+    keys = ("position_count", "pending_memo_count", "active_alert_count", "regime")
+    return all(fp_a.get(k) == fp_b.get(k) for k in keys)
+
+
+def _handle_empty_portfolio_deploy(
+    cycle_id: str,
+    cycle_type: str,
+    regime: str,
+) -> Dict[str, Any]:
+    """
+    Change 3: Empty portfolio + constructive regime → route to data pipeline.
+
+    If today's screener results exist, trigger the research queue for the top 3
+    candidates. If no screener results exist yet, trigger a fresh screener run.
+    No Claude call is made.
+    """
+    today_str = date.today().isoformat()
+    top_tickers: List[str] = []
+
+    try:
+        resp = (
+            _get_client()
+            .table("watchlist")
+            .select("ticker,composite_score")
+            .eq("run_date", today_str)
+            .order("composite_score", desc=True)
+            .limit(3)
+            .execute()
+        )
+        top_tickers = [row["ticker"] for row in (resp.data or [])]
+    except Exception as exc:
+        logger.warning("_handle_empty_portfolio_deploy: watchlist query failed — %s", exc)
+
+    if top_tickers:
+        action = "triggered_research_queue"
+        detail = f"top candidates: {top_tickers}"
+        try:
+            _trigger_research_queue()
+        except Exception as exc:
+            logger.error(
+                "_handle_empty_portfolio_deploy: research queue trigger failed — %s", exc
+            )
+    else:
+        action = "triggered_screener_run"
+        detail = "no screener results found for today"
+        try:
+            _trigger_screener()
+        except Exception as exc:
+            logger.error(
+                "_handle_empty_portfolio_deploy: screener trigger failed — %s", exc
+            )
+
+    logger.info(
+        "PM cycle [deploy_cash gate] regime=%s — %s (%s)", regime, action, detail
+    )
+    _log_event(
+        "DEPLOY_CASH_ACTION",
+        "PM",
+        f"{action}: {detail}",
+        mode_snapshot=regime,
+    )
+
+    return {
+        "cycle_id": cycle_id,
+        "cycle_type": cycle_type,
+        "skipped": False,
+        "reason": "deploy_cash_scheduler_action",
+        "action": action,
+        "detail": detail,
+        "decisions_made": [],
+    }
 
 
 # ── Hard-block enforcement ────────────────────────────────────────────────────
@@ -474,6 +586,18 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 pass
 
     # 5. Rebalancing check (run once per cycle as lowest priority)
+    # Change 1: skip when there is no inventory — an empty portfolio with no
+    # pending candidates cannot be rebalanced; Claude would only return
+    # DEPLOY_CASH → NO_ACTION and waste tokens.
+    open_positions = base_ctx.get("positions", [])
+    new_entry_candidates = [i for i in items if i["category"] == "NEW_ENTRY"]
+    if not open_positions and not new_entry_candidates:
+        logger.debug(
+            "_scan_actionable_items: skipping REBALANCE — no open positions and no pending memos"
+        )
+        items.sort(key=lambda x: x["priority"])
+        return items
+
     regime = base_ctx.get("macro_regime", "Transitional")
     caps = base_ctx.get("regime_caps", {"gross": 1.20, "net": 0.20})
     gross = base_ctx.get("portfolio_gross_exposure", 0.0)
@@ -565,14 +689,59 @@ def run_pm_cycle(
     except Exception as exc:
         logger.warning("PM cycle: event trigger scan failed — %s", exc)
 
+    # ── Step 3c: Pre-Claude gates (Changes 2 and 3) ───────────────────────────
+    pending_memo_count = _count_pending_memos()
+    current_fp = _build_cycle_fingerprint(base_ctx, pending_memo_count)
+
+    # Change 2: skip if state is identical to last cycle within 30 minutes
+    last_fp = _last_cycle_state.get("fingerprint")
+    last_ts = _last_cycle_state.get("timestamp")
+    if (
+        last_fp is not None
+        and last_ts is not None
+        and _fingerprints_match(current_fp, last_fp)
+        and (datetime.now(timezone.utc) - last_ts).total_seconds() < _FINGERPRINT_TTL_SECONDS
+    ):
+        logger.debug(
+            "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within 30 min",
+            current_fp["position_count"],
+            current_fp["pending_memo_count"],
+            current_fp["active_alert_count"],
+            current_fp["regime"],
+        )
+        return {
+            "cycle_id": cycle_id,
+            "cycle_type": cycle_type,
+            "skipped": True,
+            "reason": "skipped_no_change",
+            "decisions_made": [],
+        }
+
+    # Change 3: empty portfolio + constructive regime → delegate to scheduler,
+    # no Claude call needed.
+    regime_now = base_ctx.get("macro_regime", "Transitional")
+    if (
+        current_fp["position_count"] == 0
+        and current_fp["pending_memo_count"] == 0
+        and regime_now in ("Risk-On", "Transitional")
+    ):
+        result = _handle_empty_portfolio_deploy(cycle_id, cycle_type, regime_now)
+        _last_cycle_state["fingerprint"] = current_fp
+        _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
+        return result
+
     # ── Step 4: Scan actionable items ─────────────────────────────────────────
     items = _scan_actionable_items(base_ctx)
 
     if not items:
-        logger.debug("PM cycle: no actionable items this cycle")
+        logger.debug("PM cycle: no actionable items this cycle — logging as skipped_no_inventory")
+        _last_cycle_state["fingerprint"] = current_fp
+        _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
         return {
             "cycle_id": cycle_id,
             "cycle_type": cycle_type,
+            "skipped": True,
+            "reason": "skipped_no_inventory",
             "items_evaluated": 0,
             "decisions_made": [],
             "portfolio_state": _snapshot(base_ctx),
@@ -719,6 +888,11 @@ def run_pm_cycle(
                 ticker or "unknown",
                 exc,
             )
+
+    # Update fingerprint after a full cycle so Change 2 can deduplicate
+    # the next cycle if nothing material has changed.
+    _last_cycle_state["fingerprint"] = current_fp
+    _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
 
     return {
         "cycle_id": cycle_id,
