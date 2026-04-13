@@ -931,22 +931,27 @@ def _build_prompt(
 
     if category == "NEW_ENTRY":
         memo = data.get("memo", {})
-        sizing_rec = data.get("sizing_rec", {})
-        # Try to load sizing rec from positions table if not in data
-        if not sizing_rec and memo.get("ticker"):
+        sizing_rec = data.get("sizing_rec") or None
+        # Load Kelly sizing rec from positions table when not pre-populated
+        if sizing_rec is None and memo.get("ticker"):
             try:
                 resp = (
                     _get_client()
                     .table("positions")
-                    .select("*")
+                    .select(
+                        "dollar_size,share_count,size_label,pct_of_portfolio,"
+                        "entry_price,stop_loss_price"
+                    )
                     .eq("ticker", memo["ticker"])
                     .eq("status", "PENDING_APPROVAL")
+                    .order("created_at", desc=True)
                     .limit(1)
                     .execute()
                 )
-                sizing_rec = resp.data[0] if resp.data else {}
-            except Exception:
-                pass
+                sizing_rec = resp.data[0] if resp.data else None
+            except Exception as exc:
+                logger.warning("_build_prompt: positions query failed for %s — %s", memo.get("ticker"), exc)
+                sizing_rec = None
         return build_new_entry_prompt(memo, sizing_rec, base_ctx)
 
     elif category == "EXIT_TRIM":

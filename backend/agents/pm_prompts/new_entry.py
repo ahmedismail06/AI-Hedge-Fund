@@ -6,7 +6,7 @@ recommendation and decides: EXECUTE | MODIFY_SIZE | DEFER | REJECT | WATCHLIST.
 """
 
 import json
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund ($50M–$2B market cap, ≤5 sell-side analysts covering). Your edge is identifying variant perception opportunities — situations where you have a differentiated view from consensus — before institutional capital arrives.
 
@@ -57,7 +57,7 @@ For EXECUTE/MODIFY_SIZE: populate direction, shares, dollar_amount, limit_price 
 
 def build_new_entry_prompt(
     memo: Dict[str, Any],
-    sizing_rec: Dict[str, Any],
+    sizing_rec: Optional[Dict[str, Any]],
     base_ctx: Dict[str, Any],
 ) -> Tuple[str, str]:
     """
@@ -101,7 +101,7 @@ def build_new_entry_prompt(
 {json.dumps(memo_slim, indent=2, default=str)}
 
 ### Sizing Recommendation (Kelly-derived, 25% fractional)
-{json.dumps(sizing_rec, indent=2, default=str)}
+{json.dumps(sizing_rec, indent=2, default=str) if sizing_rec else "null — no PENDING_APPROVAL position row found; use MODIFY_SIZE with your own dollar_amount if you decide to EXECUTE"}
 
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
