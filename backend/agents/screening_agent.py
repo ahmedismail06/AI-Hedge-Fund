@@ -20,7 +20,7 @@ import logging
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date
 
 from dotenv import load_dotenv
 
@@ -42,7 +42,6 @@ _MAX_WORKERS = 10
 _QUALIFY_THRESHOLD = 7.0
 _TOP_N_FOR_RESEARCH = 5
 _INSIDER_PRE_FILTER_SCORE = 5.0   # only fetch Form 4 for tickers above this pre-adjustment score
-_RESEARCH_SKIP_DAYS = 14          # skip tickers with APPROVED/WATCHLIST memo in last N days
 
 
 class ScreeningAgentError(Exception):
@@ -223,13 +222,21 @@ def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -
 
 
 def _queue_top_n_for_research(
-    qualified: list[ScreenerResult],
     run_date: date,
     n: int = _TOP_N_FOR_RESEARCH,
 ) -> list[str]:
     """
-    Set queued_for_research=True for the top N qualified tickers,
-    skipping any ticker with an APPROVED or WATCHLIST memo in the last 14 days.
+    Queue the top N all-time qualified tickers (score >= 7.0) for research.
+
+    Candidate pool: best-ever composite_score per ticker across ALL watchlist runs,
+    not just today's. This ensures a stock that has consistently scored 8.5 but
+    never landed in today's top 5 still gets researched.
+
+    Skip logic (delegated to research_scheduler._needs_research):
+      - Tickers with a memo < 7 days old AND no material_event=True are skipped
+        by the scheduler at 4:30 PM. We don't replicate that here.
+      - We only hard-exclude tickers that have never qualified (score < 7.0 all-time).
+
     Returns list of queued ticker symbols.
     """
     try:
@@ -238,37 +245,44 @@ def _queue_top_n_for_research(
         logger.error("Supabase client unavailable — skipping research queue: %s", exc)
         return []
 
-    skip_date = (run_date - timedelta(days=_RESEARCH_SKIP_DAYS)).isoformat()
-
-    # Fetch recently approved/watchlisted tickers
-    recently_processed: set[str] = set()
+    # Fetch best-ever score per ticker across all watchlist history
     try:
         result = (
-            client.table("memos")
-            .select("ticker")
-            .in_("status", ["APPROVED", "WATCHLIST"])
-            .gte("date", skip_date)
+            client.table("watchlist")
+            .select("ticker,composite_score,material_event")
+            .gte("composite_score", _QUALIFY_THRESHOLD)
+            .order("composite_score", desc=True)
             .execute()
         )
-        recently_processed = {row["ticker"] for row in (result.data or [])}
+        all_rows = result.data or []
     except Exception as exc:
-        logger.warning("Could not fetch recent memos for skip check: %s", exc)
+        logger.error("_queue_top_n_for_research: watchlist read failed — %s", exc)
+        return []
+
+    # Collapse to best-ever score per ticker; preserve material_event=True if any row has it
+    best: dict[str, dict] = {}
+    for row in all_rows:
+        ticker = row["ticker"]
+        if ticker not in best or row["composite_score"] > best[ticker]["composite_score"]:
+            best[ticker] = row
+        elif row.get("material_event"):
+            best[ticker]["material_event"] = True
+
+    # Sort by best-ever score descending, pick top N
+    ranked = sorted(best.values(), key=lambda x: x["composite_score"], reverse=True)
 
     queued: list[str] = []
-    for r in sorted(qualified, key=lambda x: x.composite_score, reverse=True):
+    for row in ranked:
         if len(queued) >= n:
             break
-        if r.ticker in recently_processed:
-            logger.info("%s: skipped (recently APPROVED/WATCHLIST)", r.ticker)
-            continue
-        queued.append(r.ticker)
+        queued.append(row["ticker"])
 
     if queued:
         try:
             client.table("watchlist").update({"queued_for_research": True}).in_(
                 "ticker", queued
             ).eq("run_date", run_date.isoformat()).execute()
-            logger.info("Queued for research: %s", queued)
+            logger.info("Queued for research (all-time top %d): %s", n, queued)
         except Exception as exc:
             logger.error("Failed to set queued_for_research: %s", exc)
 
@@ -343,11 +357,11 @@ def run_screening(regime: str | None = None) -> list[dict]:
     except Exception as exc:
         logger.error("Failed to store screener results: %s", exc)
 
-    # Step 8: Queue top N qualified tickers for research
+    # Step 8: Queue top N qualified tickers for research (all-time pool, not just today's run)
     qualified = [r for r in all_results if not r.excluded and r.composite_score >= _QUALIFY_THRESHOLD]
-    logger.info("%d tickers qualify (score ≥ %.1f)", len(qualified), _QUALIFY_THRESHOLD)
+    logger.info("%d tickers qualify today (score ≥ %.1f)", len(qualified), _QUALIFY_THRESHOLD)
 
-    queued = _queue_top_n_for_research(qualified, run_date)
+    queued = _queue_top_n_for_research(run_date)
 
     logger.info("=== Screening run complete | queued=%s ===", queued)
 
