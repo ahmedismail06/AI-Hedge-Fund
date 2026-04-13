@@ -1,0 +1,11 @@
+{
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/[...path].js": { "runtime": "nodejs18.x" }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/:path*" },
+    { "source": "/((?!api).*)", "destination": "/index.html" }
+  ]
+}
