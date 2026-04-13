@@ -62,8 +62,8 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             supabase_client.table("positions")
             .select(
                 "id,ticker,direction,share_count,entry_price,current_price,"
-                "conviction_score,pct_of_portfolio,stop_tier1,stop_tier2,stop_tier3,"
-                "sector,next_earnings_date,memo_id,opened_at,status"
+                "conviction_score,pct_of_portfolio,stop_loss_price,"
+                "sector,memo_id,opened_at,status"
             )
             .eq("status", "OPEN")
             .execute()
@@ -106,7 +106,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             supabase_client.table("macro_briefings")
             .select(
                 "regime,regime_confidence,growth_score,inflation_score,"
-                "fed_score,stress_score,portfolio_guidance,sector_tilts,summary"
+                "fed_score,stress_score,portfolio_guidance,sector_tilts,qualitative_summary"
             )
             .order("date", desc=True)
             .limit(1)
@@ -126,7 +126,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
                 "stress_score": row.get("stress_score"),
                 "portfolio_guidance": row.get("portfolio_guidance"),
                 "sector_tilts": row.get("sector_tilts"),
-                "summary": (row.get("summary") or "")[:500],
+                "summary": (row.get("qualitative_summary") or "")[:500],
             }
     except Exception as exc:
         logger.warning("build_base_context: macro_briefings read failed — %s", exc)
@@ -135,7 +135,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
     try:
         resp = (
             supabase_client.table("risk_alerts")
-            .select("id,severity,alert_type,ticker,message,created_at")
+            .select("id,severity,ticker,trigger,created_at")
             .eq("resolved", False)
             .in_("severity", ["BREACH", "CRITICAL"])
             .order("created_at", desc=True)
