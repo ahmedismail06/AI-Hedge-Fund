@@ -1133,6 +1133,16 @@ def run_pm_cycle(
             # Log decision FIRST, then it's already persisted regardless of routing outcome
             _log_pm_decision(record_template)
 
+            # Slack notification for every PM decision
+            notify_event("PM_DECISION", {
+                "category": category,
+                "decision": decision_data.get("decision", decision),
+                "ticker": ticker,
+                "execution_status": execution_status,
+                "confidence": decision_data.get("confidence"),
+                "reasoning": decision_data.get("reasoning", ""),
+            })
+
             decisions_made.append({
                 "decision_id": decision_id,
                 "ticker": ticker,
