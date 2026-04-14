@@ -165,7 +165,16 @@ create table if not exists positions (
     pnl_pct             numeric(8, 4),
     opened_at           timestamptz,
     closed_at           timestamptz,
-    created_at          timestamptz not null default now()
+    created_at          timestamptz not null default now(),
+    -- Exit routing (set by PM _route_decision)
+    exit_action         text check (exit_action in ('TRIM', 'CLOSE')),
+    exit_trim_pct       numeric(5, 2),
+    -- Stop tiers (populated by portfolio_agent at sizing time)
+    stop_tier1          numeric(12, 4),
+    stop_tier2          numeric(12, 4),
+    stop_tier3          numeric(12, 4),
+    -- Earnings date (populated by portfolio_agent from memo context)
+    next_earnings_date  date
 );
 
 create index if not exists positions_ticker_idx on positions (ticker);
