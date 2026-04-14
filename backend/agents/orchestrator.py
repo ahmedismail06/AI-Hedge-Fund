@@ -122,7 +122,7 @@ def _count_pending_memos() -> int:
             .eq("status", "PENDING_PM_REVIEW")
             .execute()
         )
-        return resp.count or 0
+        return resp.count if resp.count is not None else len(resp.data or [])
     except Exception as exc:
         logger.warning("_count_pending_memos: failed — %s", exc)
         return 0
