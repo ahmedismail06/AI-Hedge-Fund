@@ -320,6 +320,42 @@ def _fmt_risk_breach(p: dict):
     )
 
 
+def _fmt_pm_decision(p: dict):
+    decision = p.get("decision", "—")
+    category = p.get("category", "—")
+    ticker = p.get("ticker") or "portfolio"
+    execution_status = p.get("execution_status", "—")
+    confidence = p.get("confidence")
+
+    color = COLOR_INFO
+    if decision in ("EXECUTE", "MODIFY_SIZE"):
+        color = COLOR_SUCCESS
+    elif decision in ("REJECT", "CLOSE", "LIQUIDATE_TO_TARGET"):
+        color = COLOR_CRITICAL
+    elif decision in ("DEFER", "WATCHLIST", "TRIM", "REDUCE_EXPOSURE"):
+        color = COLOR_WARNING
+
+    fields = [
+        {"title": "Category",  "value": str(category),         "short": True},
+        {"title": "Decision",  "value": str(decision),         "short": True},
+        {"title": "Status",    "value": str(execution_status), "short": True},
+    ]
+    if confidence is not None:
+        fields.append({"title": "Confidence", "value": f"{float(confidence)*100:.0f}%", "short": True})
+    if p.get("reasoning"):
+        # Truncate long reasoning to keep Slack message readable
+        reasoning = str(p["reasoning"])[:300]
+        if len(str(p["reasoning"])) > 300:
+            reasoning += "…"
+        fields.append({"title": "Reasoning", "value": reasoning, "short": False})
+
+    return (
+        f"PM Decision — {category} → {decision} ({ticker})",
+        fields,
+        color,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Formatter registry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,4 +389,6 @@ _FORMATTERS = {
     # Risk (legacy path — also used by notifier.py refactor)
     "RISK_CRITICAL":              _fmt_risk_critical,
     "RISK_BREACH":                _fmt_risk_breach,
+    # PM Agent decisions
+    "PM_DECISION":                _fmt_pm_decision,
 }
