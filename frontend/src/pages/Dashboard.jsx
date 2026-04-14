@@ -306,14 +306,6 @@ export default function Dashboard() {
           onClick={() => navigate('/risk')}
         />
         <HealthPill
-          ok={pending.length === 0}
-          label="Pending"
-          sub={pending.length > 0 ? 'Awaiting review' : 'None'}
-          badge={pending.length || undefined}
-          badgeStyle={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}
-          onClick={() => navigate('/portfolio')}
-        />
-        <HealthPill
           ok={regimeKey != null}
           label="Regime"
           sub={regimeKey ?? 'Unknown'}
@@ -396,101 +388,73 @@ export default function Dashboard() {
           <EquityCurveChart data={[]} height={180} />
         </div>
 
-        {/* Pending approvals */}
+        {/* Pending approvals (supervised mode only) / PM Decisions link */}
         <div
           className="lg:col-span-2 rounded-lg p-5"
           style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
         >
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <div className="section-label">Awaiting Approval</div>
+              <div className="section-label">{pending.length > 0 ? 'Awaiting Approval' : 'PM Decisions'}</div>
               {pending.length > 0 && (
-                <span
-                  className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm font-data"
-                  style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}
-                >
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm font-data"
+                  style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}>
                   {pending.length}
                 </span>
               )}
             </div>
-            {pending.length > 3 && (
-              <button
-                onClick={() => navigate('/portfolio')}
+            <button
+                onClick={() => navigate(pending.length > 0 ? '/portfolio' : '/orchestrator')}
                 className="text-[11px] font-bold transition-opacity hover:opacity-70"
                 style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
               >
                 See All →
               </button>
-            )}
           </div>
 
           {pending.length === 0 ? (
-            <div
-              className="flex flex-col items-center justify-center gap-2"
+            <div className="flex flex-col items-center justify-center gap-2 cursor-pointer"
               style={{ height: 160, color: 'var(--text-3)' }}
+              onClick={() => navigate('/orchestrator')}
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>
-                check_circle
-              </span>
-              <p className="text-[12px]">No pending approvals</p>
+              <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>smart_toy</span>
+              <p className="text-[12px]">PM agent handles all decisions autonomously</p>
+              <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>View audit log →</p>
             </div>
           ) : (
             <div className="space-y-2.5">
               {pending.slice(0, 3).map(item => {
                 const vs = VERDICT_STYLES[item.verdict] || VERDICT_STYLES.AVOID;
                 return (
-                  <div
-                    key={item.id}
-                    className="rounded-md p-3"
+                  <div key={item.id} className="rounded-md p-3"
                     style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
                   >
                     <div className="flex items-center gap-2 mb-2.5">
-                      <span
-                        className="font-bold text-sm font-data"
-                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
-                      >
+                      <span className="font-bold text-sm font-data" style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}>
                         {item.ticker}
                       </span>
-                      <span
-                        className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
-                        style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}
-                      >
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
+                        style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}>
                         {item.verdict}
                       </span>
                       <ConvictionBadge score={item.conviction_score} />
                       {item.size_label && (
-                        <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-2)' }}>
-                          {item.size_label}
-                        </span>
+                        <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-2)' }}>{item.size_label}</span>
                       )}
                     </div>
                     <div className="flex gap-2">
                       <button
                         onClick={() => setConfirm({ action: 'approve', id: item.id, ticker: item.ticker })}
                         className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-opacity hover:opacity-80"
-                        style={{
-                          background: 'var(--green-bg)',
-                          border:     '1px solid var(--green-border)',
-                          color:      'var(--green)',
-                          fontFamily: 'Syne',
-                        }}
-                      >
-                        Approve
-                      </button>
+                        style={{ background: 'var(--green-bg)', border: '1px solid var(--green-border)', color: 'var(--green)', fontFamily: 'Syne' }}
+                      >Approve</button>
                       <button
                         onClick={() => setConfirm({ action: 'reject', id: item.id, ticker: item.ticker })}
                         className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-all"
-                        style={{
-                          background: 'var(--surface)',
-                          border:     '1px solid var(--border)',
-                          color:      'var(--text-2)',
-                          fontFamily: 'Syne',
-                        }}
+                        style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)', fontFamily: 'Syne' }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--red-border)'; e.currentTarget.style.color = 'var(--red)'; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-2)'; }}
-                      >
-                        Reject
-                      </button>
+                      >Reject</button>
                     </div>
                   </div>
                 );

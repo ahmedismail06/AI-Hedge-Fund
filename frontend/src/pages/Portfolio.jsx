@@ -99,13 +99,13 @@ function PendingCard({ item, regime, onApprove, onReject }) {
 }
 
 export default function Portfolio() {
-  const [tab, setTab] = useState('pending');
+  const [tab, setTab] = useState('active');
   const [pending, setPending] = useState([]);
   const [positions, setPositions] = useState([]);
   const [closed, setClosed] = useState([]);
   const [exposure, setExposure] = useState(null);
   const [regime, setRegime] = useState(null);
-  const [confirm, setConfirm] = useState(null); // { action: 'approve'|'reject', id, ticker }
+  const [confirm, setConfirm] = useState(null);
 
   const loadPending = useCallback(async () => {
     try { setPending(await getPending()); } catch {}
@@ -135,22 +135,18 @@ export default function Portfolio() {
   const handleConfirm = async () => {
     if (!confirm) return;
     const { action, id } = confirm;
-    // Optimistic removal
     setPending(prev => prev.filter(p => p.id !== id));
     setConfirm(null);
     try {
       if (action === 'approve') await approveTrade(id);
       else await rejectTrade(id);
-    } catch {
-      // Re-load if it fails
-      loadPending();
-    }
+    } catch { loadPending(); }
   };
 
   const totalUnrealized = positions.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
 
   const TABS = [
-    { key: 'pending', label: `Pending (${pending.length})` },
+    ...(pending.length > 0 ? [{ key: 'pending', label: `Pending (${pending.length})` }] : []),
     { key: 'active', label: `Active (${positions.length})` },
     { key: 'closed', label: `Closed (${closed.length})` },
   ];
@@ -163,8 +159,8 @@ export default function Portfolio() {
         <ConfirmDialog
           title={confirm.action === 'approve' ? `Approve trade for ${confirm.ticker}?` : `Reject trade for ${confirm.ticker}?`}
           message={confirm.action === 'approve'
-            ? 'This will send the order to the execution engine. Make sure you have reviewed the sizing and stop-loss levels.'
-            : 'This will mark the recommendation as rejected. You can re-run research to generate a new recommendation.'}
+            ? 'This will send the order to the execution engine.'
+            : 'This will reject the sizing recommendation.'}
           confirmLabel={confirm.action === 'approve' ? 'Yes, Approve' : 'Yes, Reject'}
           destructive={confirm.action === 'reject'}
           onConfirm={handleConfirm}
@@ -216,24 +212,17 @@ export default function Portfolio() {
 
         <div className="p-5">
           {tab === 'pending' && (
-            pending.length === 0 ? (
-              <div className="text-center py-8 text-gray-400">
-                <p className="text-sm">No trades awaiting approval.</p>
-                <p className="text-xs mt-1">The system will surface new recommendations after the next screening cycle.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {pending.map(item => (
-                  <PendingCard
-                    key={item.id}
-                    item={item}
-                    regime={regime}
-                    onApprove={(id) => setConfirm({ action: 'approve', id, ticker: item.ticker })}
-                    onReject={(id) => setConfirm({ action: 'reject', id, ticker: item.ticker })}
-                  />
-                ))}
-              </div>
-            )
+            <div className="space-y-4">
+              {pending.map(item => (
+                <PendingCard
+                  key={item.id}
+                  item={item}
+                  regime={regime}
+                  onApprove={(id) => setConfirm({ action: 'approve', id, ticker: item.ticker })}
+                  onReject={(id) => setConfirm({ action: 'reject', id, ticker: item.ticker })}
+                />
+              ))}
+            </div>
           )}
 
           {tab === 'active' && (

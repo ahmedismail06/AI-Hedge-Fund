@@ -536,6 +536,7 @@ def _route_decision(
     decision_data: Dict[str, Any],
     decision_record: Dict[str, Any],
     portfolio_value: Optional[float] = None,
+    auto_approve: bool = True,
 ) -> str:
     """
     After Claude decides, route the action to the appropriate Supabase update.
@@ -555,25 +556,25 @@ def _route_decision(
         client = _get_client()
 
         if category == "NEW_ENTRY" and decision == "EXECUTE":
-            # Run portfolio sizing now that the PM has approved the entry.
-            # Memo status is already set to APPROVED by _update_memo_after_decision.
+            # autonomous: size + APPROVED → execution immediately
+            # supervised: size + PENDING_APPROVAL → waits for human
             if ticker and memo_id:
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
-                    # portfolio_agent writes the position as PENDING_APPROVAL; promote to APPROVED.
-                    client.table("positions").update({"status": "APPROVED"}).eq(
-                        "ticker", ticker
-                    ).eq("status", "PENDING_APPROVAL").execute()
-                    logger.info("PM: EXECUTE — sized and approved position for %s", ticker)
-                    return "SENT_TO_EXECUTION"
+                    _asyncio.run(run_portfolio_sizing(
+                        memo_id=memo_id,
+                        portfolio_value=portfolio_value,
+                        auto_approve=auto_approve,
+                    ))
+                    logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s)", ticker, auto_approve)
+                    return "SENT_TO_EXECUTION" if auto_approve else "PENDING_HUMAN"
                 except Exception as exc:
                     logger.warning("PM: EXECUTE sizing failed for %s — %s", ticker, exc)
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "MODIFY_SIZE":
-            # Size the position with PM's override values, then approve it.
+            # Size with PM's override values and write directly as APPROVED.
             # Memo status is already set to APPROVED by _update_memo_after_decision.
             action = decision_data.get("action_details", {})
             new_dollar = action.get("dollar_amount")
@@ -582,17 +583,24 @@ def _route_decision(
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
-                    update: Dict[str, Any] = {"status": "APPROVED"}
+                    _asyncio.run(run_portfolio_sizing(
+                        memo_id=memo_id,
+                        portfolio_value=portfolio_value,
+                        auto_approve=auto_approve,
+                    ))
+                    # Apply PM's size override on top of Kelly sizing
+                    update: Dict[str, Any] = {}
                     if new_shares:
                         update["share_count"] = new_shares
                     if new_dollar:
                         update["dollar_amount"] = new_dollar
-                    client.table("positions").update(update).eq("ticker", ticker).eq(
-                        "status", "PENDING_APPROVAL"
-                    ).execute()
-                    logger.info("PM: MODIFY_SIZE — sized and approved position for %s", ticker)
-                    return "SENT_TO_EXECUTION"
+                    if update:
+                        pos_status = "APPROVED" if auto_approve else "PENDING_APPROVAL"
+                        client.table("positions").update(update).eq("ticker", ticker).eq(
+                            "status", pos_status
+                        ).execute()
+                    logger.info("PM: MODIFY_SIZE — sized position for %s (auto_approve=%s)", ticker, auto_approve)
+                    return "SENT_TO_EXECUTION" if auto_approve else "PENDING_HUMAN"
                 except Exception as exc:
                     logger.warning("PM: MODIFY_SIZE sizing failed for %s — %s", ticker, exc)
             return "BLOCKED"
@@ -1013,16 +1021,25 @@ def run_pm_cycle(
             record_template["memo_id"] = memo_id
 
             # Route decision (actual Supabase updates — positions/config)
-            if mode == "autonomous" and _is_market_open():
-                execution_status = _route_decision(decision_data, record_template, portfolio_value=base_ctx.get("portfolio_value_usd"))
-            elif mode == "supervised":
-                execution_status = "PENDING_HUMAN"
+            # autonomous → size + approve immediately, no human step
+            # supervised → size but leave as PENDING_APPROVAL for human review
+            pv = base_ctx.get("portfolio_value_usd")
+            if _is_market_open():
+                auto_approve = (mode == "autonomous")
+                execution_status = _route_decision(
+                    decision_data, record_template,
+                    portfolio_value=pv,
+                    auto_approve=auto_approve,
+                )
             else:
                 # Non-market-hours: log the decision but defer execution
                 execution_status = "DEFERRED"
                 if category in ("CRISIS",):
                     # Crisis can act outside market hours (prep for next open)
-                    execution_status = _route_decision(decision_data, record_template)
+                    execution_status = _route_decision(
+                        decision_data, record_template,
+                        auto_approve=(mode == "autonomous"),
+                    )
 
             record_template["execution_status"] = execution_status
 
