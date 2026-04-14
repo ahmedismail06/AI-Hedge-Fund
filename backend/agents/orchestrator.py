@@ -8,7 +8,7 @@ through a Claude extended-thinking call with a category-specific prompt.
 
 Architecture:
   - APScheduler runs run_pm_cycle() every 5 minutes (market hours + after-hours for cleanup)
-  - Macro (7 AM), Screener (4 PM), Research queue (4:30 PM) crons are preserved unchanged
+    - Macro (7 AM), Screener (4 PM), Research queue (5:00 PM) crons are preserved unchanged
   - Hard blocks (15% position cap, 200% gross ceiling, -10% daily loss halt) are enforced
     in Python BEFORE Claude is called — Claude cannot override them
   - Every decision is logged to pm_decisions before any execution action
@@ -1447,8 +1447,8 @@ def create_orchestrator_scheduler():
 
     Schedule:
       - 07:00 ET Mon–Fri: trigger Macro Agent
-      - 16:00 ET Mon–Fri: trigger Screener
-      - 16:30 ET Mon–Fri: trigger Research queue
+            - 16:00 ET Mon–Fri: trigger Screener
+            - 17:00 ET Mon–Fri: trigger Research queue
       - Every 5 min: PM decision cycle
     """
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -1492,20 +1492,20 @@ def create_orchestrator_scheduler():
         misfire_grace_time=3600,
     )
 
-    # Research queue — 16:30 ET Mon–Fri
+    # Research queue — 17:00 ET Mon–Fri
     scheduler.add_job(
         _trigger_research_queue,
         trigger=CronTrigger(
-            hour=16, minute=30, day_of_week="mon-fri", timezone="America/New_York"
+            hour=17, minute=0, day_of_week="mon-fri", timezone="America/New_York"
         ),
         id="pm_trigger_research",
-        name="PM → Research Queue (4:30PM ET)",
+        name="PM → Research Queue (5:00PM ET)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
     # Ticker events calendar refresh — 16:15 ET Mon–Fri
-    # Runs between screener (16:00) and research queue (16:30) so upcoming events
+    # Runs between screener (16:00) and research queue (17:00) so upcoming events
     # are populated before the research scheduler fires.
     scheduler.add_job(
         _refresh_ticker_events_calendar,
@@ -1749,7 +1749,7 @@ def _scan_event_triggers() -> None:
 def _refresh_ticker_events_calendar() -> None:
     """Update ticker_events for all watchlisted and held tickers.
 
-    Runs at 16:15 ET (between screener at 16:00 and research at 16:30).
+    Runs at 16:15 ET (between screener at 16:00 and research at 17:00).
     Upserts upcoming earnings and filing events with document_fetched=False
     so the next research run knows to fetch them fresh.
 

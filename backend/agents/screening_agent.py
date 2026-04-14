@@ -233,8 +233,8 @@ def _queue_top_n_for_research(
     never landed in today's top 5 still gets researched.
 
     Skip logic (delegated to research_scheduler._needs_research):
-      - Tickers with a memo < 7 days old AND no material_event=True are skipped
-        by the scheduler at 4:30 PM. We don't replicate that here.
+            - Tickers with a memo < 7 days old AND no material_event=True are skipped
+                by the scheduler at 5:00 PM. We don't replicate that here.
       - We only hard-exclude tickers that have never qualified (score < 7.0 all-time).
 
     Returns list of queued ticker symbols.
