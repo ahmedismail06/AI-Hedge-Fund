@@ -440,6 +440,27 @@ async def run_portfolio_sizing(
         status="PENDING_APPROVAL",
     )
 
+    # ── Compute 3-tier stops from entry price + regime ────────────────────────
+    # Tier 1: position stop  (-8% standard, -5% Risk-Off/Stagflation)
+    # Tier 2: strategy stop  (-15% standard, -10% Risk-Off/Stagflation)
+    # Tier 3: portfolio stop (-20% standard, -15% Risk-Off/Stagflation)
+    _tight_regime = regime in ("Risk-Off", "Stagflation")
+    stop_tier1 = round(entry_price * (1 - (0.05 if _tight_regime else 0.08)), 4)
+    stop_tier2 = round(entry_price * (1 - (0.10 if _tight_regime else 0.15)), 4)
+    stop_tier3 = round(entry_price * (1 - (0.15 if _tight_regime else 0.20)), 4)
+
+    # ── next_earnings_date from memo context ──────────────────────────────────
+    next_earnings_date: Optional[str] = None
+    raw_earnings = memo_json.get("next_earnings_date")
+    if raw_earnings:
+        try:
+            from datetime import date as _date
+            # Accept ISO strings like "2026-05-15" or "2026-05-15T00:00:00"
+            next_earnings_date = str(raw_earnings)[:10]
+            _date.fromisoformat(next_earnings_date)  # validate
+        except (ValueError, TypeError):
+            next_earnings_date = None
+
     # Persist new position row to Supabase (errors are logged, not re-raised)
     _upsert_position({
         "ticker":                 ticker,
@@ -453,6 +474,10 @@ async def run_portfolio_sizing(
         "pct_of_portfolio":       pct_of_portfolio,
         "entry_price":            entry_price,
         "stop_loss_price":        stop_loss_price,
+        "stop_tier1":             stop_tier1,
+        "stop_tier2":             stop_tier2,
+        "stop_tier3":             stop_tier3,
+        "next_earnings_date":     next_earnings_date,
         "target_price":           target_price,
         "risk_reward_ratio":      risk_reward_ratio,
         "sizing_rationale":       sizing_rationale,
