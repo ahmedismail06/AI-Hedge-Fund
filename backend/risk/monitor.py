@@ -116,9 +116,25 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
         logger.debug("no OPEN positions — risk cycle done")
         return {"positions_checked": 0, "alerts_fired": 0, "critical_count": 0, "skipped": False}
 
-    # ── 2. Refresh current prices ─────────────────────────────────────────────
+    # ── 2. Fetch live prices and drop any position without a fresh quote ────────
     tickers = list({p["ticker"] for p in positions if p.get("ticker")})
+    original_count = len(positions)
     positions = _refresh_prices(positions, tickers, supabase_client)
+    live_count = len(positions)
+
+    if live_count < original_count:
+        logger.warning(
+            "%d/%d position(s) excluded from stop checks — no live Polygon price available",
+            original_count - live_count,
+            original_count,
+        )
+
+    if not positions:
+        logger.error(
+            "no positions have live prices this cycle — stop checks skipped entirely "
+            "(Polygon unavailable or all tickers returned no data)"
+        )
+        return {"positions_checked": 0, "alerts_fired": 0, "critical_count": 0, "skipped": False}
 
     # ── 3. Check stops ────────────────────────────────────────────────────────
     stop_events = check_stops(positions, regime)
@@ -163,25 +179,32 @@ def _refresh_prices(
     positions: list[dict], tickers: list[str], supabase_client=None
 ) -> list[dict]:
     """
-    Batch-fetch latest prices from Polygon snapshot endpoint, update pnl_pct
-    on each position in memory, and persist current_price + pnl_pct back to
-    Supabase so stop-loss checks survive agent restarts.
+    Batch-fetch live prices from Polygon for all tickers in a single call,
+    update pnl_pct in memory, and persist current_price + pnl_pct to Supabase.
 
-    Positions with no Polygon data are left unchanged (stale price).
+    Returns ONLY positions for which a live price was successfully obtained.
+    Positions with no Polygon data are excluded — stop checks must never run
+    against a stale DB value.
+
+    On total Polygon failure (network error, bad key, non-200) returns [] so
+    the caller can detect that no live data is available this cycle.
 
     Uses /v2/snapshot/locale/us/markets/stocks/tickers (batch, one call).
-    Prefers lastTrade.p (real-time during market hours), falls back to
-    day.c (session close).
+    Prefers lastTrade.p (real-time during market hours), falls back to day.c.
     """
     if not tickers:
         return positions
 
     polygon_key = os.getenv("POLYGON_API_KEY")
     if not polygon_key:
-        logger.warning("POLYGON_API_KEY not set — position prices stale")
-        return positions
+        logger.error(
+            "POLYGON_API_KEY not set — cannot fetch live prices; "
+            "all %d position(s) excluded from stop checks this cycle",
+            len(positions),
+        )
+        return []
 
-    logger.info("fetching Polygon prices for: %s", ", ".join(tickers))
+    logger.info("fetching live Polygon prices for: %s", ", ".join(sorted(tickers)))
     try:
         resp = requests.get(
             "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
@@ -191,78 +214,89 @@ def _refresh_prices(
         resp.raise_for_status()
         data = resp.json()
         logger.info(
-            "Polygon snapshot response: status=%s, tickers_returned=%d",
-            data.get("status"), len(data.get("tickers", [])),
+            "Polygon snapshot OK: status=%s, tickers_returned=%d/%d",
+            data.get("status"), len(data.get("tickers", [])), len(tickers),
         )
     except Exception as exc:
-        logger.warning(
-            "Polygon price refresh FAILED — positions will use stale prices from DB: %s", exc,
+        logger.error(
+            "Polygon price fetch FAILED — all %d position(s) excluded from stop checks: %s",
+            len(positions), exc,
         )
-        return positions
+        return []
 
+    # ── Build price map from Polygon response ─────────────────────────────────
     price_map: dict[str, float] = {}
     for item in data.get("tickers", []):
         ticker = item.get("ticker")
         last_trade = (item.get("lastTrade") or {}).get("p")
         day_close = (item.get("day") or {}).get("c")
-        last_price = last_trade or day_close
-        if ticker and last_price:
-            price_map[ticker] = float(last_price)
+        live_price = last_trade or day_close
+        if ticker and live_price:
+            price_map[ticker] = float(live_price)
             logger.info(
-                "price fetched: %s = $%.4f (source=%s)",
-                ticker, float(last_price), "lastTrade" if last_trade else "day.close",
+                "live price: %s = $%.4f (source=%s)",
+                ticker, float(live_price), "lastTrade" if last_trade else "day.close",
             )
         elif ticker:
             logger.warning(
-                "Polygon returned ticker %s but no lastTrade.p or day.c — using stale price",
+                "Polygon returned %s but no lastTrade.p or day.c — "
+                "excluding from stop checks this cycle",
                 ticker,
             )
 
-    updated = []
+    # Warn for any requested ticker that wasn't in the Polygon response at all.
+    missing = set(tickers) - set(price_map)
+    for m in sorted(missing):
+        logger.warning(
+            "no Polygon data for %s — excluding from stop checks this cycle "
+            "(stale DB price will NOT be used)",
+            m,
+        )
+
+    # ── Build output: only positions with a fresh live price ──────────────────
+    updated: list[dict] = []
     for pos in positions:
         ticker = pos.get("ticker")
-        if ticker and ticker in price_map:
-            current_price = price_map[ticker]
-            entry_price = pos.get("entry_price")
-            pos = dict(pos)
-            pos["current_price"] = current_price
-            if entry_price:
-                try:
-                    ep = float(entry_price)
-                    pnl = (current_price - ep) / ep if ep else 0.0
-                    pos["pnl_pct"] = pnl
-                    logger.info(
-                        "pnl computed: %s entry=$%.4f current=$%.4f pnl_pct=%.2f%%",
-                        ticker, ep, current_price, pnl * 100,
-                    )
-                except (TypeError, ValueError) as exc:
-                    logger.warning("pnl_pct computation failed for %s: %s", ticker, exc)
+        if not ticker or ticker not in price_map:
+            continue  # excluded — logged above
 
-            # Persist current_price and pnl_pct so stop-loss checks survive agent restarts.
-            if supabase_client:
-                pos_id = pos.get("id")
-                if pos_id:
-                    try:
-                        supabase_client.table("positions").update({
-                            "current_price": round(current_price, 4),
-                            "pnl_pct": round(pos.get("pnl_pct", 0.0), 6),
-                        }).eq("id", pos_id).execute()
-                    except Exception as _persist_exc:
-                        logger.debug(
-                            "pnl_pct persist failed for %s: %s", ticker, _persist_exc
-                        )
-                else:
-                    logger.debug(
-                        "_refresh_prices: position dict missing 'id' for %s — skipping persist",
-                        ticker,
+        live_price = price_map[ticker]
+        entry_price = pos.get("entry_price")
+        pos = dict(pos)
+        pos["current_price"] = live_price
+
+        if entry_price:
+            try:
+                ep = float(entry_price)
+                pnl = (live_price - ep) / ep if ep else 0.0
+                pos["pnl_pct"] = pnl
+                logger.info(
+                    "pnl: %s entry=$%.4f live=$%.4f pnl_pct=%.2f%%",
+                    ticker, ep, live_price, pnl * 100,
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning("pnl_pct computation failed for %s: %s", ticker, exc)
+
+        # Persist live price back to Supabase so the dashboard and other agents
+        # see fresh data without needing their own Polygon call.
+        if supabase_client:
+            pos_id = pos.get("id")
+            if pos_id:
+                try:
+                    supabase_client.table("positions").update({
+                        "current_price": round(live_price, 4),
+                        "pnl_pct": round(float(pos.get("pnl_pct") or 0), 6),
+                    }).eq("id", pos_id).execute()
+                except Exception as _persist_exc:
+                    logger.warning(
+                        "failed to persist live price for %s to Supabase: %s",
+                        ticker, _persist_exc,
                     )
-        elif ticker:
-            logger.warning(
-                "no Polygon price for %s — using stale current_price=$%.4f pnl_pct=%.2f%%",
-                ticker,
-                pos.get("current_price") or 0,
-                (pos.get("pnl_pct") or 0) * 100,
-            )
+            else:
+                logger.debug(
+                    "position dict for %s missing 'id' — skipping Supabase persist", ticker
+                )
+
         updated.append(pos)
 
     return updated
