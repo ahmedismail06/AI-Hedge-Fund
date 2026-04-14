@@ -56,7 +56,7 @@ def store_memo(ticker: str, memo_dict: dict) -> str:
         "conviction_score": float(memo_dict.get("conviction_score", 0)),
         "memo_json": memo_dict,
         "raw_docs": raw_docs,
-        "status": "PENDING",
+        "status": "PENDING_PM_REVIEW",
     }
 
     result = _get_client().table("memos").insert(row).execute()
