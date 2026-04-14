@@ -1029,7 +1029,7 @@ def _run_agentic_retrieval(
                 tools=[SEARCH_TOOL],
                 tool_choice="auto",
                 temperature=0.1,
-                max_tokens=1500,
+                max_completion_tokens=1500,
             )
 
             # Accumulate token usage per turn
@@ -1613,23 +1613,23 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     if use_cache:
         from backend.memory.vector_store import get_memo
         cached = get_memo(ticker)
-        if not cached or not cached.get("raw_docs"):
-            raise ResearchAgentError(
-                f"use_cache=True but no cached raw_docs found for {ticker}. "
-                "Run a full fetch first."
-            )
-        raw = cached["raw_docs"]
-        sec_data = raw.get("sec", {})
-        news_data = raw.get("news", {})
-        transcript_data = raw.get("transcripts", {})
-        form4_data = raw.get("form4", {})
-        fmp_data = raw.get("fmp", {})
-        logger.info("run_research(%s): using cached raw_docs (memo id=%s)", ticker, cached.get("id"))
-        print(f"\n{'─'*62}")
-        print(f"  CACHE MODE — skipping fetch + indexing ({ticker})")
-        print(f"{'─'*62}")
-        indexing_ok = True  # assume chunks already in pgvector from prior run
-    else:
+        if cached and cached.get("raw_docs"):
+            raw = cached["raw_docs"]
+            sec_data = raw.get("sec", {})
+            news_data = raw.get("news", {})
+            transcript_data = raw.get("transcripts", {})
+            form4_data = raw.get("form4", {})
+            fmp_data = raw.get("fmp", {})
+            logger.info("run_research(%s): using cached raw_docs (memo id=%s)", ticker, cached.get("id"))
+            print(f"\n{'─'*62}")
+            print(f"  CACHE MODE — skipping fetch + indexing ({ticker})")
+            print(f"{'─'*62}")
+            indexing_ok = True  # assume chunks already in pgvector from prior run
+        else:
+            logger.info("run_research(%s): use_cache=True but no cache found — falling back to full fetch", ticker)
+            use_cache = False
+
+    if not use_cache:
         sec_data = fetch_sec_filings(ticker)
         news_data = fetch_news(ticker)
         transcript_data = fetch_transcripts(ticker)
