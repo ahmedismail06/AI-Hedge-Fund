@@ -63,7 +63,8 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             .select(
                 "id,ticker,direction,share_count,entry_price,current_price,"
                 "conviction_score,pct_of_portfolio,stop_loss_price,"
-                "sector,memo_id,opened_at,status"
+                "stop_tier1,stop_tier2,stop_tier3,next_earnings_date,"
+                "exit_action,exit_trim_pct,sector,memo_id,opened_at,status"
             )
             .eq("status", "OPEN")
             .execute()
