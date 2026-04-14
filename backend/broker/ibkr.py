@@ -146,7 +146,7 @@ def get_loop() -> asyncio.AbstractEventLoop:
 # Account summary
 # ──────────────────────────────────────────────────────────────────────────────
 
-_ACCOUNT_TAGS_WANTED = {'NetLiquidation', 'TotalCashValue', 'UnrealizedPnL', 'RealizedPnL'}
+_ACCOUNT_TAGS_WANTED = {'NetLiquidation', 'TotalCashValue', 'CashBalance', 'UnrealizedPnL', 'RealizedPnL'}
 
 
 def get_portfolio_value() -> float:
@@ -207,3 +207,17 @@ def get_account_summary() -> dict:
     except Exception as exc:
         logger.warning("Failed to fetch account summary: %s", exc)
         return {}
+
+
+def get_cash_balance() -> Optional[float]:
+    """
+    Return the live USD cash balance from IBKR (AccountValue tag='CashBalance').
+
+    Returns None when IBKR is unreachable so callers can skip the sync
+    gracefully rather than writing 0 to the database.
+    """
+    summary = get_account_summary()
+    val = summary.get("CashBalance")
+    if val is not None:
+        return float(val)
+    return None

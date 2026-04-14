@@ -37,6 +37,7 @@ from typing import Optional
 
 from backend.memory.vector_store import _get_client
 from backend.notifications.events import notify_event
+from backend.broker.ibkr import get_cash_balance
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,7 @@ def record_partial_fill_open(order_id: str) -> None:
             total_filled,
             avg_fill_price,
         )
+        _sync_cash_and_pct(client)
         notify_event("ORDER_FILLED", {
             "ticker": order_row.get("ticker", "—"),
             "fill_qty": total_filled,
@@ -312,6 +314,7 @@ def _update_order_aggregate(
         # Close the position loop once the order is fully filled.
         if is_filled and avg_price is not None:
             _close_position_loop(order_row["position_id"], avg_price)
+            _sync_cash_and_pct(client)
             notify_event("ORDER_FILLED", {
                 "ticker": order_row.get("ticker", "—"),
                 "fill_qty": total_qty,
@@ -366,6 +369,76 @@ def _close_position_loop(position_id: str, avg_fill_price: float) -> None:
             position_id,
             exc,
         )
+
+
+def _sync_cash_and_pct(client) -> None:
+    """
+    Sync IBKR cash balance to pm_config and recalculate pct_of_portfolio for
+    all OPEN positions.
+
+    Called immediately after every full or partial position open so the
+    dashboard and PM agent always see an accurate portfolio composition.
+
+    Steps:
+      1. Fetch USD CashBalance from IBKR. Skip silently if IBKR is unreachable.
+      2. Update pm_config (id=1): cash_balance = <ibkr_cash>, updated_at = NOW().
+      3. Load all OPEN positions (id, dollar_size).
+      4. Compute total_portfolio_value = cash + sum(dollar_size).
+      5. Write pct_of_portfolio = dollar_size / total_portfolio_value * 100
+         for every open position.
+
+    Never raises — errors are logged to stderr.
+
+    Args:
+        client: Supabase client from _get_client() (already in scope at call site).
+    """
+    try:
+        cash = get_cash_balance()
+        if cash is None:
+            logger.warning("_sync_cash_and_pct: IBKR unreachable — skipping sync")
+            return
+
+        # 1. Persist cash balance.
+        client.table("pm_config").update(
+            {"cash_balance": round(cash, 2), "updated_at": datetime.utcnow().isoformat()}
+        ).eq("id", 1).execute()
+        logger.info("pm_config cash_balance synced: $%.2f", cash)
+
+        # 2. Load all OPEN positions.
+        pos_result = (
+            client.table("positions")
+            .select("id,dollar_size")
+            .eq("status", "OPEN")
+            .execute()
+        )
+        open_positions = pos_result.data or []
+        if not open_positions:
+            return
+
+        market_value: float = sum(
+            float(p.get("dollar_size") or 0) for p in open_positions
+        )
+        total_value: float = cash + market_value
+        if total_value <= 0:
+            logger.warning("_sync_cash_and_pct: total_value=%.2f — skipping pct update", total_value)
+            return
+
+        # 3. Update each open position's pct_of_portfolio.
+        for pos in open_positions:
+            dollar_size = float(pos.get("dollar_size") or 0)
+            pct = round(dollar_size / total_value * 100, 4)
+            client.table("positions").update(
+                {"pct_of_portfolio": pct}
+            ).eq("id", pos["id"]).execute()
+
+        logger.info(
+            "pct_of_portfolio refreshed for %d OPEN positions "
+            "(total_value=$%.2f, cash=$%.2f, market=$%.2f)",
+            len(open_positions), total_value, cash, market_value,
+        )
+
+    except Exception as exc:
+        logger.error("_sync_cash_and_pct failed: %s", exc)
 
 
 def _parse_ibkr_time(raw: str) -> str:

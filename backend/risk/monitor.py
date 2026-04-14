@@ -19,7 +19,8 @@ Each cycle:
 
 import logging
 import os
-from datetime import datetime, time
+import uuid
+from datetime import datetime, time, timezone
 
 import pytz
 import requests
@@ -38,6 +39,39 @@ _ET = pytz.timezone("America/New_York")
 _MARKET_OPEN = time(9, 30)
 _MARKET_CLOSE = time(16, 0)
 _MARKET_WEEKDAYS = {0, 1, 2, 3, 4}  # Mon–Fri
+
+
+def write_heartbeat(supabase_client) -> bool:
+    """
+    Write a SYSTEM heartbeat row to risk_alerts to confirm table connectivity.
+    Call once at startup (from risk_agent.py lifespan or first cycle).
+    Returns True if write succeeded, False otherwise.
+    """
+    row = {
+        "id": str(uuid.uuid4()),
+        "ticker": None,
+        "tier": 1,
+        "severity": "WARN",
+        "trigger": "SYSTEM heartbeat — risk monitor started, Supabase connectivity confirmed",
+        "regime": "SYSTEM",
+        "resolved": True,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        resp = supabase_client.table("risk_alerts").insert(row).execute()
+        logger.info(
+            "risk_alerts heartbeat written OK (id=%s, rows_returned=%d)",
+            row["id"], len(resp.data or []),
+        )
+        return True
+    except Exception as exc:
+        logger.error(
+            "risk_alerts heartbeat FAILED — Supabase write error: %s "
+            "(check SUPABASE_URL/SUPABASE_KEY and that risk_alerts table exists)",
+            exc, exc_info=True,
+        )
+        return False
 
 
 def is_market_open() -> bool:
@@ -98,7 +132,14 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 
     # ── 6. Dispatch ───────────────────────────────────────────────────────────
     if alerts:
+        logger.info("generated %d alert(s) — dispatching to Supabase", len(alerts))
         dispatch_alerts(alerts, supabase_client)
+    else:
+        logger.info(
+            "risk cycle complete: %d positions checked, 0 alerts — all clear "
+            "(stop checks ran, no thresholds breached, no approaching-stop warnings)",
+            len(positions),
+        )
 
     critical_count = sum(1 for a in alerts if a.tier == 3)
     logger.info(
@@ -140,6 +181,7 @@ def _refresh_prices(
         logger.warning("POLYGON_API_KEY not set — position prices stale")
         return positions
 
+    logger.info("fetching Polygon prices for: %s", ", ".join(tickers))
     try:
         resp = requests.get(
             "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
@@ -148,19 +190,33 @@ def _refresh_prices(
         )
         resp.raise_for_status()
         data = resp.json()
+        logger.info(
+            "Polygon snapshot response: status=%s, tickers_returned=%d",
+            data.get("status"), len(data.get("tickers", [])),
+        )
     except Exception as exc:
-        logger.warning("Polygon price refresh failed: %s", exc)
+        logger.warning(
+            "Polygon price refresh FAILED — positions will use stale prices from DB: %s", exc,
+        )
         return positions
 
     price_map: dict[str, float] = {}
     for item in data.get("tickers", []):
         ticker = item.get("ticker")
-        last_price = (
-            (item.get("lastTrade") or {}).get("p")
-            or (item.get("day") or {}).get("c")
-        )
+        last_trade = (item.get("lastTrade") or {}).get("p")
+        day_close = (item.get("day") or {}).get("c")
+        last_price = last_trade or day_close
         if ticker and last_price:
             price_map[ticker] = float(last_price)
+            logger.info(
+                "price fetched: %s = $%.4f (source=%s)",
+                ticker, float(last_price), "lastTrade" if last_trade else "day.close",
+            )
+        elif ticker:
+            logger.warning(
+                "Polygon returned ticker %s but no lastTrade.p or day.c — using stale price",
+                ticker,
+            )
 
     updated = []
     for pos in positions:
@@ -173,12 +229,16 @@ def _refresh_prices(
             if entry_price:
                 try:
                     ep = float(entry_price)
-                    pos["pnl_pct"] = (current_price - ep) / ep if ep else 0.0
-                except (TypeError, ValueError):
-                    pass
+                    pnl = (current_price - ep) / ep if ep else 0.0
+                    pos["pnl_pct"] = pnl
+                    logger.info(
+                        "pnl computed: %s entry=$%.4f current=$%.4f pnl_pct=%.2f%%",
+                        ticker, ep, current_price, pnl * 100,
+                    )
+                except (TypeError, ValueError) as exc:
+                    logger.warning("pnl_pct computation failed for %s: %s", ticker, exc)
 
-            # Persist current_price and pnl_pct so stop-loss checks survive
-            # agent restarts. Guard on pos_id to skip malformed test dicts.
+            # Persist current_price and pnl_pct so stop-loss checks survive agent restarts.
             if supabase_client:
                 pos_id = pos.get("id")
                 if pos_id:
@@ -196,6 +256,13 @@ def _refresh_prices(
                         "_refresh_prices: position dict missing 'id' for %s — skipping persist",
                         ticker,
                     )
+        elif ticker:
+            logger.warning(
+                "no Polygon price for %s — using stale current_price=$%.4f pnl_pct=%.2f%%",
+                ticker,
+                pos.get("current_price") or 0,
+                (pos.get("pnl_pct") or 0) * 100,
+            )
         updated.append(pos)
 
     return updated

@@ -108,6 +108,17 @@ def _stop_trigger_text(event: StopEvent) -> str:
     pct = f"{event.pct_move * 100:.1f}%"
 
     if event.tier == 1 and event.ticker:
+        if getattr(event, "approaching", False):
+            stop_str = f"${event.stop_price:.2f}" if event.stop_price else "stop"
+            curr_str = f"${event.current_price:.2f}" if event.current_price else "current"
+            dist_pct = (
+                f"{(event.current_price - event.stop_price) / event.stop_price * 100:.1f}%"
+                if event.stop_price and event.current_price else "?"
+            )
+            return (
+                f"Approaching stop — {event.ticker}: price {curr_str} is {dist_pct} above "
+                f"stop {stop_str} (P&L {pct})"
+            )
         return f"Tier 1 {label} stop triggered: {event.ticker} at {pct} P&L"
     if event.tier == 2 and event.sector:
         return f"Tier 2 {label} stop triggered: {event.sector} sector at {pct} avg P&L"

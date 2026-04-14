@@ -30,7 +30,7 @@ from backend.api.risk import router as risk_router
 from backend.api.execution import router as execution_router
 from backend.api.orchestrator import router as orchestrator_router
 from backend.api.pm import router as pm_router
-from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics
+from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics, startup_heartbeat
 from backend.agents.execution_agent import run_execution_cycle
 
 _screener_scheduler = None
@@ -55,6 +55,9 @@ async def lifespan(app: FastAPI):
     # NOTE: macro (7AM), screener (4PM), research queue (4:30PM), and ticker events
     # (4:15PM) crons are all owned by _pm_scheduler (create_orchestrator_scheduler).
     # Do NOT start separate schedulers for these — they would fire each pipeline twice.
+
+    # Confirm risk_alerts table is reachable before scheduling
+    startup_heartbeat()
 
     # Risk monitor: every 60 seconds (market-hours guard is inside run_risk_monitor)
     _risk_monitor_scheduler = BackgroundScheduler()

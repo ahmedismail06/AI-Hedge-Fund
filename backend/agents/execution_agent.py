@@ -101,13 +101,15 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
     try:
         # ── C: Handle timed-out orders ────────────────────────────────────────
+        # check_timeouts() sets PARTIAL_FILLED (has fills) or TIMEOUT (zero fills).
+        # REJECTED is reserved for explicit IBKR error callbacks — never timeout.
         timed_out_position_ids = _order_manager.check_timeouts()
         for pos_id in timed_out_position_ids:
             order_result = (
                 client.table("orders")
                 .select("*")
                 .eq("position_id", pos_id)
-                .eq("status", "REJECTED")
+                .in_("status", ["PARTIAL_FILLED", "TIMEOUT"])
                 .order("created_at", desc=True)
                 .limit(1)
                 .execute()
@@ -115,18 +117,23 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
             if not order_result.data:
                 continue
             order_row = order_result.data[0]
+            order_status = order_row.get("status")
             total_filled = float(order_row.get("total_filled_qty") or 0)
 
-            if total_filled > 0:
-                # Partial fill — open at filled quantity
+            if order_status == "PARTIAL_FILLED" and total_filled > 0:
+                # Partial fill — open position at actual filled quantity + avg fill price
                 _fill_recorder.record_partial_fill_open(order_row["id"])
                 logger.info(
-                    "Position %s opened at partial fill (%.0f shares)", pos_id, total_filled
+                    "Position %s opened at partial fill (%.0f shares, status=PARTIAL_FILLED)",
+                    pos_id, total_filled,
                 )
             else:
-                # Zero fill — revert to APPROVED so next cycle can retry
+                # Zero fill (TIMEOUT) — revert to APPROVED so next cycle can retry
                 client.table("positions").update({"status": "APPROVED"}).eq("id", pos_id).execute()
-                logger.info("Position %s reverted to APPROVED after zero-fill timeout", pos_id)
+                logger.info(
+                    "Position %s reverted to APPROVED after zero-fill timeout (status=%s)",
+                    pos_id, order_status,
+                )
 
             summary.orders_timeout += 1
 

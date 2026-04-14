@@ -52,7 +52,7 @@ class OrderStatus(BaseModel):
         default=None,
         description="IBKR permId assigned after submission.",
     )
-    status: Literal["PENDING_APPROVAL", "QUEUED", "SUBMITTED", "PARTIAL", "FILLED", "CANCELLED", "REJECTED"] = Field(
+    status: Literal["PENDING_APPROVAL", "QUEUED", "SUBMITTED", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "TIMEOUT", "PARTIAL_FILLED"] = Field(
         description="Current lifecycle state of the order."
     )
     total_filled_qty: float = Field(default=0.0, description="Cumulative filled quantity so far.")

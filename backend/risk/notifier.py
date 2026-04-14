@@ -41,8 +41,20 @@ def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
 
     # ── 1. Upsert every alert to risk_alerts table ────────────────────────────
     rows = [_alert_to_row(a) for a in alerts]
-    supabase_client.table("risk_alerts").upsert(rows, on_conflict="id").execute()
-    logger.info("dispatched %d alert(s) to Supabase", len(alerts))
+    for row in rows:
+        logger.info(
+            "writing alert → id=%s ticker=%s severity=%s tier=%d trigger=%r",
+            row["id"], row.get("ticker", "portfolio"), row["severity"], row["tier"], row["trigger"],
+        )
+    try:
+        db_resp = supabase_client.table("risk_alerts").upsert(rows, on_conflict="id").execute()
+        logger.info(
+            "Supabase upsert OK — %d alert(s) written, rows_returned=%d",
+            len(rows), len(db_resp.data or []),
+        )
+    except Exception as exc:
+        logger.error("Supabase upsert FAILED for risk_alerts: %s", exc, exc_info=True)
+        raise
 
     # ── 2. Push BREACH / CRITICAL to Slack ────────────────────────────────────
     push_alerts = [a for a in alerts if _severity(a) in _PUSH_SEVERITIES]

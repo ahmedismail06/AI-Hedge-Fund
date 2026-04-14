@@ -23,6 +23,7 @@ class StopEvent(BaseModel):
     pct_move: float                       # pnl_pct at time of trigger (negative = loss)
     regime: str                           # macro regime at time of check
     sector: Optional[str] = None          # populated for Tier 2 events
+    approaching: bool = False             # True when approaching stop (WARN) vs breached
 
 
 class ExposureBreach(BaseModel):

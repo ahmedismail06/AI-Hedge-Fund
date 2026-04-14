@@ -231,7 +231,11 @@ create index if not exists portfolio_metrics_date_idx on portfolio_metrics (date
 -- Tracks IBKR order lifecycle from placement to fill/cancel.
 -- One order per APPROVED position (re-created on retry after timeout).
 -- order_type allowed values: 'LIMIT' | 'VWAP_30' | 'VWAP_DAY'
--- status allowed values: 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'PARTIAL' | 'FILLED' | 'CANCELLED' | 'REJECTED'
+-- status allowed values: 'PENDING_APPROVAL' | 'QUEUED' | 'SUBMITTED' | 'PARTIAL' | 'FILLED'
+--                        | 'CANCELLED' | 'REJECTED' | 'TIMEOUT' | 'PARTIAL_FILLED'
+-- TIMEOUT       — order expired with zero fills; position reverts to APPROVED for retry
+-- PARTIAL_FILLED — order expired but ≥1 share filled; position opens at filled qty
+-- REJECTED      — IBKR explicitly rejected the order (error callback); not used for timeouts
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create table if not exists orders (
@@ -245,7 +249,7 @@ create table if not exists orders (
     ibkr_order_id       integer,
     ibkr_client_id      integer,
     status              text not null default 'PENDING_APPROVAL'
-                            check (status in ('PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'REJECTED')),
+                            check (status in ('PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'REJECTED', 'TIMEOUT', 'PARTIAL_FILLED')),
     total_filled_qty    numeric(10, 2) not null default 0,
     avg_fill_price      numeric(12, 4),
     submitted_at        timestamptz,
@@ -368,3 +372,22 @@ as $$
     order by dc.embedding <=> query_embedding
     limit match_count;
 $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- orders status constraint migration (2026-04-14)
+-- Adds TIMEOUT and PARTIAL_FILLED to the orders.status check constraint.
+-- TIMEOUT       — order expired with zero fills; position reverts to APPROVED for retry.
+-- PARTIAL_FILLED — order expired but ≥1 share filled; position opens at filled qty.
+-- REJECTED is reserved for IBKR explicit rejections, NOT timeouts.
+-- Safe to re-run: DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT is idempotent.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table orders
+    drop constraint if exists orders_status_check;
+
+alter table orders
+    add constraint orders_status_check
+    check (status in (
+        'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'PARTIAL', 'FILLED',
+        'CANCELLED', 'REJECTED', 'TIMEOUT', 'PARTIAL_FILLED'
+    ));
