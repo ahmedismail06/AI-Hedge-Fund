@@ -231,6 +231,7 @@ def _upsert_position(rec: dict) -> None:
 async def run_portfolio_sizing(
     memo_id: str,
     portfolio_value: Optional[float] = None,
+    auto_approve: bool = False,
 ) -> SizingRecommendation:
     """
     Run the 5-phase portfolio sizing pipeline for a completed InvestmentMemo.
@@ -242,6 +243,9 @@ async def run_portfolio_sizing(
     portfolio_value:
         Current total portfolio NAV in USD.  If None or <= 0, reads the
         PORTFOLIO_VALUE env-var; defaults to $25,000.
+    auto_approve:
+        If True, write the position directly as APPROVED (PM has already
+        decided EXECUTE).  If False, write as PENDING_APPROVAL (legacy path).
 
     Returns
     -------
@@ -437,7 +441,7 @@ async def run_portfolio_sizing(
         sector=sector,
         regime_at_sizing=regime,
         portfolio_state_after=portfolio_state_after,
-        status="PENDING_APPROVAL",
+        status="APPROVED" if auto_approve else "PENDING_APPROVAL",
     )
 
     # ── Compute 3-tier stops from entry price + regime ────────────────────────
@@ -486,7 +490,7 @@ async def run_portfolio_sizing(
         "sector":                 sector,
         "regime_at_sizing":       regime,
         "portfolio_state_after":  portfolio_state_after.model_dump(),
-        "status":                 "PENDING_APPROVAL",
+        "status":                 "APPROVED" if auto_approve else "PENDING_APPROVAL",
     })
 
     logger.info(
