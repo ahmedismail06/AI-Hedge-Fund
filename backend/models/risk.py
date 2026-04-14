@@ -17,6 +17,8 @@ class RiskAlert(BaseModel):
     trigger: str  # human-readable description of what was breached
     regime: str  # macro regime at time of alert (tightened in Risk-Off)
     resolved: bool = False
+    severity: Optional[Literal["WARN", "BREACH", "CRITICAL"]] = None
+    resolved_at: Optional[str] = None  # ISO datetime when resolved
 
 
 class PortfolioMetrics(BaseModel):

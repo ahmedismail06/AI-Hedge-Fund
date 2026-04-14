@@ -81,6 +81,15 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
     cash       = fmp_data.get("cash") or 0.0
     ttm_cfo    = fmp_data.get("ttm_operating_cash_flow")
 
+    # Warn when market_cap comes from a stale reference endpoint — EV multiples
+    # may be directionally off if the price moved significantly since the filing.
+    market_cap_source = fmp_data.get("market_cap_source")
+    if market_cap_source == "polygon_reference":
+        logger.debug(
+            "%s: market_cap_source='polygon_reference' — EV multiples may use stale data",
+            ticker,
+        )
+
     # ── Enterprise Value ──────────────────────────────────────────────────────
     ev: Optional[float] = None
     if market_cap is not None:
@@ -107,11 +116,23 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
 
     # ── P/FCF ─────────────────────────────────────────────────────────────────
     p_fcf: Optional[float] = None
+    ocf_annualized: bool = bool(fmp_data.get("ocf_annualized", False))
     if market_cap is not None and ttm_cfo is not None:
         capex = fin.get("capex")
         fcf = ttm_cfo - abs(capex) if capex is not None else ttm_cfo
         if fcf and fcf > 0:
-            p_fcf = market_cap / fcf
+            raw_p_fcf = market_cap / fcf
+            if ocf_annualized:
+                # Single-quarter annualisation overstates OCF for seasonal businesses.
+                # Apply a 33% haircut (P/FCF 33% worse than naive) as a conservative
+                # proxy for the distortion. Stored in raw_factors for audit visibility.
+                p_fcf = raw_p_fcf * 1.33
+                logger.debug(
+                    "%s: ocf_annualized=True — p/fcf haircut applied: %.1f → %.1f",
+                    ticker, raw_p_fcf, p_fcf,
+                )
+            else:
+                p_fcf = raw_p_fcf
 
     # ── Price/Book ────────────────────────────────────────────────────────────
     price_book: Optional[float] = None
@@ -121,12 +142,13 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
         price_book = market_cap / book_value
 
     raw_values = {
-        "ev_multiple":   ev_multiple,
-        "p_fcf":         p_fcf,
-        "price_book":    price_book,
-        "ev_type":       ev_type,
-        "ev":            ev,
-        "is_profitable": is_profitable,
+        "ev_multiple":    ev_multiple,
+        "p_fcf":          p_fcf,
+        "price_book":     price_book,
+        "ev_type":        ev_type,
+        "ev":             ev,
+        "is_profitable":  is_profitable,
+        "ocf_annualized": ocf_annualized,  # True = single-quarter OCF; 33% P/FCF haircut applied
     }
 
     logger.debug(

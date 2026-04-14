@@ -84,7 +84,7 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 
     # ── 2. Refresh current prices ─────────────────────────────────────────────
     tickers = list({p["ticker"] for p in positions if p.get("ticker")})
-    positions = _refresh_prices(positions, tickers)
+    positions = _refresh_prices(positions, tickers, supabase_client)
 
     # ── 3. Check stops ────────────────────────────────────────────────────────
     stop_events = check_stops(positions, regime)
@@ -118,11 +118,15 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _refresh_prices(positions: list[dict], tickers: list[str]) -> list[dict]:
+def _refresh_prices(
+    positions: list[dict], tickers: list[str], supabase_client=None
+) -> list[dict]:
     """
-    Batch-fetch latest prices from Polygon snapshot endpoint and update
-    pnl_pct on each position. Positions with no Polygon data are left
-    unchanged (stale price).
+    Batch-fetch latest prices from Polygon snapshot endpoint, update pnl_pct
+    on each position in memory, and persist current_price + pnl_pct back to
+    Supabase so stop-loss checks survive agent restarts.
+
+    Positions with no Polygon data are left unchanged (stale price).
 
     Uses /v2/snapshot/locale/us/markets/stocks/tickers (batch, one call).
     Prefers lastTrade.p (real-time during market hours), falls back to
@@ -172,6 +176,26 @@ def _refresh_prices(positions: list[dict], tickers: list[str]) -> list[dict]:
                     pos["pnl_pct"] = (current_price - ep) / ep if ep else 0.0
                 except (TypeError, ValueError):
                     pass
+
+            # Persist current_price and pnl_pct so stop-loss checks survive
+            # agent restarts. Guard on pos_id to skip malformed test dicts.
+            if supabase_client:
+                pos_id = pos.get("id")
+                if pos_id:
+                    try:
+                        supabase_client.table("positions").update({
+                            "current_price": round(current_price, 4),
+                            "pnl_pct": round(pos.get("pnl_pct", 0.0), 6),
+                        }).eq("id", pos_id).execute()
+                    except Exception as _persist_exc:
+                        logger.debug(
+                            "pnl_pct persist failed for %s: %s", ticker, _persist_exc
+                        )
+                else:
+                    logger.debug(
+                        "_refresh_prices: position dict missing 'id' for %s — skipping persist",
+                        ticker,
+                    )
         updated.append(pos)
 
     return updated

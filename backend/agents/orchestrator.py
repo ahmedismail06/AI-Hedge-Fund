@@ -1604,7 +1604,7 @@ def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None
     today_str = date.today().isoformat()
     priority = 1 if is_held else 2
     try:
-        client.table("watchlist").update(
+        result = client.table("watchlist").update(
             {
                 "material_event": True,
                 "material_event_reason": reason,
@@ -1612,9 +1612,20 @@ def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None
                 "priority": priority,
             }
         ).eq("ticker", ticker).eq("run_date", today_str).execute()
-        logger.info(
-            "_set_material_event(%s): reason='%s' priority=%d", ticker, reason, priority
-        )
+        if result.data:
+            logger.info(
+                "_set_material_event(%s): reason='%s' priority=%d rows_updated=%d",
+                ticker, reason, priority, len(result.data),
+            )
+        else:
+            # No watchlist row for today — held ticker not in today's screen run.
+            # The material_event flag cannot be set without a matching run_date row.
+            # The operator should run the screener or set the flag manually via Dashboard.
+            logger.warning(
+                "_set_material_event(%s): no watchlist row for run_date=%s — "
+                "material_event NOT persisted. Ticker may not be in today's screen.",
+                ticker, today_str,
+            )
     except Exception as exc:
         logger.warning("_set_material_event(%s): failed — %s", ticker, exc)
 
