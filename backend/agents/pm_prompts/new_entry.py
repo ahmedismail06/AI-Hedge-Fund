@@ -95,18 +95,22 @@ def build_new_entry_prompt(
         if p.get("sector") == memo_sector
     ]
 
+    nav_usd = float(base_ctx.get("portfolio_value_usd") or 0)
+    nav_display = f"${nav_usd:,.0f}" if nav_usd > 0 else "unknown"
+
     user_message = f"""## Decision Required: New Position Entry
 
 ### Investment Memo
 {json.dumps(memo_slim, indent=2, default=str)}
 
 ### Sizing Recommendation (Kelly-derived, 25% fractional)
-{json.dumps(sizing_rec, indent=2, default=str) if sizing_rec else "null — no PENDING_APPROVAL position row found; use MODIFY_SIZE with your own dollar_amount if you decide to EXECUTE"}
+{json.dumps(sizing_rec, indent=2, default=str) if sizing_rec else f"null — no PENDING_APPROVAL position row found; use MODIFY_SIZE with your own dollar_amount if you decide to EXECUTE. Hard cap: max dollar_amount = ${nav_usd * 0.15:,.0f} (15% of {nav_display} NAV)"}
 
 ### Current Portfolio State
+- Portfolio NAV: {nav_display}
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
-- Cash available: {base_ctx['cash_pct']:.1%}
+- Cash available: {base_ctx['cash_pct']:.1%} (≈ ${nav_usd * base_ctx['cash_pct']:,.0f})
 - Open positions: {base_ctx['position_count']}
 - Macro regime: {base_ctx['macro_regime']}
 - Regime gross cap: {base_ctx['regime_caps']['gross']:.0%} | Net cap: {base_ctx['regime_caps']['net']:.0%}

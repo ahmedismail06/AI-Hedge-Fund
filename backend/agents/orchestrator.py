@@ -532,11 +532,20 @@ def _update_memo_after_decision(ticker: str, decision: str, memo_id: Optional[st
 
 # ── Decision routing ──────────────────────────────────────────────────────────
 
-def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, Any]) -> str:
+def _route_decision(
+    decision_data: Dict[str, Any],
+    decision_record: Dict[str, Any],
+    portfolio_value: Optional[float] = None,
+) -> str:
     """
     After Claude decides, route the action to the appropriate Supabase update.
     Returns the final execution_status string.
+
+    portfolio_value: NAV to pass to run_portfolio_sizing so sizing and the hard
+    block both use the same number.  If None, falls back to _compute_portfolio_value().
     """
+    if portfolio_value is None or portfolio_value <= 0:
+        portfolio_value = _compute_portfolio_value()
     decision = decision_data.get("decision", "NO_ACTION")
     category = decision_record.get("category", "")
     ticker = decision_record.get("ticker")
@@ -552,7 +561,7 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id))
+                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
                     # portfolio_agent writes the position as PENDING_APPROVAL; promote to APPROVED.
                     client.table("positions").update({"status": "APPROVED"}).eq(
                         "ticker", ticker
@@ -573,7 +582,7 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id))
+                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id, portfolio_value=portfolio_value))
                     update: Dict[str, Any] = {"status": "APPROVED"}
                     if new_shares:
                         update["share_count"] = new_shares
@@ -835,6 +844,7 @@ def run_pm_cycle(
     # ── Step 3: Build base context ────────────────────────────────────────────
     from backend.agents.pm_prompts.base_context import build_base_context
     base_ctx = build_base_context(_get_client())
+    base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
 
     # ── Step 3b: Event-driven research triggers (market hours only) ───────────
     try:
@@ -1004,7 +1014,7 @@ def run_pm_cycle(
 
             # Route decision (actual Supabase updates — positions/config)
             if mode == "autonomous" and _is_market_open():
-                execution_status = _route_decision(decision_data, record_template)
+                execution_status = _route_decision(decision_data, record_template, portfolio_value=base_ctx.get("portfolio_value_usd"))
             elif mode == "supervised":
                 execution_status = "PENDING_HUMAN"
             else:
