@@ -1594,24 +1594,29 @@ def _check_intraday_move(ticker: str) -> bool:
         return False
 
 
-def _check_earnings_just_dropped(client, ticker: str) -> bool:
-    """Return True if an earnings call document became available today."""
+def _bulk_earnings_dropped_today(client, tickers: set[str]) -> set[str]:
+    """Return the subset of tickers that have an earnings call document available today.
+
+    Single query against ticker_events using an in_() filter — O(1) round trips
+    regardless of universe size.
+    """
+    if not tickers:
+        return set()
     try:
         today_str = date.today().isoformat()
         result = (
             client.table("ticker_events")
-            .select("id")
-            .eq("ticker", ticker)
+            .select("ticker")
+            .in_("ticker", list(tickers))
             .eq("event_type", "earnings_call")
             .eq("event_date", today_str)
             .eq("document_available", True)
-            .limit(1)
             .execute()
         )
-        return bool(result.data)
+        return {row["ticker"] for row in (result.data or [])}
     except Exception as exc:
-        logger.warning("_check_earnings_just_dropped(%s): failed — %s", ticker, exc)
-        return False
+        logger.warning("_bulk_earnings_dropped_today: failed — %s", exc)
+        return set()
 
 
 def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None:
@@ -1694,11 +1699,14 @@ def _scan_event_triggers() -> None:
     if not tickers_to_check:
         return
 
+    # Bulk-fetch which tickers have earnings available today — one query for all.
+    earnings_dropped = _bulk_earnings_dropped_today(client, tickers_to_check)
+
     for ticker in tickers_to_check:
         is_held = ticker in open_tickers
         trigger_reason: str | None = None
 
-        if _check_earnings_just_dropped(client, ticker):
+        if ticker in earnings_dropped:
             trigger_reason = "earnings_call_available"
         elif _check_news_spike(ticker):
             trigger_reason = "news_volume_spike"
