@@ -54,6 +54,10 @@ _last_cycle_state: Dict[str, Any] = {
     "timestamp": None,
 }
 
+# ── DEPLOY_CASH cooldown — prevents re-triggering the pipeline every 30 min ──
+_DEPLOY_CASH_COOLDOWN_SECONDS = 14400  # 4 hours
+_deploy_cash_triggered_at: Optional[datetime] = None
+
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -227,6 +231,57 @@ def _handle_empty_portfolio_deploy(
         "detail": detail,
         "decisions_made": [],
     }
+
+
+def _trigger_deploy_cash_pipeline() -> str:
+    """
+    Trigger the research/screener pipeline when Claude decides DEPLOY_CASH in a
+    REBALANCE context (non-empty portfolio).  Mirrors _handle_empty_portfolio_deploy
+    but is called from _route_decision rather than the pre-Claude fast path.
+
+    Returns a short description of the action taken.
+    """
+    global _deploy_cash_triggered_at
+
+    today_str = date.today().isoformat()
+    top_tickers: List[str] = []
+    try:
+        resp = (
+            _get_client()
+            .table("watchlist")
+            .select("ticker,composite_score")
+            .eq("run_date", today_str)
+            .eq("queued_for_research", False)
+            .order("composite_score", desc=True)
+            .limit(3)
+            .execute()
+        )
+        top_tickers = [row["ticker"] for row in (resp.data or [])]
+    except Exception as exc:
+        logger.warning("_trigger_deploy_cash_pipeline: watchlist query failed — %s", exc)
+
+    if top_tickers:
+        try:
+            _get_client().table("watchlist").update({"queued_for_research": True}).in_(
+                "ticker", top_tickers
+            ).eq("run_date", today_str).execute()
+        except Exception as exc:
+            logger.error("_trigger_deploy_cash_pipeline: failed to set queued_for_research — %s", exc)
+        try:
+            _trigger_research_queue()
+        except Exception as exc:
+            logger.error("_trigger_deploy_cash_pipeline: research queue trigger failed — %s", exc)
+        detail = f"queued_research: {top_tickers}"
+    else:
+        try:
+            _trigger_screener()
+        except Exception as exc:
+            logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
+        detail = "triggered_screener (no unqueued watchlist candidates for today)"
+
+    _deploy_cash_triggered_at = datetime.now(timezone.utc)
+    logger.info("PM: DEPLOY_CASH pipeline action — %s", detail)
+    return detail
 
 
 # ── Portfolio value (NAV) ─────────────────────────────────────────────────────
@@ -659,7 +714,18 @@ def _route_decision(
 
     if decision == "NO_ACTION":
         return "NO_ACTION"
-    if decision in ("HOLD", "MONITOR", "DEPLOY_CASH"):
+    if decision in ("HOLD", "MONITOR"):
+        return "NO_ACTION"
+    if decision == "DEPLOY_CASH":
+        if category == "REBALANCE":
+            detail = _trigger_deploy_cash_pipeline()
+            _log_event(
+                "DEPLOY_CASH_ACTION",
+                "PM",
+                detail,
+                mode_snapshot=decision_record.get("context_snapshot", {}).get("macro_regime", ""),
+            )
+            return "TRIGGERED_PIPELINE"
         return "NO_ACTION"
 
     return "DEFERRED"
@@ -759,11 +825,26 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Change 1: skip when there is no inventory — an empty portfolio with no
     # pending candidates cannot be rebalanced; Claude would only return
     # DEPLOY_CASH → NO_ACTION and waste tokens.
+    # Also skip if DEPLOY_CASH was triggered within the 4-hour cooldown window —
+    # the pipeline is already running; there is nothing else to do until it produces memos.
     open_positions = base_ctx.get("positions", [])
     new_entry_candidates = [i for i in items if i["category"] == "NEW_ENTRY"]
     if not open_positions and not new_entry_candidates:
         logger.debug(
             "_scan_actionable_items: skipping REBALANCE — no open positions and no pending memos"
+        )
+        items.sort(key=lambda x: x["priority"])
+        return items
+
+    if (
+        _deploy_cash_triggered_at is not None
+        and (datetime.now(timezone.utc) - _deploy_cash_triggered_at).total_seconds()
+        < _DEPLOY_CASH_COOLDOWN_SECONDS
+    ):
+        logger.debug(
+            "_scan_actionable_items: skipping REBALANCE — DEPLOY_CASH pipeline triggered %.0f min ago (cooldown %d h)",
+            (datetime.now(timezone.utc) - _deploy_cash_triggered_at).total_seconds() / 60,
+            _DEPLOY_CASH_COOLDOWN_SECONDS // 3600,
         )
         items.sort(key=lambda x: x["priority"])
         return items
