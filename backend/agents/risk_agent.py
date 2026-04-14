@@ -20,7 +20,7 @@ from supabase import Client, create_client
 
 from backend.models.risk import PortfolioMetrics
 from backend.risk.metrics import compute_nightly_metrics
-from backend.risk.monitor import run_monitor_cycle
+from backend.risk.monitor import run_monitor_cycle, write_heartbeat
 
 load_dotenv()
 
@@ -68,6 +68,21 @@ def _read_macro_regime(supabase: Client) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 # Public entry points
 # ──────────────────────────────────────────────────────────────────────────────
+
+def startup_heartbeat() -> bool:
+    """
+    Write a heartbeat row to risk_alerts to confirm Supabase connectivity.
+    Call once from backend/main.py lifespan startup.
+
+    Returns True if successful (table reachable), False otherwise.
+    """
+    try:
+        supabase = _get_supabase()
+        return write_heartbeat(supabase)
+    except Exception as exc:
+        logger.error("startup_heartbeat failed: %s", exc)
+        return False
+
 
 async def run_risk_monitor() -> dict:
     """

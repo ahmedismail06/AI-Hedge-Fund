@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Custom exception
 # ──────────────────────────────────────────────────────────────────────────────
 
-TERMINAL_STATUSES = {"FILLED", "CANCELLED", "REJECTED"}
+TERMINAL_STATUSES = {"FILLED", "CANCELLED", "REJECTED", "TIMEOUT", "PARTIAL_FILLED"}
 
 
 class OrderManagerError(Exception):
@@ -288,21 +288,41 @@ def check_timeouts() -> List[str]:
                     exc,
                 )
 
-        # 2b. Mark REJECTED in Supabase (timed out without fill).
+        # 2b. Choose terminal status based on actual fills received.
+        #
+        # PARTIAL_FILLED — timed out but ≥1 share filled; execution_agent will
+        #                  open the position at the filled quantity.
+        # TIMEOUT        — zero fills; execution_agent will revert to APPROVED
+        #                  so the next cycle can retry.
+        # REJECTED is reserved for IBKR explicit rejections (error callbacks),
+        # NOT for orders that expired.
+        total_filled: float = float(order.get("total_filled_qty") or 0)
+        now_iso = datetime.utcnow().isoformat()
+
+        if total_filled > 0:
+            new_status = "PARTIAL_FILLED"
+            update_data: dict = {"status": "PARTIAL_FILLED", "filled_at": now_iso}
+            logger.warning(
+                "Order %s timed out with partial fill (%.0f shares) → PARTIAL_FILLED (position %s)",
+                order_id, total_filled, position_id,
+            )
+        else:
+            new_status = "TIMEOUT"
+            update_data = {"status": "TIMEOUT"}
+            logger.warning(
+                "Order %s timed out with zero fills → TIMEOUT (position %s will be reverted to APPROVED)",
+                order_id, position_id,
+            )
+
         try:
-            _get_client().table("orders").update({"status": "REJECTED"}).eq(
-                "id", order_id
-            ).execute()
+            _get_client().table("orders").update(update_data).eq("id", order_id).execute()
         except Exception as exc:
             logger.error(
-                "Supabase update to REJECTED failed (order_id=%s): %s", order_id, exc
+                "Supabase update to %s failed (order_id=%s): %s", new_status, order_id, exc
             )
             # Continue processing remaining expired orders.
             continue
 
-        logger.warning(
-            "Order %s timed out for position %s", order_id, position_id
-        )
         timed_out_position_ids.append(position_id)
 
     return timed_out_position_ids
