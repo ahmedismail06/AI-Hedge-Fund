@@ -540,41 +540,52 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
     decision = decision_data.get("decision", "NO_ACTION")
     category = decision_record.get("category", "")
     ticker = decision_record.get("ticker")
+    memo_id = decision_record.get("memo_id")
 
     try:
         client = _get_client()
 
         if category == "NEW_ENTRY" and decision == "EXECUTE":
-            # Approve the PENDING_APPROVAL position so the execution agent picks it up.
+            # Run portfolio sizing now that the PM has approved the entry.
             # Memo status is already set to APPROVED by _update_memo_after_decision.
-            if ticker:
-                resp = (
-                    client.table("positions")
-                    .update({"status": "APPROVED"})
-                    .eq("ticker", ticker)
-                    .eq("status", "PENDING_APPROVAL")
-                    .execute()
-                )
-                if resp.data:
-                    logger.info("PM: EXECUTE approved position for %s", ticker)
+            if ticker and memo_id:
+                try:
+                    from backend.agents.portfolio_agent import run_portfolio_sizing
+                    import asyncio as _asyncio
+                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id))
+                    # portfolio_agent writes the position as PENDING_APPROVAL; promote to APPROVED.
+                    client.table("positions").update({"status": "APPROVED"}).eq(
+                        "ticker", ticker
+                    ).eq("status", "PENDING_APPROVAL").execute()
+                    logger.info("PM: EXECUTE — sized and approved position for %s", ticker)
                     return "SENT_TO_EXECUTION"
+                except Exception as exc:
+                    logger.warning("PM: EXECUTE sizing failed for %s — %s", ticker, exc)
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "MODIFY_SIZE":
-            # Approve and resize the pending position.
+            # Size the position with PM's override values, then approve it.
             # Memo status is already set to APPROVED by _update_memo_after_decision.
             action = decision_data.get("action_details", {})
             new_dollar = action.get("dollar_amount")
             new_shares = action.get("shares")
-            if ticker and (new_dollar or new_shares):
-                update: Dict[str, Any] = {"status": "APPROVED"}
-                if new_shares:
-                    update["share_count"] = new_shares
-                client.table("positions").update(update).eq("ticker", ticker).eq(
-                    "status", "PENDING_APPROVAL"
-                ).execute()
-                logger.info("PM: MODIFY_SIZE approved modified position for %s", ticker)
-                return "SENT_TO_EXECUTION"
+            if ticker and memo_id:
+                try:
+                    from backend.agents.portfolio_agent import run_portfolio_sizing
+                    import asyncio as _asyncio
+                    _asyncio.run(run_portfolio_sizing(memo_id=memo_id))
+                    update: Dict[str, Any] = {"status": "APPROVED"}
+                    if new_shares:
+                        update["share_count"] = new_shares
+                    if new_dollar:
+                        update["dollar_amount"] = new_dollar
+                    client.table("positions").update(update).eq("ticker", ticker).eq(
+                        "status", "PENDING_APPROVAL"
+                    ).execute()
+                    logger.info("PM: MODIFY_SIZE — sized and approved position for %s", ticker)
+                    return "SENT_TO_EXECUTION"
+                except Exception as exc:
+                    logger.warning("PM: MODIFY_SIZE sizing failed for %s — %s", ticker, exc)
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "DEFER":
@@ -983,9 +994,13 @@ def run_pm_cycle(
 
             # Always update memo status so this memo is not re-evaluated next cycle
             final_decision = decision_data.get("decision", decision)
+            memo_id: Optional[str] = None
             if category == "NEW_ENTRY" and ticker:
                 memo_id = data.get("memo", {}).get("id")
                 _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
+
+            # Pass memo_id into record_template so _route_decision can use it
+            record_template["memo_id"] = memo_id
 
             # Route decision (actual Supabase updates — positions/config)
             if mode == "autonomous" and _is_market_open():
