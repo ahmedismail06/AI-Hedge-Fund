@@ -1425,6 +1425,8 @@ def create_orchestrator_scheduler():
     )
 
     # Macro Agent — 07:00 ET Mon–Fri
+    # misfire_grace_time=3600: only catch up if server restarted within 1 hour of 7AM.
+    # Without this, APScheduler fires missed cron jobs immediately on any server restart.
     scheduler.add_job(
         _trigger_macro_agent,
         trigger=CronTrigger(
@@ -1433,6 +1435,7 @@ def create_orchestrator_scheduler():
         id="pm_trigger_macro",
         name="PM → Macro Agent (7AM ET)",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     # Screener — 16:00 ET Mon–Fri
@@ -1444,6 +1447,7 @@ def create_orchestrator_scheduler():
         id="pm_trigger_screener",
         name="PM → Screener (4PM ET)",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     # Research queue — 16:30 ET Mon–Fri
@@ -1455,6 +1459,7 @@ def create_orchestrator_scheduler():
         id="pm_trigger_research",
         name="PM → Research Queue (4:30PM ET)",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     # Ticker events calendar refresh — 16:15 ET Mon–Fri
@@ -1468,6 +1473,7 @@ def create_orchestrator_scheduler():
         id="pm_ticker_events_refresh",
         name="PM → Ticker Events Calendar Refresh (4:15PM ET)",
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     return scheduler
