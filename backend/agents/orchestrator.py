@@ -490,12 +490,15 @@ _DECISION_TO_MEMO_STATUS = {
 }
 
 
-def _update_memo_after_decision(ticker: str, decision: str) -> None:
+def _update_memo_after_decision(ticker: str, decision: str, memo_id: Optional[str] = None) -> None:
     """Set memos.status to reflect the PM's decision so the row is not re-evaluated.
 
     Called unconditionally after every Claude call regardless of mode (autonomous /
     supervised / market-closed).  Only touches NEW_ENTRY decisions; other categories
     (EXIT_TRIM, REBALANCE, etc.) are not memo-driven.
+
+    Filters by memo_id when available (preferred) to avoid updating the wrong memo
+    when a ticker has multiple rows in PENDING_PM_REVIEW simultaneously.
 
     For DEFER also sets deferred_until = NOW() + 24h so a future staleness gate
     can re-queue the ticker when the deferral window expires.
@@ -511,9 +514,13 @@ def _update_memo_after_decision(ticker: str, decision: str) -> None:
                 datetime.now(timezone.utc) + timedelta(hours=24)
             ).isoformat()
 
-        _get_client().table("memos").update(update).eq(
-            "ticker", ticker
-        ).eq("status", "PENDING_PM_REVIEW").execute()
+        q = _get_client().table("memos").update(update)
+        if memo_id:
+            q = q.eq("id", memo_id).eq("status", "PENDING_PM_REVIEW")
+        else:
+            # Fallback: filter by ticker (less precise but safe for single-memo tickers)
+            q = q.eq("ticker", ticker).eq("status", "PENDING_PM_REVIEW")
+        q.execute()
 
         logger.info("_update_memo_after_decision: %s → memos.status=%s", ticker, memo_status)
     except Exception as exc:
@@ -589,16 +596,15 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
 
         elif category == "EXIT_TRIM" and decision in ("TRIM", "CLOSE"):
             if ticker:
-                # Mark the OPEN position as APPROVED for exit (execution agent handles it)
-                # We add an exit_action field to action_details so execution agent knows
                 update = {
                     "exit_action": decision,
                     "exit_trim_pct": decision_data.get("action_details", {}).get("trim_pct"),
                 }
-                # Use a pm_exit_requested flag if the positions table supports it,
-                # otherwise log and let human see it in the decision feed
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
                 logger.info(
-                    "PM: %s decision for %s — routing to execution review",
+                    "PM: %s decision for %s — exit_action written to positions",
                     decision,
                     ticker,
                 )
@@ -615,7 +621,7 @@ def _route_decision(decision_data: Dict[str, Any], decision_record: Dict[str, An
             }).eq("id", 1).execute()
             logger.warning("PM: CRISIS — halting new entries for 4 hours")
             notify_event("CRISIS_MODE", {
-                "daily_loss_pct": action_details.get("daily_loss_pct", "—") if isinstance(action_details, dict) else "—",
+                "daily_loss_pct": decision_data.get("action_details", {}).get("daily_loss_pct", "—"),
                 "duration": "4 hours",
             })
             return "SENT_TO_EXECUTION"
@@ -978,7 +984,8 @@ def run_pm_cycle(
             # Always update memo status so this memo is not re-evaluated next cycle
             final_decision = decision_data.get("decision", decision)
             if category == "NEW_ENTRY" and ticker:
-                _update_memo_after_decision(ticker, final_decision)
+                memo_id = data.get("memo", {}).get("id")
+                _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
 
             # Route decision (actual Supabase updates — positions/config)
             if mode == "autonomous" and _is_market_open():
@@ -1800,9 +1807,9 @@ def _refresh_ticker_events_calendar() -> None:
 
 
 def _trigger_macro_agent() -> None:
-    from backend.macro.scheduler import run_macro_agent
+    from backend.agents.macro_agent import run_macro_pipeline
     try:
-        asyncio.run(run_macro_agent())
+        run_macro_pipeline()
     except Exception as exc:
         logger.error("PM scheduler: macro agent trigger failed — %s", exc)
 
