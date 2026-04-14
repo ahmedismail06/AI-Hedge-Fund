@@ -1530,7 +1530,7 @@ def _build_update_synthesis_message(
     articles = new_news.get("articles", [])
     if articles:
         for a in articles[:10]:
-            lines.append(f"• [{a.get('published_utc', '')[:10]}] {a.get('title', '')}")
+            lines.append(f"• [{a.get('published_utc', '')[:10]}] {a.get('headline', '')}")
             if a.get("description"):
                 lines.append(f"  {a['description'][:200]}")
     else:
