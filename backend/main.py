@@ -24,9 +24,6 @@ from backend.memory.vector_store import (
     get_watchlist,
     update_memo_status,
 )
-from backend.screener.scheduler import create_screener_scheduler
-from backend.macro.scheduler import create_macro_scheduler
-from backend.agents.research_scheduler import create_research_scheduler
 from backend.api.macro import router as macro_router
 from backend.api.portfolio import router as portfolio_router
 from backend.api.risk import router as risk_router
@@ -55,12 +52,9 @@ async def lifespan(app: FastAPI):
     global _screener_scheduler, _macro_scheduler, _research_scheduler
     global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler, _pm_scheduler
 
-    _screener_scheduler = create_screener_scheduler()
-    _macro_scheduler = create_macro_scheduler()
-    _research_scheduler = create_research_scheduler()
-    _screener_scheduler.start()
-    _macro_scheduler.start()
-    _research_scheduler.start()
+    # NOTE: macro (7AM), screener (4PM), research queue (4:30PM), and ticker events
+    # (4:15PM) crons are all owned by _pm_scheduler (create_orchestrator_scheduler).
+    # Do NOT start separate schedulers for these — they would fire each pipeline twice.
 
     # Risk monitor: every 60 seconds (market-hours guard is inside run_risk_monitor)
     _risk_monitor_scheduler = BackgroundScheduler()

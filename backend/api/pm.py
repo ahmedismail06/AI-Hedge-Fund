@@ -254,6 +254,33 @@ def override_decision(decision_id: str, body: OverrideRequest):
             "decision_id", decision_id
         ).execute()
 
+        # For FORCE_EXECUTE on NEW_ENTRY decisions, also flip the positions row so
+        # the execution agent picks it up (supervised-mode human approval path).
+        decision = resp.data[0]
+        if body.override_type in ("FORCE_EXECUTE", "MODIFY") and decision.get("category") == "NEW_ENTRY":
+            d_ticker = decision.get("ticker")
+            if d_ticker:
+                try:
+                    pos_resp = (
+                        _get_client()
+                        .table("positions")
+                        .select("id")
+                        .eq("ticker", d_ticker)
+                        .eq("status", "PENDING_APPROVAL")
+                        .execute()
+                    )
+                    if pos_resp.data:
+                        _get_client().table("positions").update({"status": "APPROVED"}).eq(
+                            "id", pos_resp.data[0]["id"]
+                        ).execute()
+                        logger.info(
+                            "PM override FORCE_EXECUTE: position for %s set to APPROVED", d_ticker
+                        )
+                except Exception as pos_exc:
+                    logger.warning(
+                        "PM override: failed to approve position for %s — %s", d_ticker, pos_exc
+                    )
+
         logger.info(
             "PM override: %s on decision %s — reason: %s",
             body.override_type,

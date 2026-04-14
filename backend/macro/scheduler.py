@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 async def run_macro_job() -> None:
     """
     Async wrapper for the macro pipeline. Logs start/end including regime and confidence.
+    Calls handle_regime_change on the PM orchestrator if the regime flipped.
     Never propagates exceptions — failures are logged but do not crash the scheduler.
     """
     from backend.agents.macro_agent import run_macro_pipeline, MacroAgentError
@@ -35,6 +36,21 @@ async def run_macro_job() -> None:
             briefing.regime,
             briefing.regime_confidence,
         )
+        # If the regime changed, trigger an immediate PM rebalance review
+        if getattr(briefing, "regime_changed", False):
+            try:
+                from backend.agents.orchestrator import handle_regime_change
+                await handle_regime_change(briefing.regime)
+                logger.info(
+                    "Macro job: regime change detected (%s) — PM reactive cycle triggered",
+                    briefing.regime,
+                )
+            except Exception as rc_exc:
+                logger.warning(
+                    "Macro job: handle_regime_change failed — %s "
+                    "(PM will catch regime change on next 5-min poll)",
+                    rc_exc,
+                )
     except MacroAgentError as exc:
         logger.error("Macro pipeline error: %s", exc)
     except Exception as exc:
