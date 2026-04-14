@@ -215,6 +215,15 @@ def _poll_research_queue() -> list[str]:
     for row in rows:
         ticker = row["ticker"]
 
+        # ── Staleness gate (checked BEFORE consuming daily cap quota) ────────
+        if not _needs_research(client, ticker):
+            logger.info(
+                "staleness gate: skipping %s — memo < %d days old, no material event",
+                ticker, _STALENESS_DAYS,
+            )
+            staleness_skipped.append(ticker)
+            continue
+
         # ── Daily cap check ───────────────────────────────────────────────────
         count = _get_and_increment_daily_count(client)
         if count > DAILY_RESEARCH_CAP:
@@ -224,15 +233,6 @@ def _poll_research_queue() -> list[str]:
                 DAILY_RESEARCH_CAP, ticker,
             )
             break  # remaining rows keep queued_for_research=True
-
-        # ── Staleness gate ────────────────────────────────────────────────────
-        if not _needs_research(client, ticker):
-            logger.info(
-                "staleness gate: skipping %s — memo < %d days old, no material event",
-                ticker, _STALENESS_DAYS,
-            )
-            staleness_skipped.append(ticker)
-            continue
 
         # ── Determine update_mode ─────────────────────────────────────────────
         is_held = _is_held_position(client, ticker)
@@ -279,6 +279,23 @@ def _poll_research_queue() -> list[str]:
                     "_poll_research_queue: memo %s for %s set to PENDING_PM_REVIEW",
                     memo_id, ticker,
                 )
+
+                # ── Trigger portfolio sizing so PM has a PENDING_APPROVAL row ─
+                # run_portfolio_sizing is async; _poll_research_queue runs in an
+                # executor thread (no event loop attached), so asyncio.run() is safe.
+                if memo.get("verdict") == "LONG" and float(memo.get("conviction_score") or 0) >= 5.0:
+                    try:
+                        from backend.agents.portfolio_agent import run_portfolio_sizing
+                        asyncio.run(run_portfolio_sizing(memo_id=memo_id))
+                        logger.info(
+                            "_poll_research_queue: portfolio sizing complete for %s", ticker
+                        )
+                    except Exception as sizing_exc:
+                        logger.warning(
+                            "_poll_research_queue: portfolio sizing failed for %s — %s "
+                            "(memo stays PENDING_PM_REVIEW; PM will lack sizing rec)",
+                            ticker, sizing_exc,
+                        )
             else:
                 logger.warning(
                     "_poll_research_queue: store_memo returned no id for %s — skipping PM handoff",
