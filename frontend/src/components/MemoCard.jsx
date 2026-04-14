@@ -130,32 +130,40 @@ export default function MemoCard({ memo, onStatusChange }) {
 
       {/* Action Bar */}
       <div className="flex items-center gap-3 border-t border-gray-100 bg-gray-50 px-5 py-3">
-        {status !== 'PENDING' && (
+        {status !== 'PENDING' && status !== 'PENDING_PM_REVIEW' && (
           <span className="mr-auto text-xs font-medium text-gray-500 uppercase tracking-wide">
             Status: {status}
           </span>
         )}
-        <button
-          disabled={!memoId || !!loading || status === 'APPROVED'}
-          onClick={() => handleAction('APPROVED')}
-          className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {loading === 'APPROVED' ? 'Approving…' : 'Approve'}
-        </button>
-        <button
-          disabled={!memoId || !!loading || status === 'REJECTED'}
-          onClick={() => handleAction('REJECTED')}
-          className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {loading === 'REJECTED' ? 'Rejecting…' : 'Reject'}
-        </button>
-        <button
-          disabled={!memoId || !!loading || status === 'WATCHLIST'}
-          onClick={() => handleAction('WATCHLIST')}
-          className="rounded-md bg-yellow-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-yellow-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {loading === 'WATCHLIST' ? 'Adding…' : 'Watchlist'}
-        </button>
+        {status === 'PENDING_PM_REVIEW' ? (
+          <span className="mr-auto text-xs font-medium text-blue-600 uppercase tracking-wide">
+            Queued for PM Agent
+          </span>
+        ) : (
+          <>
+            <button
+              disabled={!memoId || !!loading || status === 'APPROVED'}
+              onClick={() => handleAction('APPROVED')}
+              className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {loading === 'APPROVED' ? 'Approving…' : 'Approve'}
+            </button>
+            <button
+              disabled={!memoId || !!loading || status === 'REJECTED'}
+              onClick={() => handleAction('REJECTED')}
+              className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {loading === 'REJECTED' ? 'Rejecting…' : 'Reject'}
+            </button>
+            <button
+              disabled={!memoId || !!loading || status === 'WATCHLIST'}
+              onClick={() => handleAction('WATCHLIST')}
+              className="rounded-md bg-yellow-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-yellow-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {loading === 'WATCHLIST' ? 'Adding…' : 'Watchlist'}
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

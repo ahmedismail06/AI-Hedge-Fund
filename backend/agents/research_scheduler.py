@@ -280,22 +280,9 @@ def _poll_research_queue() -> list[str]:
                     memo_id, ticker,
                 )
 
-                # ── Trigger portfolio sizing so PM has a PENDING_APPROVAL row ─
-                # run_portfolio_sizing is async; _poll_research_queue runs in an
-                # executor thread (no event loop attached), so asyncio.run() is safe.
-                if memo.get("verdict") == "LONG" and float(memo.get("conviction_score") or 0) >= 5.0:
-                    try:
-                        from backend.agents.portfolio_agent import run_portfolio_sizing
-                        asyncio.run(run_portfolio_sizing(memo_id=memo_id))
-                        logger.info(
-                            "_poll_research_queue: portfolio sizing complete for %s", ticker
-                        )
-                    except Exception as sizing_exc:
-                        logger.warning(
-                            "_poll_research_queue: portfolio sizing failed for %s — %s "
-                            "(memo stays PENDING_PM_REVIEW; PM will lack sizing rec)",
-                            ticker, sizing_exc,
-                        )
+                # Portfolio sizing is triggered by the PM agent after it decides
+                # EXECUTE — not here. The memo sits in PENDING_PM_REVIEW until
+                # the PM cycle evaluates it.
             else:
                 logger.warning(
                     "_poll_research_queue: store_memo returned no id for %s — skipping PM handoff",
