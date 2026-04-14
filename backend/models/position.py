@@ -44,3 +44,4 @@ class Position(BaseModel):
     # Metadata
     memo_id: Optional[str] = None  # FK to memos.id in Supabase
     opened_at: Optional[str] = None  # ISO datetime
+    next_earnings_date: Optional[str] = None  # ISO date YYYY-MM-DD; from portfolio_agent via fmp_data

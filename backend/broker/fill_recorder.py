@@ -195,6 +195,9 @@ def record_partial_fill_open(order_id: str) -> None:
             {
                 "status": "OPEN",
                 "entry_price": round(avg_fill_price, 4),
+                "current_price": round(avg_fill_price, 4),  # at open, current == entry
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
                 "share_count": total_filled,
                 "dollar_size": dollar_size,
                 "opened_at": datetime.utcnow().isoformat(),
@@ -346,6 +349,9 @@ def _close_position_loop(position_id: str, avg_fill_price: float) -> None:
             {
                 "status": "OPEN",
                 "entry_price": round(avg_fill_price, 4),
+                "current_price": round(avg_fill_price, 4),  # at open, current == entry
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
                 "opened_at": datetime.utcnow().isoformat(),
             }
         ).eq("id", position_id).execute()

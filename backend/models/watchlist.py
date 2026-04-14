@@ -35,3 +35,6 @@ class WatchlistEntry(BaseModel):
     insider_signal: bool = False
     regime: Optional[str] = None
     queued_for_research: bool = False
+    material_event: bool = False
+    material_event_reason: Optional[str] = None
+    priority: int = 3  # 1=held+material, 2=watchlist+material, 3=nightly, 4=manual

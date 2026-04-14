@@ -85,6 +85,38 @@ def build_exit_trim_prompt(
     pnl_pct = ((current - entry) / entry) if entry > 0 else 0.0
     pnl_dollar = (current - entry) * shares
 
+    # Extract key thesis fields from original memo (memo_json is a nested JSONB blob)
+    memo_json_blob = {}
+    if original_memo:
+        raw = original_memo.get("memo_json")
+        if isinstance(raw, dict):
+            memo_json_blob = raw
+        elif isinstance(raw, str):
+            try:
+                memo_json_blob = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Fields may also be promoted to top-level if memo was passed pre-merged
+        for k in ("variant_perception", "repricing_catalyst", "bear_thesis",
+                  "key_risks", "red_team_risks"):
+            if k not in memo_json_blob and k in original_memo:
+                memo_json_blob[k] = original_memo[k]
+
+    red_team_risks = memo_json_blob.get("red_team_risks") or []
+    top_risks = red_team_risks[:3]  # surface top 3 adversarial risks
+
+    # Build a concise thesis summary instead of dumping the full raw row
+    thesis_summary = {
+        "verdict":             original_memo.get("verdict") if original_memo else None,
+        "conviction_score":    original_memo.get("conviction_score") if original_memo else None,
+        "variant_perception":  memo_json_blob.get("variant_perception"),
+        "repricing_catalyst":  memo_json_blob.get("repricing_catalyst"),
+        "bear_thesis":         memo_json_blob.get("bear_thesis"),
+        "key_risks":           (memo_json_blob.get("key_risks") or [])[:3],
+        "valuation_note":      memo_json_blob.get("valuation_note"),
+        "macro_sensitivity":   memo_json_blob.get("macro_sensitivity"),
+    }
+
     # Stop proximity
     stop1 = position.get("stop_tier1")
     stop_proximity = None
@@ -119,8 +151,11 @@ def build_exit_trim_prompt(
 ### Active Risk Alerts for {ticker}
 {json.dumps(alerts, indent=2, default=str) if alerts else "None"}
 
-### Original Investment Memo (thesis context)
-{json.dumps(original_memo, indent=2, default=str) if original_memo else "Not available"}
+### Original Thesis (key fields from entry memo)
+{json.dumps(thesis_summary, indent=2, default=str) if original_memo else "Not available"}
+
+### Adversarial Risks (red-team from original research)
+{json.dumps(top_risks, indent=2) if top_risks else "None recorded"}
 
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
@@ -134,7 +169,7 @@ def build_exit_trim_prompt(
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
 ---
-Evaluate this position and decide whether to hold, trim, close, or add. Focus on: thesis integrity, stop proximity, current P&L, and portfolio-level fit.
+Evaluate this position and decide whether to hold, trim, close, or add. Focus on: thesis integrity, stop proximity, current P&L, adversarial risks, and portfolio-level fit.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""
 
