@@ -1276,7 +1276,10 @@ def run_pm_cycle(
                     auto_approve=auto_approve,
                 )
             else:
-                # Non-market-hours: log the decision but defer execution
+                # Non-market-hours: log the decision but defer order placement.
+                # Position SIZING (creating the DB row) is NOT market-hours-dependent —
+                # the execution agent is already market-hours gated and will place the
+                # order at the next open.  Only actual order placement needs to wait.
                 execution_status = "DEFERRED"
                 if category in ("CRISIS",):
                     # Crisis can act outside market hours (prep for next open)
@@ -1290,6 +1293,18 @@ def run_pm_cycle(
                         decision_data, record_template,
                         auto_approve=(mode == "autonomous"),
                     )
+                elif category == "NEW_ENTRY" and final_decision in ("EXECUTE", "MODIFY_SIZE"):
+                    # Create the position row now so execution agent picks it up at market open.
+                    # auto_approve=False forces PENDING_APPROVAL status — human still confirms
+                    # in supervised mode; in autonomous mode we approve but execution is deferred.
+                    execution_status = _route_decision(
+                        decision_data, record_template,
+                        portfolio_value=pv,
+                        auto_approve=(mode == "autonomous"),
+                    )
+                    # Wrap status so the log reflects after-hours context
+                    if execution_status in ("SENT_TO_EXECUTION", "PENDING_HUMAN"):
+                        execution_status = "PENDING_HUMAN"
 
             record_template["execution_status"] = execution_status
 
