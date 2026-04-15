@@ -1306,6 +1306,24 @@ def run_pm_cycle(
                     if execution_status in ("SENT_TO_EXECUTION", "PENDING_HUMAN"):
                         execution_status = "PENDING_HUMAN"
 
+                elif category in ("EXIT_TRIM", "PRE_EARNINGS") and final_decision not in (
+                    "HOLD", "NO_ACTION", "MONITOR"
+                ):
+                    # Writing exit_action to an OPEN position is a pure DB operation —
+                    # no market-hours dependency.  Execution agent is already gated.
+                    execution_status = _route_decision(
+                        decision_data, record_template,
+                        auto_approve=(mode == "autonomous"),
+                    )
+
+                elif category == "REBALANCE" and final_decision in ("REBALANCE", "RAISE_CASH"):
+                    # Trimming open positions is a pure DB write — route now so the
+                    # execution agent can act at market open.
+                    execution_status = _route_decision(
+                        decision_data, record_template,
+                        auto_approve=(mode == "autonomous"),
+                    )
+
             record_template["execution_status"] = execution_status
 
             # Embed alert_id in action_details for CRISIS deduplication
