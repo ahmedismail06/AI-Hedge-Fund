@@ -93,11 +93,11 @@ async def _fetch_ticker_quality_async(
 
 async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, dict]:
     """
-    Fetch FMP quality data for all tickers in batches of 50 with 0.5s inter-batch
-    delay to stay within the 300 req/min FMP Starter rate limit.
+    Fetch FMP quality data for all tickers in batches of 10 with a 6.0s inter-batch
+    delay to perfectly coast under the 300 req/min FMP Starter rate limit.
     """
     results: dict[str, dict] = {}
-    batch_size = 50
+    batch_size = 10  # Reduced from 50
 
     async with httpx.AsyncClient() as client:
         for start in range(0, len(tickers), batch_size):
@@ -107,7 +107,7 @@ async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, di
             for ticker, data in zip(batch, batch_results):
                 results[ticker] = data
             if start + batch_size < len(tickers):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(6.0)  # Increased from 0.5s
 
     return results
 
