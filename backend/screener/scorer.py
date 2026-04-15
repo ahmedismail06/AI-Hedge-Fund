@@ -226,6 +226,30 @@ def compute_composite(
         for ticker, score in norm.items():
             quality_normalized.setdefault(ticker, {})[sub] = score
 
+    # Pre-revenue penalty: Healthcare tickers with no revenue get 2.0 on
+    # gross_margin and revenue_growth_yoy instead of the neutral-fill 5.0.
+    # This correctly penalises pre-revenue biotech rather than treating them
+    # as median-quality businesses.
+    _PRE_REVENUE_SCORE = 2.0
+    for ticker in eligible:
+        q = raw_factor_results.get(ticker, {}).get("quality", {})
+        if not q.get("pre_revenue_flag"):
+            continue
+        ticker_sector = (
+            sectors.get(ticker)
+            or (ticker_to_cand[ticker].sector if ticker in ticker_to_cand else None)
+        )
+        if ticker_sector == "Healthcare":
+            rv = q.get("raw_values", {})
+            if rv.get("gross_margin") is None:
+                quality_normalized.setdefault(ticker, {})["gross_margin"] = _PRE_REVENUE_SCORE
+            if rv.get("revenue_growth_yoy") is None:
+                quality_normalized.setdefault(ticker, {})["revenue_growth_yoy"] = _PRE_REVENUE_SCORE
+            logger.debug(
+                "%s: pre-revenue Healthcare penalty → gm=%.1f rev_growth=%.1f",
+                ticker, _PRE_REVENUE_SCORE, _PRE_REVENUE_SCORE,
+            )
+
     # ── Step 4: Normalize — Value (sector-relative) ────────────────────────────
     value_normalized: dict[str, dict[str, float]] = {}
     for sub in _VALUE_SUB_WEIGHTS:

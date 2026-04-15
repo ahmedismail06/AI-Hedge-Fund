@@ -16,12 +16,20 @@ Fields returned:
   - net_income, net_income_flag             (Polygon income statement, validation flag)
   - long_term_debt, accounts_payable        (Polygon /vX/reference/financials)
   - market_cap                              (Polygon /v3/reference/tickers)
+
+Quality data (FMP):
+  fetch_quality_fmp_batch() fetches income statements + balance sheets for a
+  list of tickers in async batches of 50 (0.5s inter-batch delay) and is used
+  by the quality factor scorer to compute gross_margin, debt_to_equity, and
+  revenue_growth_yoy with better small-cap coverage than Polygon.
 """
 
+import asyncio
 import os
 import logging
 from datetime import date
 
+import httpx
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
@@ -29,7 +37,114 @@ from dotenv import load_dotenv
 load_dotenv()
 
 POLYGON_BASE = "https://api.polygon.io"
+FMP_BASE = "https://financialmodelingprep.com/stable"
 logger = logging.getLogger(__name__)
+
+# ── FMP Quality Data Batch Fetch ──────────────────────────────────────────────
+
+_EMPTY_QUALITY: dict = {
+    "income_statement": [],
+    "annual_income_statement": [],
+    "balance_sheet": [],
+}
+
+
+async def _fetch_ticker_quality_async(
+    client: httpx.AsyncClient,
+    ticker: str,
+    fmp_key: str,
+) -> dict:
+    """
+    Fetch FMP income statements (quarterly + annual) and balance sheet for one ticker.
+    Returns dict with keys: income_statement, annual_income_statement, balance_sheet.
+    Never raises — returns empty lists on any error.
+    """
+    result = {
+        "income_statement": [],
+        "annual_income_statement": [],
+        "balance_sheet": [],
+    }
+    sym = ticker.upper()
+
+    async def safe_get(url: str, params: dict) -> list:
+        try:
+            r = await client.get(url, params=params, timeout=15.0)
+            if r.status_code == 200:
+                data = r.json()
+                return data if isinstance(data, list) else []
+        except Exception:
+            pass
+        return []
+
+    result["income_statement"] = await safe_get(
+        f"{FMP_BASE}/income-statement",
+        {"symbol": sym, "limit": 4, "apikey": fmp_key},
+    )
+    result["annual_income_statement"] = await safe_get(
+        f"{FMP_BASE}/income-statement",
+        {"symbol": sym, "period": "annual", "limit": 2, "apikey": fmp_key},
+    )
+    result["balance_sheet"] = await safe_get(
+        f"{FMP_BASE}/balance-sheet-statement",
+        {"symbol": sym, "limit": 4, "apikey": fmp_key},
+    )
+    return result
+
+
+async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, dict]:
+    """
+    Fetch FMP quality data for all tickers in batches of 50 with 0.5s inter-batch
+    delay to stay within the 300 req/min FMP Starter rate limit.
+    """
+    results: dict[str, dict] = {}
+    batch_size = 50
+
+    async with httpx.AsyncClient() as client:
+        for start in range(0, len(tickers), batch_size):
+            batch = tickers[start: start + batch_size]
+            tasks = [_fetch_ticker_quality_async(client, t, fmp_key) for t in batch]
+            batch_results = await asyncio.gather(*tasks)
+            for ticker, data in zip(batch, batch_results):
+                results[ticker] = data
+            if start + batch_size < len(tickers):
+                await asyncio.sleep(0.5)
+
+    return results
+
+
+def fetch_quality_fmp_batch(tickers: list[str]) -> dict[str, dict]:
+    """
+    Sync entry point: batch-fetch FMP income statement + balance sheet for
+    quality factor scoring (gross_margin, debt_to_equity, revenue_growth_yoy).
+
+    Returns:
+        {ticker: {"income_statement": [...], "annual_income_statement": [...],
+                  "balance_sheet": [...]}}
+    Falls back to empty lists per ticker on missing API key or fatal error.
+    """
+    fmp_key = os.getenv("FMP_API_KEY")
+    if not fmp_key:
+        logger.warning("FMP_API_KEY not set — quality FMP data unavailable")
+        return {t: dict(_EMPTY_QUALITY) for t in tickers}
+
+    try:
+        return asyncio.run(_quality_batch_async(tickers, fmp_key))
+    except RuntimeError:
+        # asyncio.run() fails if there's already a running loop (e.g. Jupyter).
+        # Fall back to a new thread-based loop.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                lambda: asyncio.run(_quality_batch_async(tickers, fmp_key))
+            )
+            try:
+                return future.result(timeout=600)
+            except Exception as exc:
+                logger.error("FMP quality batch fetch failed: %s", exc)
+                return {t: dict(_EMPTY_QUALITY) for t in tickers}
+    except Exception as exc:
+        logger.error("FMP quality batch fetch failed: %s", exc)
+        return {t: dict(_EMPTY_QUALITY) for t in tickers}
 
 
 def fetch_fmp(ticker: str) -> dict:
