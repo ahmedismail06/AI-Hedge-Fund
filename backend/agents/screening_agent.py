@@ -30,6 +30,7 @@ from backend.screener.factors.quality import score_quality
 from backend.screener.factors.value import score_value
 from backend.screener.factors.momentum import score_momentum
 from backend.screener.scorer import ScreenerResult, compute_composite
+from backend.fetchers.fmp_fetcher import fetch_quality_fmp_batch
 from backend.memory.vector_store import _get_client
 from backend.notifications.events import notify_event
 
@@ -76,11 +77,15 @@ def _read_regime() -> str:
 
 # ── Per-ticker data fetch + factor scoring ────────────────────────────────────
 
-def _score_ticker(ticker: str, raw_data: dict) -> dict:
+def _score_ticker(ticker: str, raw_data: dict, fmp_quality: dict | None = None) -> dict:
     """
     Run all factor scorers on pre-fetched ticker data.
     Returns {ticker, quality, value, momentum, beneish, fmp}.
     Never raises.
+
+    Args:
+        fmp_quality: Pre-fetched FMP financial statements for this ticker
+                     (from fetch_quality_fmp_batch). Passed through to score_quality.
     """
     out: dict = {
         "ticker":   ticker,
@@ -92,7 +97,10 @@ def _score_ticker(ticker: str, raw_data: dict) -> dict:
         "form4":    {"insider_buy": False},
     }
     try:
-        out["quality"]  = score_quality(ticker, raw_data["polygon_financials"], raw_data["yf_info"])
+        out["quality"]  = score_quality(
+            ticker, raw_data["polygon_financials"], raw_data["yf_info"],
+            fmp_quality=fmp_quality,
+        )
     except Exception as exc:
         logger.warning("%s: quality scorer failed: %s", ticker, exc)
     try:
@@ -317,13 +325,26 @@ def run_screening(regime: str | None = None) -> list[dict]:
 
     logger.info("Universe: %d candidates", len(universe))
 
-    # Step 2: Batch-fetch all ticker data
+    # Step 2: Batch-fetch all ticker data (Polygon / yfinance)
     raw_data_map = _batch_fetch_ticker_data(universe)
+
+    # Step 2b: Batch-fetch FMP quality data (income statements + balance sheets)
+    # Done once for all tickers before scoring to stay within 300 req/min rate limit.
+    all_tickers = list(raw_data_map.keys())
+    logger.info("Fetching FMP quality data for %d tickers ...", len(all_tickers))
+    fmp_quality_map: dict[str, dict] = {}
+    try:
+        fmp_quality_map = fetch_quality_fmp_batch(all_tickers)
+        logger.info("FMP quality data fetched for %d tickers", len(fmp_quality_map))
+    except Exception as exc:
+        logger.error("FMP quality batch fetch failed — proceeding without FMP quality data: %s", exc)
 
     # Step 3: Score each ticker (quality, value, momentum, beneish)
     raw_factor_results: dict[str, dict] = {}
     for ticker, raw_data in raw_data_map.items():
-        raw_factor_results[ticker] = _score_ticker(ticker, raw_data)
+        raw_factor_results[ticker] = _score_ticker(
+            ticker, raw_data, fmp_quality=fmp_quality_map.get(ticker)
+        )
 
     # Step 4: First-pass composite estimate (without Form 4) to identify Form 4 candidates
     # We do a lightweight score estimate using only quality sub-metrics as proxy
