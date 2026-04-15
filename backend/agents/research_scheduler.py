@@ -1,7 +1,7 @@
 """
 Research queue poller — fires run_research() for watchlist rows queued after each screen.
 
-Scheduled at 8:00 PM ET Mon–Fri (after Alpha Vantage daily reset at midnight UTC).
+Scheduled at 5:00 PM ET Mon–Fri.
 
 Efficiency improvements (2026-04-10):
   - Staleness gate: skips tickers with a memo < 7 days old unless material_event=True
@@ -316,12 +316,12 @@ async def run_research_job() -> None:
 
 def create_research_scheduler() -> AsyncIOScheduler:
     """Return a configured (not yet started) research queue poller.
-    Fires at 8:00 PM ET Mon–Fri — after Alpha Vantage daily reset at midnight UTC."""
+    Fires at 5:00 PM ET Mon–Fri."""
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_research_job,
         trigger=CronTrigger(
-            hour=20,
+            hour=17,
             minute=0,
             day_of_week="mon-fri",
             timezone=ZoneInfo("America/New_York"),
