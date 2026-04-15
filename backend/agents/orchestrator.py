@@ -879,6 +879,7 @@ def _route_decision(
         return "NO_ACTION"
     if decision in ("HOLD", "MONITOR"):
         return "NO_ACTION"
+
     if decision == "DEPLOY_CASH":
         if category == "REBALANCE":
             detail = _trigger_deploy_cash_pipeline()

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS pm_decisions (
     hard_blocks_checked JSONB NOT NULL DEFAULT '{}',
     execution_status TEXT NOT NULL
         CHECK (execution_status IN (
-            'SENT_TO_EXECUTION', 'BLOCKED', 'DEFERRED', 'NO_ACTION', 'PENDING_HUMAN'
+            'SENT_TO_EXECUTION', 'BLOCKED', 'DEFERRED', 'NO_ACTION', 'PENDING_HUMAN', 'TRIGGERED_PIPELINE'
         )),
     human_override JSONB,                        -- null unless human intervened
     outcome JSONB,                               -- populated when position closes (for calibration)
