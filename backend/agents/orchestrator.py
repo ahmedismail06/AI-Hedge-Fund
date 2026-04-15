@@ -1121,6 +1121,12 @@ def run_pm_cycle(
                         decision_data, record_template,
                         auto_approve=(mode == "autonomous"),
                     )
+                elif category == "REBALANCE" and decision_data.get("decision") == "DEPLOY_CASH":
+                    # Pipeline queueing (screener/research) is not market-hours-dependent
+                    execution_status = _route_decision(
+                        decision_data, record_template,
+                        auto_approve=(mode == "autonomous"),
+                    )
 
             record_template["execution_status"] = execution_status
 
