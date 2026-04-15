@@ -26,7 +26,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 AV_BASE = "https://www.alphavantage.co/query"
-AV_DAILY_LIMIT = 25  # Free-tier hard cap
+AV_DAILY_LIMIT = 125  # 5 keys * 25 calls each  # Free-tier hard cap
 AV_BUDGET_WARNING_THRESHOLD = 5  # Log warning when this many requests remain
 
 # Quarters to probe, most-recent first. Extend as needed each year.
@@ -87,18 +87,14 @@ def _persist_av_count(count: int) -> None:
 
 
 def _av_request_allowed() -> bool:
-    """Return True if we are under the daily AV request budget; increment session counter.
+    """Return True if we are under the daily AV request budget.
 
-    The session counter is only synced to Supabase at the end of fetch_transcripts()
-    to minimise round-trips. _load_av_session_count() must have been called first.
+    Does not increment the counter — call _increment_av_count() after success.
     """
     today = datetime.datetime.utcnow().date().isoformat()
     if _av_session["date"] != today:
         _av_session.update({"date": today, "count": 0, "loaded": False})
-    if _av_session["count"] >= AV_DAILY_LIMIT:
-        return False
-    _av_session["count"] += 1
-    return True
+    return _av_session["count"] < AV_DAILY_LIMIT
 
 
 def av_requests_remaining() -> int:
@@ -616,9 +612,19 @@ Thank you for your participation in today's conference. This does conclude the p
         return result
     # ─────────────────────────────────────────────────────────────────────────
 
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-    if not api_key:
-        result["warning"] = "ALPHA_VANTAGE_API_KEY not set — transcripts unavailable"
+    api_keys = []
+    for i in range(1, 6):  # Load up to 5 keys
+        key = os.getenv(f"ALPHA_VANTAGE_API_KEY_{i}")
+        if key:
+            api_keys.append(key.strip())
+    
+    if not api_keys:
+        # Fallback to single key
+        single_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        api_keys = [single_key] if single_key else []
+    
+    if not api_keys:
+        result["warning"] = "ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY_1 etc. not set — transcripts unavailable"
         return result
 
     # Load today's AV count from Supabase once (session cache populated here)
@@ -659,24 +665,37 @@ Thank you for your participation in today's conference. This does conclude the p
                 )
                 break
 
-            resp = requests.get(
-                AV_BASE,
-                params={
-                    "function": "EARNINGS_CALL_TRANSCRIPT",
-                    "symbol": ticker.upper(),
-                    "quarter": quarter_str,
-                    "apikey": api_key,
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            av_calls_made += 1
-
-            # Rate limit or invalid key — stop immediately
-            if "Information" in data or "Note" in data:
-                msg = data.get("Information") or data.get("Note", "")
-                result["warning"] = f"Alpha Vantage rate limit or invalid key: {msg[:120]}"
+            # Try each API key in order until one succeeds
+            success = False
+            for api_key in api_keys:
+                resp = requests.get(
+                    AV_BASE,
+                    params={
+                        "function": "EARNINGS_CALL_TRANSCRIPT",
+                        "symbol": ticker.upper(),
+                        "quarter": quarter_str,
+                        "apikey": api_key,
+                    },
+                    timeout=15,
+                )
+                try:
+                    resp.raise_for_status()
+                    data = resp.json()
+                    # Check for rate limit or invalid key
+                    if "Information" in data or "Note" in data:
+                        msg = data.get("Information") or data.get("Note", "")
+                        logger.warning("Alpha Vantage key %s: %s", api_key[:8], msg[:120])
+                        continue  # try next key
+                    # Success
+                    av_calls_made += 1
+                    _av_session["count"] += 1
+                    success = True
+                    break
+                except Exception as exc:
+                    logger.warning("Alpha Vantage key %s failed: %s", api_key[:8], str(exc))
+                    continue
+            if not success:
+                result["warning"] = "All Alpha Vantage API keys failed or rate limited"
                 break
 
             turns = data.get("transcript")
