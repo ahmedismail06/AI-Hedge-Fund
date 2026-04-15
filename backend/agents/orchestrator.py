@@ -743,6 +743,135 @@ def _route_decision(
             })
             return "SENT_TO_EXECUTION"
 
+        elif category == "EXIT_TRIM" and decision == "ADD":
+            # Add to an existing OPEN position.  Writes exit_action=ADD + add_pct so the
+            # execution agent (future enhancement) can place an incremental BUY.
+            if ticker:
+                action = decision_data.get("action_details", {})
+                update: Dict[str, Any] = {"exit_action": "ADD"}
+                if action.get("add_pct"):
+                    update["exit_trim_pct"] = action["add_pct"]
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info("PM: EXIT_TRIM ADD for %s — exit_action=ADD written to positions", ticker)
+            return "SENT_TO_EXECUTION"
+
+        elif category == "REBALANCE" and decision == "REBALANCE":
+            # Trim overweight positions to bring gross/net exposure back toward regime caps.
+            # PM should include trim_pct in action_details; default to 20% if absent.
+            action = decision_data.get("action_details", {})
+            trim_pct = float(action.get("trim_pct") or 0.20)
+            if ticker:
+                # Single-ticker rebalance (e.g. trim one concentrated position)
+                client.table("positions").update({
+                    "exit_action": "TRIM",
+                    "exit_trim_pct": trim_pct,
+                }).eq("ticker", ticker).eq("status", "OPEN").execute()
+                logger.info("PM: REBALANCE TRIM %s %.0f%%", ticker, trim_pct * 100)
+            else:
+                # Portfolio-wide rebalance — trim all open positions proportionally
+                client.table("positions").update({
+                    "exit_action": "TRIM",
+                    "exit_trim_pct": trim_pct,
+                }).eq("status", "OPEN").execute()
+                logger.info("PM: REBALANCE (portfolio-wide) — trim %.0f%% applied to all OPEN positions", trim_pct * 100)
+            return "SENT_TO_EXECUTION"
+
+        elif category == "REBALANCE" and decision == "RAISE_CASH":
+            # Reduce gross exposure across all open positions to raise cash buffer.
+            action = decision_data.get("action_details", {})
+            trim_pct = float(action.get("trim_pct") or 0.30)
+            client.table("positions").update({
+                "exit_action": "TRIM",
+                "exit_trim_pct": trim_pct,
+            }).eq("status", "OPEN").execute()
+            logger.warning("PM: REBALANCE RAISE_CASH — trim %.0f%% written to all OPEN positions", trim_pct * 100)
+            return "SENT_TO_EXECUTION"
+
+        elif category == "CRISIS" and decision == "REDUCE_EXPOSURE":
+            # Trim all open positions to reduce portfolio gross exposure.
+            action = decision_data.get("action_details", {})
+            trim_pct = float(action.get("trim_pct") or 0.50)
+            client.table("positions").update({
+                "exit_action": "TRIM",
+                "exit_trim_pct": trim_pct,
+            }).eq("status", "OPEN").execute()
+            logger.warning(
+                "PM: CRISIS REDUCE_EXPOSURE — trim %.0f%% written to all OPEN positions", trim_pct * 100
+            )
+            notify_event("CRISIS_MODE", {
+                "action": "REDUCE_EXPOSURE",
+                "trim_pct": trim_pct,
+            })
+            return "SENT_TO_EXECUTION"
+
+        elif category == "CRISIS" and decision == "LIQUIDATE_TO_TARGET":
+            # Close all open positions immediately.
+            action = decision_data.get("action_details", {})
+            client.table("positions").update({"exit_action": "CLOSE"}).eq(
+                "status", "OPEN"
+            ).execute()
+            logger.critical(
+                "PM: CRISIS LIQUIDATE_TO_TARGET — exit_action=CLOSE written to all OPEN positions (target_exposure=%s)",
+                action.get("target_exposure", "0%"),
+            )
+            notify_event("CRISIS_MODE", {
+                "action": "LIQUIDATE_TO_TARGET",
+                "target_exposure": action.get("target_exposure"),
+            })
+            return "SENT_TO_EXECUTION"
+
+        elif category == "CRISIS" and decision == "HEDGE":
+            # Phase 1: no hedging instruments available.  Decision is logged; no execution action.
+            logger.warning(
+                "PM: CRISIS HEDGE — no hedging instruments in Phase 1; decision logged, manual intervention required"
+            )
+            notify_event("CRISIS_MODE", {
+                "action": "HEDGE",
+                "note": "Phase 1 no-op — manual intervention required",
+            })
+            return "NO_ACTION"
+
+        elif category == "PRE_EARNINGS" and decision == "SIZE_UP":
+            # Add to position ahead of earnings.  Uses exit_action=ADD (same as EXIT_TRIM+ADD).
+            if ticker:
+                action = decision_data.get("action_details", {})
+                update = {"exit_action": "ADD"}
+                if action.get("add_pct"):
+                    update["exit_trim_pct"] = action["add_pct"]
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info("PM: PRE_EARNINGS SIZE_UP for %s — exit_action=ADD written to positions", ticker)
+            return "SENT_TO_EXECUTION"
+
+        elif category == "PRE_EARNINGS" and decision == "TRIM":
+            # Reduce position size ahead of earnings.
+            if ticker:
+                action = decision_data.get("action_details", {})
+                update = {
+                    "exit_action": "TRIM",
+                    "exit_trim_pct": action.get("trim_pct"),
+                }
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info(
+                    "PM: PRE_EARNINGS TRIM for %s — exit_action=TRIM (%.0f%%) written to positions",
+                    ticker, float(action.get("trim_pct") or 0) * 100,
+                )
+            return "SENT_TO_EXECUTION"
+
+        elif category == "PRE_EARNINGS" and decision == "EXIT":
+            # Close position entirely ahead of earnings.
+            if ticker:
+                client.table("positions").update({"exit_action": "CLOSE"}).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info("PM: PRE_EARNINGS EXIT for %s — exit_action=CLOSE written to positions", ticker)
+            return "SENT_TO_EXECUTION"
+
     except Exception as exc:
         logger.error("_route_decision: routing failed for %s — %s", ticker, exc)
 

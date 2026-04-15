@@ -117,7 +117,7 @@ class PMDecision(BaseModel):
         default_factory=dict,
         description="Pre-Claude hard block results: position_cap_ok, market_hours_ok, gross_exposure_ok, daily_loss_ok",
     )
-    execution_status: Literal["SENT_TO_EXECUTION", "BLOCKED", "DEFERRED", "NO_ACTION", "PENDING_HUMAN"] = Field(
+    execution_status: Literal["SENT_TO_EXECUTION", "BLOCKED", "DEFERRED", "NO_ACTION", "PENDING_HUMAN", "TRIGGERED_PIPELINE"] = Field(
         description=(
             "Outcome after routing: SENT_TO_EXECUTION = order queued; "
             "BLOCKED = hard block prevented execution; "

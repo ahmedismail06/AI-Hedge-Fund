@@ -167,7 +167,7 @@ create table if not exists positions (
     closed_at           timestamptz,
     created_at          timestamptz not null default now(),
     -- Exit routing (set by PM _route_decision)
-    exit_action         text check (exit_action in ('TRIM', 'CLOSE')),
+    exit_action         text check (exit_action in ('TRIM', 'CLOSE', 'ADD')),
     exit_trim_pct       numeric(5, 2),
     -- Stop tiers (populated by portfolio_agent at sizing time)
     stop_tier1          numeric(12, 4),
