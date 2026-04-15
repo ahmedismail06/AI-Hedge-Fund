@@ -240,10 +240,9 @@ def _queue_top_n_for_research(
     not just today's. This ensures a stock that has consistently scored 8.5 but
     never landed in today's top 5 still gets researched.
 
-    Skip logic (delegated to research_scheduler._needs_research):
-            - Tickers with a memo < 7 days old AND no material_event=True are skipped
-                by the scheduler at 5:00 PM. We don't replicate that here.
-      - We only hard-exclude tickers that have never qualified (score < 7.0 all-time).
+    Filtering: Excludes tickers with memos < 7 days old AND no material_event=True.
+    This gives research opportunities to other qualified tickers instead of
+    constantly re-queuing the same companies.
 
     Returns list of queued ticker symbols.
     """
@@ -276,8 +275,26 @@ def _queue_top_n_for_research(
         elif row.get("material_event"):
             best[ticker]["material_event"] = True
 
-    # Sort by best-ever score descending, pick top N
-    ranked = sorted(best.values(), key=lambda x: x["composite_score"], reverse=True)
+    # Filter out tickers with recent memos and no material events
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    filtered_best: dict[str, dict] = {}
+    
+    for ticker, row in best.items():
+        try:
+            # Check for recent memo
+            memo_result = client.table("memos").select("id").eq("ticker", ticker).gte("date", cutoff).limit(1).execute()
+            has_recent_memo = bool(memo_result.data)
+            
+            # Include if: no recent memo OR has material event
+            if not has_recent_memo or row.get("material_event", False):
+                filtered_best[ticker] = row
+        except Exception as exc:
+            logger.warning("Failed to check memo status for %s: %s — including anyway", ticker, exc)
+            filtered_best[ticker] = row  # Include on error to be safe
+
+    # Sort by best-ever score descending, pick top N from filtered list
+    ranked = sorted(filtered_best.values(), key=lambda x: x["composite_score"], reverse=True)
 
     queued: list[str] = []
     for row in ranked:
