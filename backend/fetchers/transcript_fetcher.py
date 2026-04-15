@@ -26,7 +26,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 AV_BASE = "https://www.alphavantage.co/query"
-AV_DAILY_LIMIT = 125  # 5 keys * 25 calls each  # Free-tier hard cap
+AV_PER_KEY_LIMIT = 25  # Free-tier limit per Alpha Vantage API key
+AV_DAILY_LIMIT = AV_PER_KEY_LIMIT  # baseline for one configured key
 AV_BUDGET_WARNING_THRESHOLD = 5  # Log warning when this many requests remain
 
 # Quarters to probe, most-recent first. Extend as needed each year.
@@ -94,7 +95,7 @@ def _av_request_allowed() -> bool:
     today = datetime.datetime.utcnow().date().isoformat()
     if _av_session["date"] != today:
         _av_session.update({"date": today, "count": 0, "loaded": False})
-    return _av_session["count"] < AV_DAILY_LIMIT
+    return _av_session["count"] < _get_av_daily_limit()
 
 
 def av_requests_remaining() -> int:
@@ -102,7 +103,33 @@ def av_requests_remaining() -> int:
     today = datetime.date.today().isoformat()
     if _av_session["date"] != today or not _av_session["loaded"]:
         _load_av_session_count()
-    return max(0, AV_DAILY_LIMIT - _av_session["count"])
+    return max(0, _get_av_daily_limit() - _av_session["count"])
+
+
+def _get_av_api_keys() -> list[str]:
+    """Return all configured numbered Alpha Vantage API keys in numeric order."""
+    numbered_keys = []
+    for name, value in os.environ.items():
+        if not name.startswith("ALPHA_VANTAGE_API_KEY_"):
+            continue
+        try:
+            index = int(name.split("_")[-1])
+        except ValueError:
+            continue
+        if value and value.strip():
+            numbered_keys.append((index, value.strip()))
+    numbered_keys.sort(key=lambda pair: pair[0])
+    return [key for _, key in numbered_keys]
+
+
+def _get_av_daily_limit() -> int:
+    """Compute the total Alpha Vantage daily limit from configured keys."""
+    api_keys = _get_av_api_keys()
+    if api_keys:
+        return len(api_keys) * AV_PER_KEY_LIMIT
+    if os.getenv("ALPHA_VANTAGE_API_KEY"):
+        return AV_PER_KEY_LIMIT
+    return 0
 
 
 # ── ticker_events cache helpers ───────────────────────────────────────────────
@@ -612,16 +639,11 @@ Thank you for your participation in today's conference. This does conclude the p
         return result
     # ─────────────────────────────────────────────────────────────────────────
 
-    api_keys = []
-    for i in range(1, 6):  # Load up to 5 keys
-        key = os.getenv(f"ALPHA_VANTAGE_API_KEY_{i}")
-        if key:
-            api_keys.append(key.strip())
-    
+    api_keys = _get_av_api_keys()
     if not api_keys:
         # Fallback to single key
         single_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-        api_keys = [single_key] if single_key else []
+        api_keys = [single_key.strip()] if single_key and single_key.strip() else []
     
     if not api_keys:
         result["warning"] = "ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY_1 etc. not set — transcripts unavailable"
@@ -660,7 +682,7 @@ Thank you for your participation in today's conference. This does conclude the p
             # ── AV daily budget check ─────────────────────────────────────────
             if not _av_request_allowed():
                 result["warning"] = (
-                    f"Alpha Vantage daily limit ({AV_DAILY_LIMIT} requests) reached for "
+                    f"Alpha Vantage daily limit ({_get_av_daily_limit()} requests) reached for "
                     f"{datetime.date.today().isoformat()}. Remaining quarters not fetched."
                 )
                 break

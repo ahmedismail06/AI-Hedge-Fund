@@ -126,10 +126,17 @@ def evaluate_response(ticker: str, data: dict, quarter_found: str | None) -> dic
 def main():
     load_dotenv()
     api_keys = []
-    for i in range(1, 6):  # Load up to 5 keys
-        key = os.getenv(f"ALPHA_VANTAGE_API_KEY_{i}", "").strip()
-        if key:
-            api_keys.append(key)
+    numbered_keys = []
+    for name, value in os.environ.items():
+        if not name.startswith("ALPHA_VANTAGE_API_KEY_"):
+            continue
+        suffix = name.split("_")[-1]
+        if not suffix.isdigit():
+            continue
+        if value and value.strip():
+            numbered_keys.append((int(suffix), value.strip()))
+    numbered_keys.sort(key=lambda pair: pair[0])
+    api_keys = [key for _, key in numbered_keys]
     
     if not api_keys:
         # Fallback to single key
