@@ -637,11 +637,18 @@ def _route_decision(
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(
-                        memo_id=memo_id,
-                        portfolio_value=portfolio_value,
-                        auto_approve=auto_approve,
-                    ))
+                    import concurrent.futures as _cf
+                    # Run in a new thread to avoid "event loop already running" inside
+                    # FastAPI/APScheduler contexts where asyncio.run() would fail.
+                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                        pool.submit(
+                            _asyncio.run,
+                            run_portfolio_sizing(
+                                memo_id=memo_id,
+                                portfolio_value=portfolio_value,
+                                auto_approve=auto_approve,
+                            ),
+                        ).result()
                     logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s)", ticker, auto_approve)
                     return "SENT_TO_EXECUTION" if auto_approve else "PENDING_HUMAN"
                 except Exception as exc:
@@ -658,11 +665,18 @@ def _route_decision(
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
-                    _asyncio.run(run_portfolio_sizing(
-                        memo_id=memo_id,
-                        portfolio_value=portfolio_value,
-                        auto_approve=auto_approve,
-                    ))
+                    import concurrent.futures as _cf
+                    # Run in a new thread to avoid "event loop already running" inside
+                    # FastAPI/APScheduler contexts where asyncio.run() would fail.
+                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                        pool.submit(
+                            _asyncio.run,
+                            run_portfolio_sizing(
+                                memo_id=memo_id,
+                                portfolio_value=portfolio_value,
+                                auto_approve=auto_approve,
+                            ),
+                        ).result()
                     # Apply PM's size override on top of Kelly sizing
                     update: Dict[str, Any] = {}
                     if new_shares:
