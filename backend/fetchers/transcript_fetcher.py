@@ -46,7 +46,7 @@ def _load_av_session_count() -> int:
     Returns the current count (before any increment). Safe to call multiple
     times — subsequent calls within the same day return the cached value.
     """
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.utcnow().date().isoformat()
     if _av_session["loaded"] and _av_session["date"] == today:
         return _av_session["count"]
 
@@ -75,7 +75,7 @@ def _load_av_session_count() -> int:
 
 def _persist_av_count(count: int) -> None:
     """Write the current AV request count back to Supabase."""
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.utcnow().date().isoformat()
     try:
         from backend.memory.vector_store import _get_client
         client = _get_client()
@@ -92,7 +92,7 @@ def _av_request_allowed() -> bool:
     The session counter is only synced to Supabase at the end of fetch_transcripts()
     to minimise round-trips. _load_av_session_count() must have been called first.
     """
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.utcnow().date().isoformat()
     if _av_session["date"] != today:
         _av_session.update({"date": today, "count": 0, "loaded": False})
     if _av_session["count"] >= AV_DAILY_LIMIT:

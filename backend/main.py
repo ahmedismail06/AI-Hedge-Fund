@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     global _screener_scheduler, _macro_scheduler, _research_scheduler
     global _risk_monitor_scheduler, _risk_metrics_scheduler, _exec_scheduler, _pm_scheduler
 
-    # NOTE: macro (7AM), screener (4PM), research queue (5:00PM), and ticker events
+    # NOTE: macro (7AM), screener (4PM), research queue (8:00PM), and ticker events
     # (4:15PM) crons are all owned by _pm_scheduler (create_orchestrator_scheduler).
     # Do NOT start separate schedulers for these — they would fire each pipeline twice.
 
