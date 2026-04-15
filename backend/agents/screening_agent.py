@@ -39,7 +39,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 50
-_MAX_WORKERS = 10
+_MAX_WORKERS = 3
 _QUALIFY_THRESHOLD = 7.0
 _TOP_N_FOR_RESEARCH = 5
 _INSIDER_PRE_FILTER_SCORE = 5.0   # only fetch Form 4 for tickers above this pre-adjustment score
