@@ -51,7 +51,7 @@ export default function Screener() {
 
   const load = async () => {
     try {
-      const data = await getWatchlist();
+      const data = await getWatchlist(true); // allTime = true
       const items = Array.isArray(data) ? data : (data?.watchlist ?? []);
       setWatchlist(items);
       if (items.length) setLastRun(items[0]?.created_at ?? new Date().toISOString());
@@ -96,8 +96,8 @@ export default function Screener() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Stock Screener</h1>
-          <p className="text-sm text-gray-400 mt-0.5">Last run: {fmtTime(lastRun)}</p>
+          <h1 className="text-xl font-bold text-gray-900">Top 50 Tickers</h1>
+          <p className="text-sm text-gray-400 mt-0.5">Top performers across all screening runs</p>
         </div>
         <button
           onClick={handleRun}
@@ -163,13 +163,13 @@ export default function Screener() {
                 <th className="px-4 py-3 font-medium">Value</th>
                 <th className="px-4 py-3 font-medium">Momentum</th>
                 <th className="px-4 py-3 font-medium">Earnings Quality</th>
-                <th className="px-4 py-3 font-medium"></th>
+                <th className="px-4 py-3 font-medium">Research Status</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((item, idx) => {
                 const isExpanded = expanded === item.ticker;
-                const mscore = MSCORE_META[item.beneish_status] || MSCORE_META.INSUFFICIENT_DATA;
+                const mscore = MSCORE_META[item.beneish_flag] || MSCORE_META.INSUFFICIENT_DATA;
                 const raw = item.raw_factors || {};
                 return [
                   <tr
@@ -177,7 +177,7 @@ export default function Screener() {
                     onClick={() => setExpanded(isExpanded ? null : item.ticker)}
                     className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors"
                   >
-                    <td className="px-4 py-3 text-sm font-medium text-gray-500">#{item.rank ?? idx + 1}</td>
+                    <td className="px-4 py-3 text-sm font-medium text-gray-500">#{idx + 1}</td>
                     <td className="px-4 py-3">
                       <div className="font-mono font-bold text-gray-900">{item.ticker}</div>
                       {item.sector && <div className="text-xs text-gray-400">{item.sector}</div>}
@@ -196,7 +196,11 @@ export default function Screener() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      {item.beneish_status !== 'EXCLUDED' && (
+                      {item.queued_for_research ? (
+                        <span className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 border border-green-200 font-medium">
+                          Queued ✓
+                        </span>
+                      ) : item.beneish_flag !== 'EXCLUDED' ? (
                         <button
                           onClick={(e) => { e.stopPropagation(); handleQueue(item.ticker); }}
                           disabled={queuedTickers.has(item.ticker)}
@@ -208,7 +212,7 @@ export default function Screener() {
                         >
                           {queuedTickers.has(item.ticker) ? 'Queued ✓' : 'Queue Research'}
                         </button>
-                      )}
+                      ) : null}
                     </td>
                   </tr>,
                   isExpanded && Object.keys(raw).length > 0 && (
