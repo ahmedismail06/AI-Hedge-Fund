@@ -260,6 +260,30 @@ def _trigger_deploy_cash_pipeline() -> str:
     except Exception as exc:
         logger.warning("_trigger_deploy_cash_pipeline: watchlist query failed — %s", exc)
 
+    if not top_tickers:
+        # No candidates yet — run screener synchronously first
+        try:
+            _trigger_screener()
+            logger.info("_trigger_deploy_cash_pipeline: screener complete, re-querying watchlist")
+        except Exception as exc:
+            logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
+
+        # Screener ran synchronously — re-query for fresh results
+        try:
+            resp = (
+                _get_client()
+                .table("watchlist")
+                .select("ticker,composite_score")
+                .eq("run_date", today_str)
+                .eq("queued_for_research", False)
+                .order("composite_score", desc=True)
+                .limit(3)
+                .execute()
+            )
+            top_tickers = [row["ticker"] for row in (resp.data or [])]
+        except Exception as exc:
+            logger.warning("_trigger_deploy_cash_pipeline: post-screener watchlist query failed — %s", exc)
+
     if top_tickers:
         try:
             _get_client().table("watchlist").update({"queued_for_research": True}).in_(
@@ -273,11 +297,7 @@ def _trigger_deploy_cash_pipeline() -> str:
             logger.error("_trigger_deploy_cash_pipeline: research queue trigger failed — %s", exc)
         detail = f"queued_research: {top_tickers}"
     else:
-        try:
-            _trigger_screener()
-        except Exception as exc:
-            logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
-        detail = "triggered_screener (no unqueued watchlist candidates for today)"
+        detail = "triggered_screener (no candidates found after screen)"
 
     _deploy_cash_triggered_at = datetime.now(timezone.utc)
     logger.info("PM: DEPLOY_CASH pipeline action — %s", detail)
