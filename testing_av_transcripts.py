@@ -139,12 +139,7 @@ def main():
     api_keys = [key for _, key in numbered_keys]
     
     if not api_keys:
-        # Fallback to single key
-        single_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
-        api_keys = [single_key] if single_key else []
-    
-    if not api_keys:
-        print("ERROR: ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY_1 etc. not set.")
+        print("ERROR: ALPHA_VANTAGE_API_KEY_1 etc. not set.")
         print("  Get free keys at https://www.alphavantage.co/support/#api-key")
         print("  Then run:")
         print("    export ALPHA_VANTAGE_API_KEY_1=key1")

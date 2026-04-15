@@ -125,11 +125,7 @@ def _get_av_api_keys() -> list[str]:
 def _get_av_daily_limit() -> int:
     """Compute the total Alpha Vantage daily limit from configured keys."""
     api_keys = _get_av_api_keys()
-    if api_keys:
-        return len(api_keys) * AV_PER_KEY_LIMIT
-    if os.getenv("ALPHA_VANTAGE_API_KEY"):
-        return AV_PER_KEY_LIMIT
-    return 0
+    return len(api_keys) * AV_PER_KEY_LIMIT
 
 
 # ── ticker_events cache helpers ───────────────────────────────────────────────
@@ -259,7 +255,7 @@ def fetch_transcripts(ticker: str) -> dict:
 
     # ── MANUAL TRANSCRIPT OVERRIDE ────────────────────────────────────────────
     # Bug 8: this block must run BEFORE the api_key guard so that manual
-    # transcripts work even when ALPHA_VANTAGE_API_KEY is not set.
+    # transcripts work even when numbered ALPHA_VANTAGE_API_KEY_<n> vars are not set.
     # Drop a raw earnings call transcript here to bypass the API entirely.
     # Useful for testing, for tickers AV doesn't cover, or for pasting in
     # a transcript before AV has indexed it (AV typically lags 1–3 days).
@@ -641,12 +637,7 @@ Thank you for your participation in today's conference. This does conclude the p
 
     api_keys = _get_av_api_keys()
     if not api_keys:
-        # Fallback to single key
-        single_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-        api_keys = [single_key.strip()] if single_key and single_key.strip() else []
-    
-    if not api_keys:
-        result["warning"] = "ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY_1 etc. not set — transcripts unavailable"
+        result["warning"] = "ALPHA_VANTAGE_API_KEY_1 etc. not set — transcripts unavailable"
         return result
 
     # Load today's AV count from Supabase once (session cache populated here)
