@@ -276,20 +276,24 @@ def trigger_screening(regime: str | None = None):
 
 
 @app.get("/screening/watchlist")
-def get_screener_watchlist(run_date: str | None = None, limit: int = 50):
+def get_screener_watchlist(run_date: str | None = None, limit: int = 50, all_time: bool = False):
     """
     Returns today's (or a specific run_date's) screener watchlist from Supabase.
     run_date format: YYYY-MM-DD
+    all_time=true: returns top tickers across all dates by composite_score
     """
     from datetime import date as _date
     from backend.memory.vector_store import _get_client
     try:
         client = _get_client()
-        query = client.table("watchlist").select("*").order("rank", desc=False).limit(limit)
-        if run_date:
-            query = query.eq("run_date", run_date)
+        if all_time:
+            query = client.table("watchlist").select("*").order("composite_score", desc=True).limit(limit)
         else:
-            query = query.eq("run_date", _date.today().isoformat())
+            query = client.table("watchlist").select("*").order("rank", desc=False).limit(limit)
+            if run_date:
+                query = query.eq("run_date", run_date)
+            else:
+                query = query.eq("run_date", _date.today().isoformat())
         result = query.execute()
         return result.data or []
     except Exception as exc:
