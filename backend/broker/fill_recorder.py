@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from backend.memory.vector_store import _get_client
@@ -400,7 +400,7 @@ def _sync_cash_and_pct(client) -> None:
 
         # 1. Persist cash balance.
         client.table("pm_config").update(
-            {"cash_balance": round(cash, 2), "updated_at": datetime.utcnow().isoformat()}
+            {"cash_balance": round(cash, 2), "updated_at": datetime.now(timezone.utc).isoformat()}
         ).eq("id", 1).execute()
         logger.info("pm_config cash_balance synced: $%.2f", cash)
 
