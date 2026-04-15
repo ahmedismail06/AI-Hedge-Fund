@@ -8,7 +8,7 @@ through a Claude extended-thinking call with a category-specific prompt.
 
 Architecture:
   - APScheduler runs run_pm_cycle() every 5 minutes (market hours + after-hours for cleanup)
-    - Macro (7 AM), Screener (4 PM), Research queue (5:00 PM) crons are preserved unchanged
+    - Macro (7 AM), Screener (4 PM), Research queue (8:00 PM) crons are preserved unchanged
   - Hard blocks (15% position cap, 200% gross ceiling, -10% daily loss halt) are enforced
     in Python BEFORE Claude is called — Claude cannot override them
   - Every decision is logged to pm_decisions before any execution action
@@ -1792,7 +1792,7 @@ def create_orchestrator_scheduler():
             hour=17, minute=0, day_of_week="mon-fri", timezone="America/New_York"
         ),
         id="pm_trigger_research",
-        name="PM → Research Queue (5:00PM ET)",
+        name="PM → Research Queue (8:00PM ET)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
