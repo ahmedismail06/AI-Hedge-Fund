@@ -5,7 +5,11 @@ Tests whether the free Alpha Vantage EARNINGS_CALL_TRANSCRIPT endpoint has
 coverage for US micro/small-cap tickers (the $50M–$2B, ≤5 analyst universe).
 
 Usage:
-    export ALPHA_VANTAGE_API_KEY=your_key_here
+    export ALPHA_VANTAGE_API_KEY_1=key1
+    export ALPHA_VANTAGE_API_KEY_2=key2
+    export ALPHA_VANTAGE_API_KEY_3=key3
+    export ALPHA_VANTAGE_API_KEY_4=key4
+    export ALPHA_VANTAGE_API_KEY_5=key5
     python testing_av_transcripts.py
 
 Free tier limit: 25 requests/day. This script makes 1 request per ticker.
@@ -41,29 +45,35 @@ DELAY_SECONDS = 15  # stay well within free tier rate limits
 QUARTERS_TO_TRY = ["2025Q4", "2025Q3", "2025Q2", "2025Q1"]
 
 
-def fetch_transcript(ticker: str, api_key: str) -> tuple[dict, str | None]:
+def fetch_transcript(ticker: str, api_keys: list[str]) -> tuple[dict, str | None]:
     """
     Tries QUARTERS_TO_TRY in order and returns the first successful response.
+    Tries each API key in order if one fails.
     Returns (response_dict, quarter_string) — quarter is None if nothing found.
     """
     for quarter in QUARTERS_TO_TRY:
-        params = {
-            "function": "EARNINGS_CALL_TRANSCRIPT",
-            "symbol": ticker,
-            "quarter": quarter,
-            "apikey": api_key,
-        }
-        resp = requests.get(AV_BASE, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        for api_key in api_keys:
+            params = {
+                "function": "EARNINGS_CALL_TRANSCRIPT",
+                "symbol": ticker,
+                "quarter": quarter,
+                "apikey": api_key,
+            }
+            try:
+                resp = requests.get(AV_BASE, params=params, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
 
-        # Stop immediately on rate limit / bad key — no point trying more quarters
-        if "Information" in data or "Note" in data:
-            return data, quarter
+                # Stop immediately on rate limit / bad key — no point trying more quarters
+                if "Information" in data or "Note" in data:
+                    continue  # try next key
 
-        # If there's actual transcript content, return it
-        if data and "transcript" in data:
-            return data, quarter
+                # If there's actual transcript content, return it
+                if data and "transcript" in data:
+                    return data, quarter
+
+            except Exception:
+                continue  # try next key
 
         time.sleep(2)  # small pause between quarter probes
 
@@ -115,11 +125,24 @@ def evaluate_response(ticker: str, data: dict, quarter_found: str | None) -> dic
 
 def main():
     load_dotenv()
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
-    if not api_key:
-        print("ERROR: ALPHA_VANTAGE_API_KEY not set.")
-        print("  Get a free key at https://www.alphavantage.co/support/#api-key")
-        print("  Then run: export ALPHA_VANTAGE_API_KEY=your_key_here")
+    api_keys = []
+    for i in range(1, 6):  # Load up to 5 keys
+        key = os.getenv(f"ALPHA_VANTAGE_API_KEY_{i}", "").strip()
+        if key:
+            api_keys.append(key)
+    
+    if not api_keys:
+        # Fallback to single key
+        single_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+        api_keys = [single_key] if single_key else []
+    
+    if not api_keys:
+        print("ERROR: ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY_1 etc. not set.")
+        print("  Get free keys at https://www.alphavantage.co/support/#api-key")
+        print("  Then run:")
+        print("    export ALPHA_VANTAGE_API_KEY_1=key1")
+        print("    export ALPHA_VANTAGE_API_KEY_2=key2")
+        print("    etc.")
         return
 
     print("Alpha Vantage Transcript Coverage Test")
@@ -130,7 +153,7 @@ def main():
     results = []
     for ticker, company, sector, mktcap in TEST_TICKERS:
         try:
-            data, quarter_found = fetch_transcript(ticker, api_key)
+            data, quarter_found = fetch_transcript(ticker, api_keys)
             r = evaluate_response(ticker, data, quarter_found)
         except Exception as e:
             r = {
