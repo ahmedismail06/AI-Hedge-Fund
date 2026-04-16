@@ -2,18 +2,18 @@
 Portfolio Agent — Component 4 (Portfolio Construction & Sizing).
 
 Pure-quant 5-phase pipeline.  No LLM call is made; all sizing is deterministic
-fractional Kelly.  The agent is triggered by research_scheduler.py after a
-memo is written for a ticker.
+fractional Kelly unless explicitly overridden by the PM orchestrator.
+The agent is triggered by research_scheduler.py after a memo is written for a ticker.
 
 Pipeline:
   Phase 1 — Load memo from Supabase, validate verdict and conviction floor.
   Phase 2 — Read current macro regime from macro_briefings.
   Phase 3 — Load open positions, compute exposure state, fetch live entry price.
-  Phase 4 — Kelly sizing, correlation check, exposure-breach guard.
+  Phase 4 — Kelly sizing (or PM override), correlation check, exposure-breach guard.
   Phase 5 — Build SizingRecommendation, upsert to positions table, return.
 
 Entry point:
-    async def run_portfolio_sizing(memo_id: str, portfolio_value: float) -> SizingRecommendation
+    async def run_portfolio_sizing(memo_id: str, portfolio_value: float, override_dollar_amount: float = None) -> SizingRecommendation
 """
 
 import logging
@@ -232,6 +232,7 @@ async def run_portfolio_sizing(
     memo_id: str,
     portfolio_value: Optional[float] = None,
     auto_approve: bool = False,
+    override_dollar_amount: Optional[float] = None,
 ) -> SizingRecommendation:
     """
     Run the 5-phase portfolio sizing pipeline for a completed InvestmentMemo.
@@ -246,6 +247,9 @@ async def run_portfolio_sizing(
     auto_approve:
         If True, write the position directly as APPROVED (PM has already
         decided EXECUTE).  If False, write as PENDING_APPROVAL (legacy path).
+    override_dollar_amount:
+        If provided, bypasses Kelly sizing and automated correlation reductions, 
+        using this explicit size instead.
 
     Returns
     -------
@@ -296,7 +300,8 @@ async def run_portfolio_sizing(
 
     # ── Phase 4: Size + constrain ──────────────────────────────────────────────
 
-    # 4a — Kelly sizing
+    # 4a — Kelly sizing (or PM Override handling)
+    sizing = {}
     try:
         sizing = sizing_engine.calculate_size(
             conviction_score=conviction_score,
@@ -305,14 +310,36 @@ async def run_portfolio_sizing(
             regime=regime,
         )
     except ValueError as exc:
-        raise PortfolioAgentError(f"Phase 4: sizing engine — {exc}") from exc
+        if override_dollar_amount is None:
+            raise PortfolioAgentError(f"Phase 4: sizing engine — {exc}") from exc
+        else:
+            # Sizing engine rejected the trade, but we have a PM override
+            logger.info("Phase 4: Base Kelly sizing rejected trade (%s), proceeding with PM Override.", exc)
+            sizing = {
+                "stop_loss_price": round(entry_price * 0.9, 4),
+                "sizing_rationale": f"Base Kelly logic bypassed due to engine exception: {exc}",
+                "kelly_fraction": 0.0
+            }
 
-    dollar_size: float = sizing["dollar_size"]
-    share_count: float = float(sizing["share_count"])
-    size_label: str = sizing["size_label"]
-    pct_of_portfolio: float = sizing["pct_of_portfolio"]
-    stop_loss_price: float = sizing["stop_loss_price"]
-    sizing_rationale: str = sizing["sizing_rationale"]
+    # Apply Override or Base Sizing
+    if override_dollar_amount is not None:
+        dollar_size = override_dollar_amount
+        share_count = float(int(dollar_size // entry_price))
+        size_label = "PM_OVERRIDE"
+        pct_of_portfolio = round(dollar_size / portfolio_value, 6)
+        stop_loss_price = sizing.get("stop_loss_price", round(entry_price * 0.9, 4))
+        kelly_fraction = sizing.get("kelly_fraction", 0.0)
+        
+        base_rationale = sizing.get("sizing_rationale", "")
+        sizing_rationale = f"Size explicitly set by PM orchestrator override (${dollar_size:,.2f}). Base Logic context: {base_rationale}"
+    else:
+        dollar_size = sizing["dollar_size"]
+        share_count = float(sizing["share_count"])
+        size_label = sizing["size_label"]
+        pct_of_portfolio = sizing["pct_of_portfolio"]
+        stop_loss_price = sizing["stop_loss_price"]
+        sizing_rationale = sizing["sizing_rationale"]
+        kelly_fraction = sizing.get("kelly_fraction", 0.0)
 
     # 4b — Correlation check
     correlation_flag, correlation_note = correlation.check_correlation(
@@ -322,79 +349,83 @@ async def run_portfolio_sizing(
         portfolio_value=portfolio_value,
     )
 
-    # Determine whether Rule 2 (sector concentration) fired by inspecting the note text
     rule2_fired = (
         correlation_flag
         and correlation_note is not None
         and "Sector concentration" in correlation_note
     )
 
-    if correlation_flag and rule2_fired:
-        # Downgrade to micro: recalculate with conviction_score=5.0 and cap pct at 1%
-        logger.info(
-            "Phase 4: correlation Rule 2 fired for %s — downgrading to micro", ticker
-        )
-        notify_event("CORRELATION_FLAG", {
-            "ticker": ticker,
-            "rule": "Rule 2 — Sector Concentration",
-            "size_before": size_label,
-            "size_after": "micro",
-            "note": correlation_note or "3+ positions >25% gross in same sector",
-        })
-        try:
-            micro_sizing = sizing_engine.calculate_size(
-                conviction_score=5.0,
-                portfolio_value=portfolio_value,
-                entry_price=entry_price,
-                regime=regime,
+    # Only apply automated size reductions if PM did NOT explicitly set the size
+    if override_dollar_amount is None:
+        if correlation_flag and rule2_fired:
+            # Downgrade to micro: recalculate with conviction_score=5.0 and cap pct at 1%
+            logger.info(
+                "Phase 4: correlation Rule 2 fired for %s — downgrading to micro", ticker
             )
-        except ValueError as exc:
-            raise PortfolioAgentError(
-                f"Phase 4: micro downgrade sizing failed — {exc}"
-            ) from exc
+            notify_event("CORRELATION_FLAG", {
+                "ticker": ticker,
+                "rule": "Rule 2 — Sector Concentration",
+                "size_before": size_label,
+                "size_after": "micro",
+                "note": correlation_note or "3+ positions >25% gross in same sector",
+            })
+            try:
+                micro_sizing = sizing_engine.calculate_size(
+                    conviction_score=5.0,
+                    portfolio_value=portfolio_value,
+                    entry_price=entry_price,
+                    regime=regime,
+                )
+            except ValueError as exc:
+                raise PortfolioAgentError(
+                    f"Phase 4: micro downgrade sizing failed — {exc}"
+                ) from exc
 
-        # Enforce micro ceiling: 1% of portfolio
-        micro_pct = min(micro_sizing["pct_of_portfolio"], 0.01)
-        dollar_size = round(micro_pct * portfolio_value, 2)
-        share_count = float(int(dollar_size // entry_price))
-        size_label = "micro"
-        pct_of_portfolio = micro_pct
-        stop_loss_price = micro_sizing["stop_loss_price"]
-        sizing_rationale = (
-            micro_sizing["sizing_rationale"]
-            + " [Downgraded to micro: sector concentration rule triggered.]"
-        )
-
-        if share_count == 0:
-            raise PortfolioAgentError(
-                f"Phase 4: micro downgrade produced 0 shares "
-                f"(dollar_size=${dollar_size:.2f}, entry_price=${entry_price:.2f})"
+            # Enforce micro ceiling: 1% of portfolio
+            micro_pct = min(micro_sizing["pct_of_portfolio"], 0.01)
+            dollar_size = round(micro_pct * portfolio_value, 2)
+            share_count = float(int(dollar_size // entry_price))
+            size_label = "micro"
+            pct_of_portfolio = micro_pct
+            stop_loss_price = micro_sizing["stop_loss_price"]
+            sizing_rationale = (
+                micro_sizing["sizing_rationale"]
+                + " [Downgraded to micro: sector concentration rule triggered.]"
             )
+
+            if share_count == 0:
+                raise PortfolioAgentError(
+                    f"Phase 4: micro downgrade produced 0 shares "
+                    f"(dollar_size=${dollar_size:.2f}, entry_price=${entry_price:.2f})"
+                )
+        elif correlation_flag:
+            # Rule 1 only: halve the position size (plan: correlation > 0.75 → 50% reduction)
+            logger.info(
+                "Phase 4: correlation Rule 1 fired for %s — reducing size by 50%%", ticker
+            )
+            notify_event("CORRELATION_FLAG", {
+                "ticker": ticker,
+                "rule": "Rule 1 — Pair Correlation > 0.75",
+                "size_before": size_label,
+                "size_after": f"{size_label} (50% reduced)",
+                "note": correlation_note or "60-day Pearson correlation > 0.75 with existing position",
+            })
+            dollar_size = round(dollar_size * 0.5, 2)
+            share_count = float(int(dollar_size // entry_price))
+            pct_of_portfolio = round(dollar_size / portfolio_value, 6)
+            sizing_rationale = (
+                sizing_rationale + " [Reduced 50%: pair-correlation rule triggered.]"
+            )
+            if share_count == 0:
+                raise PortfolioAgentError(
+                    f"Phase 4: correlation reduction produced 0 shares "
+                    f"(dollar_size=${dollar_size:.2f}, entry_price=${entry_price:.2f})"
+                )
     elif correlation_flag:
-        # Rule 1 only: halve the position size (plan: correlation > 0.75 → 50% reduction)
-        logger.info(
-            "Phase 4: correlation Rule 1 fired for %s — reducing size by 50%%", ticker
-        )
-        notify_event("CORRELATION_FLAG", {
-            "ticker": ticker,
-            "rule": "Rule 1 — Pair Correlation > 0.75",
-            "size_before": size_label,
-            "size_after": f"{size_label} (50% reduced)",
-            "note": correlation_note or "60-day Pearson correlation > 0.75 with existing position",
-        })
-        dollar_size = round(dollar_size * 0.5, 2)
-        share_count = float(int(dollar_size // entry_price))
-        pct_of_portfolio = round(dollar_size / portfolio_value, 6)
-        sizing_rationale = (
-            sizing_rationale + " [Reduced 50%: pair-correlation rule triggered.]"
-        )
-        if share_count == 0:
-            raise PortfolioAgentError(
-                f"Phase 4: correlation reduction produced 0 shares "
-                f"(dollar_size=${dollar_size:.2f}, entry_price=${entry_price:.2f})"
-            )
+        logger.info("Phase 4: correlation flag triggered, but bypassing automated size reduction due to PM override.")
+        sizing_rationale += f" [Warning: {correlation_note} - Automated size reduction bypassed due to PM override]"
 
-    # 4c — Exposure breach check (runs against the final dollar_size after any downgrade)
+    # 4c — Exposure breach check (runs against the final dollar_size after any downgrade/override)
     breached, breach_reason = exposure_tracker.check_exposure_breach(
         new_dollar_size=dollar_size,
         new_direction=direction,
@@ -471,7 +502,7 @@ async def run_portfolio_sizing(
         "memo_id":                memo_id,
         "direction":              direction,
         "conviction_score":       conviction_score,
-        "kelly_fraction":         sizing["kelly_fraction"],
+        "kelly_fraction":         kelly_fraction,
         "dollar_size":            dollar_size,
         "share_count":            share_count,
         "size_label":             size_label,

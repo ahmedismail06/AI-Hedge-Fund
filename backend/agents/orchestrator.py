@@ -675,6 +675,7 @@ def _route_decision(
                                 memo_id=memo_id,
                                 portfolio_value=portfolio_value,
                                 auto_approve=auto_approve,
+                                override_dollar_amount=new_dollar
                             ),
                         ).result()
                     # Apply PM's size override on top of Kelly sizing
