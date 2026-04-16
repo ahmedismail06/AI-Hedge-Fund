@@ -6,17 +6,14 @@ Criteria:
   - Sectors: SaaS/Tech (SIC 7371-7379), Healthcare (SIC 2830-2836, 5047, 5122, 8000-8099),
              Industrials (SIC 3400-3599, 3710-3799, 4800-4899)
   - ADV ≥ $500K (30-day Polygon OHLCV)
-  - Analyst count ≤ 5 (yfinance)
+  - Analyst count ≤ 5 (Financial Modeling Prep)
 
 Also provides fetch_ticker_data() — single coordinated fetch per ticker
 returning all data needed by factor scorers. Called once per ticker;
 result passed to all three factor scorers to avoid redundant API calls.
 
-Rate limiting: 0.25s sleep between Polygon detail calls (sequential).
-Polygon v3/reference/tickers LIST endpoint does not return market_cap or sic_code;
-they are only available via the per-ticker DETAIL endpoint. Universe is cached to
-.universe_cache.json (refreshed every 24 hours) to avoid re-fetching ~5000 detail
-endpoints on every run.
+Rate limiting: Proactive sleeps and exponential backoff are heavily utilized 
+to respect Polygon's limits and FMP's 300 req/min limits.
 """
 
 import json
@@ -27,10 +24,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import requests
-import yfinance as yf
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,6 +34,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 POLYGON_BASE = "https://api.polygon.io"
+FMP_BASE = "https://financialmodelingprep.com/stable"
 
 # Universe cache: avoids ~5000 Polygon detail API calls on every run.
 # File lives at repo root; TTL is 24 hours.
@@ -45,7 +42,7 @@ _CACHE_PATH = Path(__file__).parent.parent.parent / ".universe_cache.json"
 _CACHE_TTL_HOURS = 24
 
 # Manual sector overrides: ticker → sector string
-SECTOR_OVERRIDES: dict[str, str] = {}
+SECTOR_OVERRIDES: Dict[str, str] = {}
 
 # SIC code → sector mapping
 _SIC_SAAS = set(range(7371, 7380))  # 7371–7379 inclusive
@@ -66,8 +63,8 @@ VALID_SECTORS = {"SaaS", "Healthcare", "Industrials"}
 @dataclass
 class UniverseCandidate:
     ticker: str
-    market_cap_m: float       # market cap in $M
-    sector: str               # 'SaaS' | 'Healthcare' | 'Industrials'
+    market_cap_m: float             # market cap in $M
+    sector: str                     # 'SaaS' | 'Healthcare' | 'Industrials'
     adv_k: Optional[float] = None   # average daily volume in $K
     sic_code: Optional[int] = None
     analyst_count: Optional[int] = None
@@ -108,6 +105,28 @@ def _polygon_get(url: str, params: dict, max_retries: int = 3) -> Optional[reque
     return None
 
 
+def _fmp_get(url: str, max_retries: int = 3) -> Optional[requests.Response]:
+    """
+    GET wrapper for FMP with exponential backoff to handle the 300 req/min limit.
+    """
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                return r
+            if r.status_code == 429:
+                backoff = 6.0 * (attempt + 1)  # 6s, 12s, 18s
+                logger.debug("FMP 429 on %s (attempt %d) — backing off %ds", url.split("?")[0][-40:], attempt + 1, backoff)
+                time.sleep(backoff)
+                continue
+            return None
+        except Exception as exc:
+            logger.debug("FMP request failed (attempt %d): %s", attempt + 1, exc)
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    return None
+
+
 def _fetch_adv_k(ticker: str, polygon_key: str) -> Optional[float]:
     """
     Compute 30-day average daily dollar volume using Polygon aggregate bars.
@@ -142,24 +161,24 @@ def _fetch_adv_k(ticker: str, polygon_key: str) -> Optional[float]:
         return None
 
 
-def _fetch_analyst_count(ticker: str) -> Optional[int]:
-    """Return analyst count from yfinance, or None on failure."""
+def _fetch_analyst_count(ticker: str, fmp_key: str) -> Optional[int]:
+    """Return analyst count from FMP, or None on failure."""
     try:
-        info = yf.Ticker(ticker).info or {}
-        return info.get("numberOfAnalystOpinions")
+        url = f"{FMP_BASE}/analyst-estimates?symbol={ticker}&period=annual&limit=1&apikey={fmp_key}"
+        r = _fmp_get(url)
+        if r is not None:
+            data = r.json()
+            if data and isinstance(data, list):
+                return data[0].get("numberAnalystEstimatedRevenue")
+        return None
     except Exception as exc:
-        logger.debug("%s: analyst count fetch failed: %s", ticker, exc)
+        logger.debug("%s: FMP analyst count fetch failed: %s", ticker, exc)
         return None
 
 
-def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[dict]:
+def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[Dict[str, Any]]:
     """
     Fetch market_cap and sic_code from the Polygon per-ticker detail endpoint.
-    The v3/reference/tickers LIST endpoint does not return these fields;
-    they are only available via the individual detail endpoint.
-
-    Retries up to 3 times on 429 (rate-limit) responses with exponential backoff.
-    Returns {"market_cap": float, "sic_code": int|None} or None on failure.
     """
     for attempt in range(3):
         try:
@@ -181,7 +200,6 @@ def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[dict]:
                 logger.debug("%s: 429 rate limit (attempt %d) — backing off %ds", ticker, attempt + 1, backoff)
                 time.sleep(backoff)
                 continue
-            # Other non-200 status: give up
             return None
         except Exception as exc:
             logger.debug("%s: detail fetch failed (attempt %d): %s", ticker, attempt + 1, exc)
@@ -190,7 +208,7 @@ def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[dict]:
     return None
 
 
-def _load_universe_cache() -> Optional[list["UniverseCandidate"]]:
+def _load_universe_cache() -> Optional[List[UniverseCandidate]]:
     """Return cached universe if it exists and is < 24 hours old, else None."""
     if not _CACHE_PATH.exists():
         return None
@@ -208,7 +226,7 @@ def _load_universe_cache() -> Optional[list["UniverseCandidate"]]:
         return None
 
 
-def _save_universe_cache(universe: list["UniverseCandidate"]) -> None:
+def _save_universe_cache(universe: List[UniverseCandidate]) -> None:
     """Persist universe to disk cache."""
     try:
         rows = [
@@ -228,40 +246,26 @@ def _save_universe_cache(universe: list["UniverseCandidate"]) -> None:
         logger.warning("Failed to write universe cache: %s", exc)
 
 
-def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
+def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     """
     Build the screener universe from Polygon reference tickers.
-
-    Filters:
-      - US exchange (NYSE/NASDAQ/AMEX)
-      - Market cap $50M–$2B
-      - Valid SIC sector (SIC codes, not yfinance sectors)
-      - ADV ≥ $500K
-      - Analyst count ≤ 5
-
-    Returns up to ~800 UniverseCandidate objects.
-
-    Caching: Results are cached to .universe_cache.json for 24 hours. Pass
-    use_cache=False to force a full rebuild (e.g., for CI or first-time setup).
-
-    Implementation note: The Polygon v3/reference/tickers LIST endpoint does not
-    return market_cap or sic_code (they are always None). Phase 1 collects all
-    common-stock symbols; Phase 2 fetches individual detail pages sequentially
-    with 0.25s sleep to respect rate limits and avoid 429s.
+    Filters: US exchange, Cap $50M–$2B, Valid SIC, ADV ≥ $500K, Analyst ≤ 5.
     """
     polygon_key = os.getenv("POLYGON_API_KEY")
+    fmp_key = os.getenv("FMP_API_KEY")
+    
     if not polygon_key:
         raise RuntimeError("POLYGON_API_KEY not set")
+    if not fmp_key:
+        raise RuntimeError("FMP_API_KEY not set")
 
-    # ── Cache check ────────────────────────────────────────────────────────────
     if use_cache:
         cached = _load_universe_cache()
         if cached is not None:
             return cached
 
-    # ── Phase 1: Collect all common-stock ticker symbols on target exchanges ────
-    # The list endpoint only gives us ticker + exchange (no market_cap/sic_code).
-    all_symbols: list[str] = []
+    # ── Phase 1: Collect all common-stock ticker symbols ────
+    all_symbols: List[str] = []
     target_exchanges = {"XNYS", "XNAS", "XASE"}
 
     next_url: Optional[str] = (
@@ -270,7 +274,7 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
     )
 
     pages_fetched = 0
-    while next_url and pages_fetched < 15:  # safety cap (~15K symbols max)
+    while next_url and pages_fetched < 15:
         try:
             r = requests.get(next_url, timeout=20)
             pages_fetched += 1
@@ -283,11 +287,9 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
             time.sleep(10)
             continue
         if r.status_code != 200:
-            logger.warning("Polygon ticker list HTTP %d on page %d", r.status_code, pages_fetched)
             break
 
-        time.sleep(0.5)  # conservative: 2 pages/sec for the list endpoint
-
+        time.sleep(0.5) 
         data = r.json()
         for t in data.get("results", []):
             ticker = t.get("ticker", "")
@@ -302,16 +304,10 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
         else:
             next_url = None
 
-    logger.info(
-        "Polygon list: %d common-stock symbols on NYSE/NASDAQ/AMEX (%d pages)",
-        len(all_symbols), pages_fetched,
-    )
+    logger.info("Polygon list: %d common-stock symbols on NYSE/NASDAQ/AMEX (%d pages)", len(all_symbols), pages_fetched)
 
     # ── Phase 2: Sequential detail-fetch for market_cap + sic_code ───────────
-    # Sequential (not parallel) to stay within Polygon rate limits.
-    # 0.25s between calls = ~4 req/sec. For ~5000 symbols: ~20 minutes.
-    # This phase is the bottleneck; the result is cached for 24 hours.
-    candidates: list[UniverseCandidate] = []
+    candidates: List[UniverseCandidate] = []
     logger.info("Fetching detail for %d symbols (sequential, ~0.25s each — this takes ~20 min)", len(all_symbols))
 
     for i, ticker in enumerate(all_symbols):
@@ -338,12 +334,7 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
         ))
 
         if (i + 1) % 500 == 0:
-            logger.info(
-                "  Detail fetch progress: %d/%d symbols, %d candidates so far",
-                i + 1, len(all_symbols), len(candidates),
-            )
-
-    logger.info("Polygon reference: %d sector-qualified candidates before ADV/analyst filter", len(candidates))
+            logger.info("  Detail fetch progress: %d/%d symbols, %d candidates so far", i + 1, len(all_symbols), len(candidates))
 
     # ── ADV filter (parallel) ─────────────────────────────────────────────────
     def _check_adv(cand: UniverseCandidate) -> Optional[UniverseCandidate]:
@@ -353,7 +344,7 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
         cand.adv_k = adv
         return cand
 
-    adv_qualified: list[UniverseCandidate] = []
+    adv_qualified: List[UniverseCandidate] = []
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(_check_adv, c): c for c in candidates}
         for future in as_completed(futures):
@@ -361,19 +352,19 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
             if result is not None:
                 adv_qualified.append(result)
 
-    logger.info("After ADV ≥ $500K filter: %d candidates", len(adv_qualified))
-
-    # ── Analyst count filter (parallel, yfinance) ─────────────────────────────
+    # ── Analyst count filter (parallel, FMP) ─────────────────────────────
     def _check_analyst(cand: UniverseCandidate) -> Optional[UniverseCandidate]:
-        count = _fetch_analyst_count(cand.ticker)
+        count = _fetch_analyst_count(cand.ticker, fmp_key)
         cand.analyst_count = count
-        # Allow through if count is None (data unavailable) or ≤ 5
+        time.sleep(0.5)  # Proactive pacing to protect FMP 300 req/min
+        
         if count is not None and count > 5:
             return None
         return cand
 
-    final: list[UniverseCandidate] = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    final: List[UniverseCandidate] = []
+    # Reduced max_workers to 3 to safely coast under FMP API limits
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_check_analyst, c): c for c in adv_qualified}
         for future in as_completed(futures):
             result = future.result()
@@ -382,7 +373,6 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
 
     logger.info("Final universe after analyst ≤ 5 filter: %d candidates", len(final))
 
-    # ── Cache the final universe ───────────────────────────────────────────────
     if final:
         _save_universe_cache(final)
 
@@ -391,44 +381,29 @@ def build_universe(use_cache: bool = True) -> list[UniverseCandidate]:
 
 def fetch_ticker_data(ticker: str) -> dict:
     """
-    Single coordinated data fetch for a ticker. Called once per ticker;
-    result is passed to all factor scorers to avoid redundant API calls.
-
-    Returns:
-        {
-            "ticker":              str,
-            "fmp":                 dict,   # output of fetch_fmp()
-            "polygon_financials":  dict,   # raw Polygon /vX/reference/financials (limit=4, FY+TTM)
-            "price_history":       list,   # daily OHLCV dicts (13 months), sorted oldest→newest
-            "yf_info":             dict,   # yfinance Ticker.info
-        }
-    Never raises — partial failures return empty sub-dicts.
+    Single coordinated data fetch for a ticker.
+    Now utilizes FMP instead of yfinance for soft-factor mapping.
     """
-    from backend.fetchers.fmp_fetcher import fetch_fmp  # avoid circular at module level
+    from backend.fetchers.fmp_fetcher import fetch_fmp 
 
-    result: dict = {
+    result: Dict[str, Any] = {
         "ticker":             ticker.upper(),
         "fmp":                {},
         "polygon_financials": {"results": []},
         "price_history":      [],
-        "yf_info":            {},
+        "yf_info":            {},  # Dict preserved for downstream compatibility
     }
 
-    # ── fetch_fmp (yfinance + Polygon balance sheet) ─────────────────────────
+    # ── fetch_fmp (core financial statements) ─────────────────────────
     try:
         result["fmp"] = fetch_fmp(ticker)
     except Exception as exc:
         logger.warning("%s: fetch_fmp failed: %s", ticker, exc)
 
-    # ── Polygon financials: two separate calls merged into polygon_financials ──
-    # Annual call (timeframe=annual, limit=2): provides FY rows for Beneish /
-    # Quality / Value factor scorers. Polygon defaults to quarterly + TTM, so
-    # without timeframe=annual, no FY rows are returned.
-    # TTM call (timeframe=ttm, limit=1): provides TTM OCF for Value scorer and
-    # cash runway (also fetched by fmp_fetcher, but kept here for consistency).
+    # ── Polygon financials ───────────────────────────────────────────────────
     polygon_key = os.getenv("POLYGON_API_KEY")
     if polygon_key:
-        merged_results: list[dict] = []
+        merged_results: List[Dict[str, Any]] = []
         for timeframe, limit in [("annual", 2), ("ttm", 1)]:
             r = _polygon_get(
                 f"{POLYGON_BASE}/vX/reference/financials",
@@ -449,7 +424,7 @@ def fetch_ticker_data(ticker: str) -> dict:
                 logger.warning("%s: Polygon financials (%s) failed or rate-limited", ticker, timeframe)
         result["polygon_financials"] = {"results": merged_results}
 
-    # ── Polygon price history (13 months for 12-1 momentum) ──────────────────
+    # ── Polygon price history ────────────────────────────────────────────────
     if polygon_key:
         try:
             import datetime
@@ -469,25 +444,42 @@ def fetch_ticker_data(ticker: str) -> dict:
         except Exception as exc:
             logger.warning("%s: Polygon price history failed: %s", ticker, exc)
 
-    # ── yfinance info (analyst count, earnings history, sector) ──────────────
-    try:
-        t = yf.Ticker(ticker)
-        result["yf_info"] = t.info or {}
-
-        # Augment with earningsHistory for eps_beat_rate
+    # ── FMP info (replaces yfinance soft metrics mapping) ────────────────────
+    fmp_key = os.getenv("FMP_API_KEY")
+    if fmp_key:
         try:
-            eh = t.earnings_history
-            if eh is not None and not eh.empty:
-                eh_list = []
-                for _, row in eh.iterrows():
-                    eh_list.append({
-                        "epsEstimate": row.get("epsEstimate"),
-                        "epsActual":   row.get("epsActual"),
-                    })
-                result["yf_info"]["earningsHistory"] = eh_list
+            # 1. Earnings Surprises (replaces yf.earnings_history)
+            r_earnings = _fmp_get(f"{FMP_BASE}/earnings-surprises?symbol={ticker}&apikey={fmp_key}")
+            if r_earnings is not None:
+                eh_data = r_earnings.json()
+                if eh_data and isinstance(eh_data, list):
+                    eh_list = []
+                    for row in eh_data[:4]:
+                        eh_list.append({
+                            "epsEstimate": row.get("estimatedEarning"),
+                            "epsActual":   row.get("actualEarning"),
+                        })
+                    result["yf_info"]["earningsHistory"] = eh_list
+
+            # 2. Forward Estimates (replaces yf.info forwardEps)
+            r_estimates = _fmp_get(f"{FMP_BASE}/analyst-estimates?symbol={ticker}&period=annual&limit=2&apikey={fmp_key}")
+            if r_estimates is not None:
+                est_data = r_estimates.json()
+                if est_data and isinstance(est_data, list) and len(est_data) > 0:
+                    result["yf_info"]["forwardEps"] = est_data[0].get("estimatedEpsAvg")
+                    
+            # 3. Key Metrics TTM (replaces yf.info pegRatio)
+            r_metrics = _fmp_get(f"{FMP_BASE}/key-metrics-ttm?symbol={ticker}&limit=1&apikey={fmp_key}")
+            if r_metrics is not None:
+                metrics_data = r_metrics.json()
+                if metrics_data and isinstance(metrics_data, list) and len(metrics_data) > 0:
+                    result["yf_info"]["pegRatio"] = metrics_data[0].get("pegRatioTTM")
+                    
+            # Critical pacing to ensure the 3 workers hitting 3 endpoints each
+            # do not exceed FMP's 300 req/min global limit
+            time.sleep(1.5) 
+            
         except Exception as exc:
-            logger.debug("%s: earningsHistory fetch failed: %s", ticker, exc)
-    except Exception as exc:
-        logger.warning("%s: yfinance info failed: %s", ticker, exc)
+            logger.warning("%s: FMP info fetch failed: %s", ticker, exc)
 
     return result
