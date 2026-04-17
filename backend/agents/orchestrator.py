@@ -40,12 +40,31 @@ from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
+def _clean_float(value: Any, default: float = 0.0) -> float:
+    """Strip currency symbols, commas, and percentages from LLM numeric outputs."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace("$", "").replace(",", "").replace("%", "").strip()
+        try:
+            # If Claude returned "20" for 20%, convert it to 0.20
+            val = float(cleaned)
+            if "%" in str(value) and val > 1.0:
+                val = val / 100.0
+            return val
+        except ValueError:
+            return default
+    return default
+
 # ── Hard-block thresholds (code-enforced, never passed to Claude) ─────────────
 _MAX_POSITION_PCT = 0.15          # 15% single-position hard cap
 _GROSS_EXPOSURE_CEILING = 2.00    # 200% gross exposure absolute max
 _DAILY_LOSS_HALT_PCT = 0.10       # -10% intraday drawdown → halt all trading
 _STOP_PROXIMITY_TRIGGER = 0.03    # Trigger EXIT_TRIM review when within 3% of stop
 _EARNINGS_LOOKAHEAD_DAYS = 14     # Pre-earnings review window
+_DEPLOY_CASH_MIN_SCORE = 6.5      # Minimum composite score required to queue research for DEPLOY_CASH
 
 # ── Cycle deduplication state (Change 2) ─────────────────────────────────────
 _FINGERPRINT_TTL_SECONDS = 1800   # 30 minutes before forced re-evaluation
@@ -76,7 +95,28 @@ def _get_pm_config() -> Dict[str, Any]:
         "daily_loss_halt_triggered": False,
         "halted_until": None,
     }
+def _acquire_pm_lock() -> bool:
+    """Try to acquire the global PM lock. Returns True if acquired, False if already locked."""
+    try:
+        client = _get_client()
+        # Read current state
+        resp = client.table("pm_config").select("pm_is_running").eq("id", 1).single().execute()
+        if resp.data and resp.data.get("pm_is_running"):
+            return False  # Lock is currently held by another process
+        
+        # Acquire lock
+        client.table("pm_config").update({"pm_is_running": True}).eq("id", 1).execute()
+        return True
+    except Exception as exc:
+        logger.warning("_acquire_pm_lock: failed to check/set lock — %s", exc)
+        return False
 
+def _release_pm_lock() -> None:
+    """Release the global PM lock."""
+    try:
+        _get_client().table("pm_config").update({"pm_is_running": False}).eq("id", 1).execute()
+    except Exception as exc:
+        logger.error("_release_pm_lock: failed to release lock — %s", exc)
 
 def _set_halt(triggered: bool, halted_until: Optional[datetime] = None) -> None:
     """Update daily_loss_halt_triggered and optional halted_until in pm_config."""
@@ -174,6 +214,7 @@ def _handle_empty_portfolio_deploy(
             .select("ticker,composite_score")
             .eq("run_date", today_str)
             .eq("queued_for_research", False)
+            .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
             .order("composite_score", desc=True)
             .limit(3)
             .execute()
@@ -252,6 +293,7 @@ def _trigger_deploy_cash_pipeline() -> str:
             .select("ticker,composite_score")
             .eq("run_date", today_str)
             .eq("queued_for_research", False)
+            .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
             .order("composite_score", desc=True)
             .limit(3)
             .execute()
@@ -276,6 +318,7 @@ def _trigger_deploy_cash_pipeline() -> str:
                 .select("ticker,composite_score")
                 .eq("run_date", today_str)
                 .eq("queued_for_research", False)
+                .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
                 .order("composite_score", desc=True)
                 .limit(3)
                 .execute()
@@ -394,7 +437,12 @@ def _check_hard_blocks(
     # Position size cap — always recompute weight from NAV
     dollar_to_check = dollar_amount
     if dollar_to_check is None and sizing_rec:
-        dollar_to_check = float(sizing_rec.get("dollar_size") or 0) or None
+        raw_sz = sizing_rec.get("dollar_size")
+        if raw_sz in (None, ""):
+            dollar_to_check = None
+        else:
+            d = _clean_float(raw_sz)
+            dollar_to_check = d if d else None
 
     if dollar_to_check:
         nav = _compute_portfolio_value()
@@ -409,7 +457,7 @@ def _check_hard_blocks(
             )
     elif sizing_rec:
         # Fallback: use stored pct_of_portfolio only when no dollar figure available
-        weight = float(sizing_rec.get("pct_of_portfolio", 0) or 0)
+        weight = _clean_float(sizing_rec.get("pct_of_portfolio", 0) or 0)
         if weight > _MAX_POSITION_PCT:
             blocks["position_cap_ok"] = False
             logger.warning(
@@ -659,8 +707,10 @@ def _route_decision(
             # Size with PM's override values and write directly as APPROVED.
             # Memo status is already set to APPROVED by _update_memo_after_decision.
             action = decision_data.get("action_details", {})
-            new_dollar = action.get("dollar_amount")
-            new_shares = action.get("shares")
+            raw_dollar = action.get("dollar_amount")
+            new_dollar = None if raw_dollar in (None, "") else _clean_float(raw_dollar)
+            raw_shares = action.get("shares")
+            new_shares = None if raw_shares in (None, "") else int(_clean_float(raw_shares))
             if ticker and memo_id:
                 try:
                     from backend.agents.portfolio_agent import run_portfolio_sizing
@@ -703,9 +753,10 @@ def _route_decision(
             if ticker:
                 # Memo status handled by _update_memo_after_decision.
                 # Also reject the pending position so it doesn't linger.
-                client.table("positions").update({"status": "REJECTED"}).eq(
-                    "ticker", ticker
-                ).eq("status", "PENDING_APPROVAL").execute()
+                q = client.table("positions").update({"status": "REJECTED"}).eq("ticker", ticker).eq("status", "PENDING_APPROVAL")
+                if memo_id:
+                    q = q.eq("memo_id", memo_id)
+                q.execute()
             return "BLOCKED"
 
         elif category == "NEW_ENTRY" and decision == "WATCHLIST":
@@ -716,7 +767,7 @@ def _route_decision(
             if ticker:
                 update = {
                     "exit_action": decision,
-                    "exit_trim_pct": decision_data.get("action_details", {}).get("trim_pct"),
+                    "exit_trim_pct": _clean_float(decision_data.get("action_details", {}).get("trim_pct")),
                 }
                 client.table("positions").update(update).eq(
                     "ticker", ticker
@@ -750,8 +801,8 @@ def _route_decision(
             if ticker:
                 action = decision_data.get("action_details", {})
                 update: Dict[str, Any] = {"exit_action": "ADD"}
-                if action.get("add_pct"):
-                    update["exit_trim_pct"] = action["add_pct"]
+                if action.get("add_pct") not in (None, ""):
+                    update["exit_trim_pct"] = _clean_float(action.get("add_pct"))
                 client.table("positions").update(update).eq(
                     "ticker", ticker
                 ).eq("status", "OPEN").execute()
@@ -762,7 +813,7 @@ def _route_decision(
             # Trim overweight positions to bring gross/net exposure back toward regime caps.
             # PM should include trim_pct in action_details; default to 20% if absent.
             action = decision_data.get("action_details", {})
-            trim_pct = float(action.get("trim_pct") or 0.20)
+            trim_pct = _clean_float(action.get("trim_pct"), 0.20)
             if ticker:
                 # Single-ticker rebalance (e.g. trim one concentrated position)
                 client.table("positions").update({
@@ -782,7 +833,7 @@ def _route_decision(
         elif category == "REBALANCE" and decision == "RAISE_CASH":
             # Reduce gross exposure across all open positions to raise cash buffer.
             action = decision_data.get("action_details", {})
-            trim_pct = float(action.get("trim_pct") or 0.30)
+            trim_pct = _clean_float(action.get("trim_pct"), 0.30)
             client.table("positions").update({
                 "exit_action": "TRIM",
                 "exit_trim_pct": trim_pct,
@@ -793,7 +844,7 @@ def _route_decision(
         elif category == "CRISIS" and decision == "REDUCE_EXPOSURE":
             # Trim all open positions to reduce portfolio gross exposure.
             action = decision_data.get("action_details", {})
-            trim_pct = float(action.get("trim_pct") or 0.50)
+            trim_pct = _clean_float(action.get("trim_pct"), 0.50)
             client.table("positions").update({
                 "exit_action": "TRIM",
                 "exit_trim_pct": trim_pct,
@@ -839,8 +890,8 @@ def _route_decision(
             if ticker:
                 action = decision_data.get("action_details", {})
                 update = {"exit_action": "ADD"}
-                if action.get("add_pct"):
-                    update["exit_trim_pct"] = action["add_pct"]
+                if action.get("add_pct") not in (None, ""):
+                    update["exit_trim_pct"] = _clean_float(action.get("add_pct"))
                 client.table("positions").update(update).eq(
                     "ticker", ticker
                 ).eq("status", "OPEN").execute()
@@ -851,16 +902,17 @@ def _route_decision(
             # Reduce position size ahead of earnings.
             if ticker:
                 action = decision_data.get("action_details", {})
+                trim_pe = _clean_float(action.get("trim_pct"))
                 update = {
                     "exit_action": "TRIM",
-                    "exit_trim_pct": action.get("trim_pct"),
+                    "exit_trim_pct": trim_pe,
                 }
                 client.table("positions").update(update).eq(
                     "ticker", ticker
                 ).eq("status", "OPEN").execute()
                 logger.info(
                     "PM: PRE_EARNINGS TRIM for %s — exit_action=TRIM (%.0f%%) written to positions",
-                    ticker, float(action.get("trim_pct") or 0) * 100,
+                    ticker, trim_pe * 100,
                 )
             return "SENT_TO_EXECUTION"
 
@@ -987,20 +1039,31 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 pass
 
     # 5. Rebalancing check (run once per cycle as lowest priority)
-    # Change 1: skip when there is no inventory — an empty portfolio with no
-    # pending candidates cannot be rebalanced; Claude would only return
-    # DEPLOY_CASH → NO_ACTION and waste tokens.
-    # Also skip if DEPLOY_CASH was triggered within the 4-hour cooldown window —
-    # the pipeline is already running; there is nothing else to do until it produces memos.
+    
+    # NEW: Check if the daily research cap (10) has been hit
+    research_cap_hit = False
+    try:
+        cfg_resp = _get_client().table("pm_config").select("daily_research_count,daily_research_date").eq("id", 1).single().execute()
+        if cfg_resp.data:
+            today_str = date.today().isoformat()
+            if str(cfg_resp.data.get("daily_research_date")) == today_str and int(cfg_resp.data.get("daily_research_count", 0)) >= 10:
+                research_cap_hit = True
+    except Exception as exc:
+        logger.warning("_scan_actionable_items: failed to read research cap — %s", exc)
+
     open_positions = base_ctx.get("positions", [])
     new_entry_candidates = [i for i in items if i["category"] == "NEW_ENTRY"]
+    
+    # Skip if portfolio is empty and no pending memos
     if not open_positions and not new_entry_candidates:
-        logger.debug(
-            "_scan_actionable_items: skipping REBALANCE — no open positions and no pending memos"
-        )
+        if research_cap_hit:
+            logger.debug("_scan_actionable_items: skipping REBALANCE — empty portfolio but daily research cap is hit")
+        else:
+            logger.debug("_scan_actionable_items: skipping REBALANCE — no open positions and no pending memos")
         items.sort(key=lambda x: x["priority"])
         return items
 
+    # Skip if DEPLOY_CASH pipeline is still in cooldown
     if (
         _deploy_cash_triggered_at is not None
         and (datetime.now(timezone.utc) - _deploy_cash_triggered_at).total_seconds()
@@ -1014,6 +1077,13 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         items.sort(key=lambda x: x["priority"])
         return items
 
+    # Skip REBALANCE entirely if the research cap is maxed out
+    if research_cap_hit:
+        logger.debug("_scan_actionable_items: skipping REBALANCE — daily research cap already maxed out")
+        items.sort(key=lambda x: x["priority"])
+        return items
+
+    # Evaluate exposure drift
     regime = base_ctx.get("macro_regime", "Transitional")
     caps = base_ctx.get("regime_caps", {"gross": 1.20, "net": 0.20})
     gross = base_ctx.get("portfolio_gross_exposure", 0.0)
@@ -1052,337 +1122,351 @@ def run_pm_cycle(
 
     Called every 5 minutes by APScheduler, or reactively by handle_critical_alert().
     """
-    if portfolio_value is None:
-        from backend.broker.ibkr import get_portfolio_value as _get_pv
-        portfolio_value = _get_pv()
-
-    cycle_id = _next_cycle_id()
-    cycle_start = datetime.now(timezone.utc)
-    decisions_made: List[Dict[str, Any]] = []
-
-    logger.info("PM cycle start — id=%s type=%s", cycle_id, cycle_type)
-
-    # ── Step 1: Check halt state ──────────────────────────────────────────────
-    config = _get_pm_config()
-    if config.get("daily_loss_halt_triggered", False):
-        halted_until = config.get("halted_until")
-        if halted_until:
-            try:
-                halt_dt = datetime.fromisoformat(str(halted_until).replace("Z", "+00:00"))
-                if datetime.now(timezone.utc) < halt_dt:
-                    logger.info("PM cycle skipped — daily loss halt active until %s", halted_until)
-                    return {
-                        "cycle_id": cycle_id,
-                        "cycle_type": cycle_type,
-                        "skipped": True,
-                        "reason": "daily_loss_halt",
-                        "decisions_made": [],
-                    }
-                else:
-                    # Halt has expired — clear it
-                    _set_halt(False)
-            except Exception:
-                pass
-
-    # ── Step 2: Intraday drawdown check ──────────────────────────────────────
-    drawdown_pct = _check_intraday_drawdown(portfolio_value)
-    if _get_pm_config().get("daily_loss_halt_triggered", False):
+    if not _acquire_pm_lock():
+        logger.info("PM cycle skipped — another PM instance is currently running.")
         return {
-            "cycle_id": cycle_id,
+            "cycle_id": _next_cycle_id(),
             "cycle_type": cycle_type,
             "skipped": True,
-            "reason": f"daily_loss_halt_triggered (drawdown={drawdown_pct:.2%})",
+            "reason": "pm_locked_by_other_process",
             "decisions_made": [],
         }
 
-    # ── Step 3: Build base context ────────────────────────────────────────────
-    from backend.agents.pm_prompts.base_context import build_base_context
-    base_ctx = build_base_context(_get_client())
-    base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
-
-    # ── Step 3b: Event-driven research triggers (market hours only) ───────────
     try:
-        _scan_event_triggers()
-    except Exception as exc:
-        logger.warning("PM cycle: event trigger scan failed — %s", exc)
+        if portfolio_value is None:
+            from backend.broker.ibkr import get_portfolio_value as _get_pv
+            portfolio_value = _get_pv()
 
-    # ── Step 3c: Pre-Claude gates (Changes 2 and 3) ───────────────────────────
-    pending_memo_count = _count_pending_memos()
-    current_fp = _build_cycle_fingerprint(base_ctx, pending_memo_count)
+        cycle_id = _next_cycle_id()
+        cycle_start = datetime.now(timezone.utc)
+        decisions_made: List[Dict[str, Any]] = []
 
-    # Change 2: skip if state is identical to last cycle within 30 minutes
-    last_fp = _last_cycle_state.get("fingerprint")
-    last_ts = _last_cycle_state.get("timestamp")
-    if (
-        last_fp is not None
-        and last_ts is not None
-        and _fingerprints_match(current_fp, last_fp)
-        and (datetime.now(timezone.utc) - last_ts).total_seconds() < _FINGERPRINT_TTL_SECONDS
-    ):
-        logger.debug(
-            "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within 30 min",
-            current_fp["position_count"],
-            current_fp["pending_memo_count"],
-            current_fp["active_alert_count"],
-            current_fp["regime"],
-        )
-        return {
-            "cycle_id": cycle_id,
-            "cycle_type": cycle_type,
-            "skipped": True,
-            "reason": "skipped_no_change",
-            "decisions_made": [],
-        }
+        logger.info("PM cycle start — id=%s type=%s", cycle_id, cycle_type)
 
-    # Change 3: empty portfolio + constructive regime → delegate to scheduler,
-    # no Claude call needed.
-    regime_now = base_ctx.get("macro_regime", "Transitional")
-    if (
-        current_fp["position_count"] == 0
-        and current_fp["pending_memo_count"] == 0
-        and regime_now in ("Risk-On", "Transitional")
-    ):
-        result = _handle_empty_portfolio_deploy(cycle_id, cycle_type, regime_now)
-        _last_cycle_state["fingerprint"] = current_fp
-        _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
-        return result
+        # ── Step 1: Check halt state ──────────────────────────────────────────────
+        config = _get_pm_config()
+        if config.get("daily_loss_halt_triggered", False):
+            halted_until = config.get("halted_until")
+            if halted_until:
+                try:
+                    halt_dt = datetime.fromisoformat(str(halted_until).replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) < halt_dt:
+                        logger.info("PM cycle skipped — daily loss halt active until %s", halted_until)
+                        return {
+                            "cycle_id": cycle_id,
+                            "cycle_type": cycle_type,
+                            "skipped": True,
+                            "reason": "daily_loss_halt",
+                            "decisions_made": [],
+                        }
+                    else:
+                        # Halt has expired — clear it
+                        _set_halt(False)
+                except Exception:
+                    pass
 
-    # ── Step 4: Scan actionable items ─────────────────────────────────────────
-    items = _scan_actionable_items(base_ctx)
+        # ── Step 2: Intraday drawdown check ──────────────────────────────────────
+        drawdown_pct = _check_intraday_drawdown(portfolio_value)
+        if _get_pm_config().get("daily_loss_halt_triggered", False):
+            return {
+                "cycle_id": cycle_id,
+                "cycle_type": cycle_type,
+                "skipped": True,
+                "reason": f"daily_loss_halt_triggered (drawdown={drawdown_pct:.2%})",
+                "decisions_made": [],
+            }
 
-    if not items:
-        logger.debug("PM cycle: no actionable items this cycle — logging as skipped_no_inventory")
-        _last_cycle_state["fingerprint"] = current_fp
-        _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
-        return {
-            "cycle_id": cycle_id,
-            "cycle_type": cycle_type,
-            "skipped": True,
-            "reason": "skipped_no_inventory",
-            "items_evaluated": 0,
-            "decisions_made": [],
-            "portfolio_state": _snapshot(base_ctx),
-        }
+        # ── Step 3: Build base context ────────────────────────────────────────────
+        from backend.agents.pm_prompts.base_context import build_base_context
+        base_ctx = build_base_context(_get_client())
+        base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
 
-    logger.info("PM cycle: %d actionable items found", len(items))
-
-    # ── Step 5: Evaluate each item ────────────────────────────────────────────
-    mode = config.get("mode", "autonomous")
-
-    for item in items:
-        category = item["category"]
-        data = item["data"]
-        ticker = None
-
+        # ── Step 3b: Event-driven research triggers (market hours only) ───────────
         try:
-            # Build prompt
-            system_prompt, user_message = _build_prompt(category, data, base_ctx)
+            _scan_event_triggers()
+        except Exception as exc:
+            logger.warning("PM cycle: event trigger scan failed — %s", exc)
 
-            # Pre-Claude hard blocks
-            sizing_rec = data.get("sizing_rec") or data.get("memo", {})
-            hard_blocks = _check_hard_blocks(
-                sizing_rec=sizing_rec if category == "NEW_ENTRY" else None,
-                base_ctx=base_ctx if category == "NEW_ENTRY" else None,
+        # ── Step 3c: Pre-Claude gates (Changes 2 and 3) ───────────────────────────
+        pending_memo_count = _count_pending_memos()
+        current_fp = _build_cycle_fingerprint(base_ctx, pending_memo_count)
+
+        # Change 2: skip if state is identical to last cycle within 30 minutes
+        last_fp = _last_cycle_state.get("fingerprint")
+        last_ts = _last_cycle_state.get("timestamp")
+        if (
+            last_fp is not None
+            and last_ts is not None
+            and _fingerprints_match(current_fp, last_fp)
+            and (datetime.now(timezone.utc) - last_ts).total_seconds() < _FINGERPRINT_TTL_SECONDS
+        ):
+            logger.debug(
+                "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within 30 min",
+                current_fp["position_count"],
+                current_fp["pending_memo_count"],
+                current_fp["active_alert_count"],
+                current_fp["regime"],
             )
+            return {
+                "cycle_id": cycle_id,
+                "cycle_type": cycle_type,
+                "skipped": True,
+                "reason": "skipped_no_change",
+                "decisions_made": [],
+            }
 
-            ticker = (
-                data.get("memo", {}).get("ticker")
-                or data.get("position", {}).get("ticker")
-                or data.get("alert", {}).get("ticker")
-            )
+        # Change 3: empty portfolio + constructive regime → delegate to scheduler,
+        # no Claude call needed.
+        regime_now = base_ctx.get("macro_regime", "Transitional")
+        if (
+            current_fp["position_count"] == 0
+            and current_fp["pending_memo_count"] == 0
+            and regime_now in ("Risk-On", "Transitional")
+        ):
+            result = _handle_empty_portfolio_deploy(cycle_id, cycle_type, regime_now)
+            _last_cycle_state["fingerprint"] = current_fp
+            _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
+            return result
 
-            # If hard blocks prevent execution, skip Claude call for new entries
-            if category == "NEW_ENTRY" and not all(hard_blocks.values()):
-                failed = [k for k, v in hard_blocks.items() if not v]
+        # ── Step 4: Scan actionable items ─────────────────────────────────────────
+        items = _scan_actionable_items(base_ctx)
+
+        if not items:
+            logger.debug("PM cycle: no actionable items this cycle — logging as skipped_no_inventory")
+            _last_cycle_state["fingerprint"] = current_fp
+            _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
+            return {
+                "cycle_id": cycle_id,
+                "cycle_type": cycle_type,
+                "skipped": True,
+                "reason": "skipped_no_inventory",
+                "items_evaluated": 0,
+                "decisions_made": [],
+                "portfolio_state": _snapshot(base_ctx),
+            }
+
+        logger.info("PM cycle: %d actionable items found", len(items))
+
+        # ── Step 5: Evaluate each item ────────────────────────────────────────────
+        mode = config.get("mode", "autonomous")
+
+        for item in items:
+            category = item["category"]
+            data = item["data"]
+            ticker = None
+
+            try:
+                # Build prompt
+                system_prompt, user_message = _build_prompt(category, data, base_ctx)
+
+                # Pre-Claude hard blocks
+                sizing_rec = data.get("sizing_rec") or data.get("memo", {})
+                hard_blocks = _check_hard_blocks(
+                    sizing_rec=sizing_rec if category == "NEW_ENTRY" else None,
+                    base_ctx=base_ctx if category == "NEW_ENTRY" else None,
+                )
+
+                ticker = (
+                    data.get("memo", {}).get("ticker")
+                    or data.get("position", {}).get("ticker")
+                    or data.get("alert", {}).get("ticker")
+                )
+
+                # If hard blocks prevent execution, skip Claude call for new entries
+                if category == "NEW_ENTRY" and not all(hard_blocks.values()):
+                    failed = [k for k, v in hard_blocks.items() if not v]
+                    decision_id = _next_decision_id()
+                    record = _build_decision_record(
+                        decision_id=decision_id,
+                        category=category,
+                        ticker=ticker,
+                        decision="REJECT",
+                        action_details={"hard_block_reason": failed},
+                        reasoning=f"Hard block prevented evaluation: {', '.join(failed)}",
+                        risk_assessment="Position violated hard constraints before PM evaluation.",
+                        confidence=1.0,
+                        context_snapshot=_snapshot(base_ctx),
+                        hard_blocks_checked=hard_blocks,
+                        execution_status="BLOCKED",
+                    )
+                    _log_pm_decision(record)
+                    decisions_made.append({
+                        "decision_id": decision_id,
+                        "ticker": ticker,
+                        "decision": "REJECT",
+                        "category": category,
+                    })
+                    continue
+
+                # Call Claude
+                decision_data = _call_claude(system_prompt, user_message)
+                if not decision_data:
+                    logger.warning("PM: Claude returned empty decision for %s %s", category, ticker)
+                    continue
+
+                decision = decision_data.get("decision", "NO_ACTION")
+
+                # Post-Claude hard block re-check for execution decisions
+                if decision in ("EXECUTE", "MODIFY_SIZE") and category == "NEW_ENTRY":
+                    action_details = decision_data.get("action_details", {})
+                    raw_pm_dollar = action_details.get("dollar_amount")
+                    post_dollar = None if raw_pm_dollar in (None, "") else _clean_float(raw_pm_dollar)
+                    post_blocks = _check_hard_blocks(
+                        dollar_amount=post_dollar,
+                        base_ctx=base_ctx,
+                    )
+                    if not all(post_blocks.values()):
+                        decision_data["decision"] = "DEFER"
+                        decision_data["reasoning"] = (
+                            decision_data.get("reasoning", "")
+                            + " (Post-Claude hard block: position would exceed portfolio constraints.)"
+                        )
+
+                # Determine execution_status
                 decision_id = _next_decision_id()
-                record = _build_decision_record(
+                record_template = _build_decision_record(
                     decision_id=decision_id,
                     category=category,
                     ticker=ticker,
-                    decision="REJECT",
-                    action_details={"hard_block_reason": failed},
-                    reasoning=f"Hard block prevented evaluation: {', '.join(failed)}",
-                    risk_assessment="Position violated hard constraints before PM evaluation.",
-                    confidence=1.0,
+                    decision=decision_data.get("decision", decision),
+                    action_details=decision_data.get("action_details", {}),
+                    reasoning=decision_data.get("reasoning", ""),
+                    risk_assessment=decision_data.get("risk_assessment", ""),
+                    confidence=_clean_float(decision_data.get("confidence"), 0.5),
                     context_snapshot=_snapshot(base_ctx),
                     hard_blocks_checked=hard_blocks,
-                    execution_status="BLOCKED",
+                    execution_status="PENDING_HUMAN",  # filled below
                 )
-                _log_pm_decision(record)
-                decisions_made.append({
-                    "decision_id": decision_id,
-                    "ticker": ticker,
-                    "decision": "REJECT",
-                    "category": category,
-                })
-                continue
 
-            # Call Claude
-            decision_data = _call_claude(system_prompt, user_message)
-            if not decision_data:
-                logger.warning("PM: Claude returned empty decision for %s %s", category, ticker)
-                continue
+                # Always update memo status so this memo is not re-evaluated next cycle
+                final_decision = decision_data.get("decision", decision)
+                memo_id: Optional[str] = None
+                if category == "NEW_ENTRY" and ticker:
+                    memo_id = data.get("memo", {}).get("id")
+                    _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
 
-            decision = decision_data.get("decision", "NO_ACTION")
+                # Pass memo_id into record_template so _route_decision can use it
+                record_template["memo_id"] = memo_id
 
-            # Post-Claude hard block re-check for execution decisions
-            if decision in ("EXECUTE", "MODIFY_SIZE") and category == "NEW_ENTRY":
-                action_details = decision_data.get("action_details", {})
-                claude_dollar = action_details.get("dollar_amount")
-                post_blocks = _check_hard_blocks(
-                    dollar_amount=float(claude_dollar) if claude_dollar else None,
-                    base_ctx=base_ctx,
-                )
-                if not all(post_blocks.values()):
-                    decision_data["decision"] = "DEFER"
-                    decision_data["reasoning"] = (
-                        decision_data.get("reasoning", "")
-                        + " (Post-Claude hard block: position would exceed portfolio constraints.)"
-                    )
-
-            # Determine execution_status
-            decision_id = _next_decision_id()
-            record_template = _build_decision_record(
-                decision_id=decision_id,
-                category=category,
-                ticker=ticker,
-                decision=decision_data.get("decision", decision),
-                action_details=decision_data.get("action_details", {}),
-                reasoning=decision_data.get("reasoning", ""),
-                risk_assessment=decision_data.get("risk_assessment", ""),
-                confidence=float(decision_data.get("confidence", 0.5)),
-                context_snapshot=_snapshot(base_ctx),
-                hard_blocks_checked=hard_blocks,
-                execution_status="PENDING_HUMAN",  # filled below
-            )
-
-            # Always update memo status so this memo is not re-evaluated next cycle
-            final_decision = decision_data.get("decision", decision)
-            memo_id: Optional[str] = None
-            if category == "NEW_ENTRY" and ticker:
-                memo_id = data.get("memo", {}).get("id")
-                _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
-
-            # Pass memo_id into record_template so _route_decision can use it
-            record_template["memo_id"] = memo_id
-
-            # Route decision (actual Supabase updates — positions/config)
-            # autonomous → size + approve immediately, no human step
-            # supervised → size but leave as PENDING_APPROVAL for human review
-            pv = base_ctx.get("portfolio_value_usd")
-            if _is_market_open():
-                auto_approve = (mode == "autonomous")
-                execution_status = _route_decision(
-                    decision_data, record_template,
-                    portfolio_value=pv,
-                    auto_approve=auto_approve,
-                )
-            else:
-                # Non-market-hours: log the decision but defer order placement.
-                # Position SIZING (creating the DB row) is NOT market-hours-dependent —
-                # the execution agent is already market-hours gated and will place the
-                # order at the next open.  Only actual order placement needs to wait.
-                execution_status = "DEFERRED"
-                if category in ("CRISIS",):
-                    # Crisis can act outside market hours (prep for next open)
-                    execution_status = _route_decision(
-                        decision_data, record_template,
-                        auto_approve=(mode == "autonomous"),
-                    )
-                elif category == "REBALANCE" and decision_data.get("decision") == "DEPLOY_CASH":
-                    # Pipeline queueing (screener/research) is not market-hours-dependent
-                    execution_status = _route_decision(
-                        decision_data, record_template,
-                        auto_approve=(mode == "autonomous"),
-                    )
-                elif category == "NEW_ENTRY" and final_decision in ("EXECUTE", "MODIFY_SIZE"):
-                    # Create the position row now so execution agent picks it up at market open.
-                    # auto_approve=False forces PENDING_APPROVAL status — human still confirms
-                    # in supervised mode; in autonomous mode we approve but execution is deferred.
+                # Route decision (actual Supabase updates — positions/config)
+                # autonomous → size + approve immediately, no human step
+                # supervised → size but leave as PENDING_APPROVAL for human review
+                pv = base_ctx.get("portfolio_value_usd")
+                if _is_market_open():
+                    auto_approve = (mode == "autonomous")
                     execution_status = _route_decision(
                         decision_data, record_template,
                         portfolio_value=pv,
-                        auto_approve=(mode == "autonomous"),
+                        auto_approve=auto_approve,
                     )
-                    # Wrap status so the log reflects after-hours context
-                    if execution_status in ("SENT_TO_EXECUTION", "PENDING_HUMAN"):
-                        execution_status = "PENDING_HUMAN"
+                else:
+                    # Non-market-hours: log the decision but defer order placement.
+                    # Position SIZING (creating the DB row) is NOT market-hours-dependent —
+                    # the execution agent is already market-hours gated and will place the
+                    # order at the next open.  Only actual order placement needs to wait.
+                    execution_status = "DEFERRED"
+                    if category in ("CRISIS",):
+                        # Crisis can act outside market hours (prep for next open)
+                        execution_status = _route_decision(
+                            decision_data, record_template,
+                            auto_approve=(mode == "autonomous"),
+                        )
+                    elif category == "REBALANCE" and decision_data.get("decision") == "DEPLOY_CASH":
+                        # Pipeline queueing (screener/research) is not market-hours-dependent
+                        execution_status = _route_decision(
+                            decision_data, record_template,
+                            auto_approve=(mode == "autonomous"),
+                        )
+                    elif category == "NEW_ENTRY" and final_decision in ("EXECUTE", "MODIFY_SIZE"):
+                        # Create the position row now so execution agent picks it up at market open.
+                        # auto_approve=False forces PENDING_APPROVAL status — human still confirms
+                        # in supervised mode; in autonomous mode we approve but execution is deferred.
+                        execution_status = _route_decision(
+                            decision_data, record_template,
+                            portfolio_value=pv,
+                            auto_approve=(mode == "autonomous"),
+                        )
+                        # Wrap status so the log reflects after-hours context
+                        if execution_status == "SENT_TO_EXECUTION":
+                            execution_status = "QUEUED_FOR_OPEN"
 
-                elif category in ("EXIT_TRIM", "PRE_EARNINGS") and final_decision not in (
-                    "HOLD", "NO_ACTION", "MONITOR"
-                ):
-                    # Writing exit_action to an OPEN position is a pure DB operation —
-                    # no market-hours dependency.  Execution agent is already gated.
-                    execution_status = _route_decision(
-                        decision_data, record_template,
-                        auto_approve=(mode == "autonomous"),
-                    )
+                    elif category in ("EXIT_TRIM", "PRE_EARNINGS") and final_decision not in (
+                        "HOLD", "NO_ACTION", "MONITOR"
+                    ):
+                        # Writing exit_action to an OPEN position is a pure DB operation —
+                        # no market-hours dependency.  Execution agent is already gated.
+                        execution_status = _route_decision(
+                            decision_data, record_template,
+                            auto_approve=(mode == "autonomous"),
+                        )
 
-                elif category == "REBALANCE" and final_decision in ("REBALANCE", "RAISE_CASH"):
-                    # Trimming open positions is a pure DB write — route now so the
-                    # execution agent can act at market open.
-                    execution_status = _route_decision(
-                        decision_data, record_template,
-                        auto_approve=(mode == "autonomous"),
-                    )
+                    elif category == "REBALANCE" and final_decision in ("REBALANCE", "RAISE_CASH"):
+                        # Trimming open positions is a pure DB write — route now so the
+                        # execution agent can act at market open.
+                        execution_status = _route_decision(
+                            decision_data, record_template,
+                            auto_approve=(mode == "autonomous"),
+                        )
 
-            record_template["execution_status"] = execution_status
+                record_template["execution_status"] = execution_status
 
-            # Embed alert_id in action_details for CRISIS deduplication
-            if category == "CRISIS" and data.get("alert", {}).get("id"):
-                ad = record_template.get("action_details") or {}
-                ad["alert_id"] = data["alert"]["id"]
-                record_template["action_details"] = ad
+                # Embed alert_id in action_details for CRISIS deduplication
+                if category == "CRISIS" and data.get("alert", {}).get("id"):
+                    ad = record_template.get("action_details") or {}
+                    ad["alert_id"] = data["alert"]["id"]
+                    record_template["action_details"] = ad
 
-            # Log decision FIRST, then it's already persisted regardless of routing outcome
-            _log_pm_decision(record_template)
+                # Log decision FIRST, then it's already persisted regardless of routing outcome
+                _log_pm_decision(record_template)
 
-            # Slack notification for every PM decision
-            notify_event("PM_DECISION", {
-                "category": category,
-                "decision": decision_data.get("decision", decision),
-                "ticker": ticker,
-                "execution_status": execution_status,
-                "confidence": decision_data.get("confidence"),
-                "reasoning": decision_data.get("reasoning", ""),
-            })
+                # Slack notification for every PM decision
+                notify_event("PM_DECISION", {
+                    "category": category,
+                    "decision": decision_data.get("decision", decision),
+                    "ticker": ticker,
+                    "execution_status": execution_status,
+                    "confidence": decision_data.get("confidence"),
+                    "reasoning": decision_data.get("reasoning", ""),
+                })
 
-            decisions_made.append({
-                "decision_id": decision_id,
-                "ticker": ticker,
-                "decision": decision_data.get("decision", decision),
-                "category": category,
-            })
+                decisions_made.append({
+                    "decision_id": decision_id,
+                    "ticker": ticker,
+                    "decision": decision_data.get("decision", decision),
+                    "category": category,
+                })
 
-            logger.info(
-                "PM: %s %s → %s (confidence=%.2f, status=%s)",
-                category,
-                ticker or "portfolio",
-                decision_data.get("decision"),
-                decision_data.get("confidence", 0.5),
-                execution_status,
-            )
+                logger.info(
+                    "PM: %s %s → %s (confidence=%.2f, status=%s)",
+                    category,
+                    ticker or "portfolio",
+                    decision_data.get("decision"),
+                    decision_data.get("confidence", 0.5),
+                    execution_status,
+                )
 
-        except Exception as exc:
-            logger.error(
-                "PM cycle: error processing %s item (%s) — %s",
-                category,
-                ticker or "unknown",
-                exc,
-            )
+            except Exception as exc:
+                logger.error(
+                    "PM cycle: error processing %s item (%s) — %s",
+                    category,
+                    ticker or "unknown",
+                    exc,
+                )
 
-    # Update fingerprint after a full cycle so Change 2 can deduplicate
-    # the next cycle if nothing material has changed.
-    _last_cycle_state["fingerprint"] = current_fp
-    _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
+        # Update fingerprint after a full cycle so Change 2 can deduplicate
+        # the next cycle if nothing material has changed.
+        _last_cycle_state["fingerprint"] = current_fp
+        _last_cycle_state["timestamp"] = datetime.now(timezone.utc)
 
-    return {
-        "cycle_id": cycle_id,
-        "cycle_type": cycle_type,
-        "items_evaluated": len(items),
-        "decisions_made": decisions_made,
-        "portfolio_state": _snapshot(base_ctx),
-    }
+        return {
+            "cycle_id": cycle_id,
+            "cycle_type": cycle_type,
+            "items_evaluated": len(items),
+            "decisions_made": decisions_made,
+            "portfolio_state": _snapshot(base_ctx),
+        }
+    finally:
+        _release_pm_lock()
 
 
 def _build_prompt(
@@ -1516,58 +1600,72 @@ async def handle_critical_alert(alert_id: str) -> Dict[str, Any]:
     Bypasses the 5-minute schedule. Called by the Risk Agent when severity=CRITICAL.
     """
     logger.warning("PM: reactive CRITICAL alert cycle triggered — alert_id=%s", alert_id)
+
+    max_wait_seconds = 120
+    waited = 0
+    while not _acquire_pm_lock():
+        if waited >= max_wait_seconds:
+            logger.error("handle_critical_alert: Timeout waiting for PM lock.")
+            return {"error": "PM lock timeout — cycle aborted"}
+        logger.info("PM is currently running. Reactive CRITICAL handler waiting...")
+        await asyncio.sleep(5)
+        waited += 5
+
     try:
-        resp = (
-            _get_client()
-            .table("risk_alerts")
-            .select("*")
-            .eq("id", alert_id)
-            .limit(1)
-            .execute()
+        try:
+            resp = (
+                _get_client()
+                .table("risk_alerts")
+                .select("*")
+                .eq("id", alert_id)
+                .limit(1)
+                .execute()
+            )
+            alert = resp.data[0] if resp.data else {"id": alert_id, "severity": "CRITICAL"}
+        except Exception as exc:
+            logger.error("handle_critical_alert: alert fetch failed — %s", exc)
+            alert = {"id": alert_id, "severity": "CRITICAL"}
+
+        from backend.agents.pm_prompts.base_context import build_base_context
+        from backend.agents.pm_prompts.crisis import build_crisis_prompt
+
+        base_ctx = build_base_context(_get_client())
+        system_prompt, user_message = build_crisis_prompt(alert, base_ctx)
+        decision_data = _call_claude(system_prompt, user_message)
+
+        if not decision_data:
+            return {"error": "Claude call failed for reactive CRITICAL handler"}
+
+        decision_id = _next_decision_id()
+        action_details = decision_data.get("action_details", {})
+        action_details["alert_id"] = alert_id
+
+        record = _build_decision_record(
+            decision_id=decision_id,
+            category="CRISIS",
+            ticker=alert.get("ticker"),
+            decision=decision_data.get("decision", "MONITOR"),
+            action_details=action_details,
+            reasoning=decision_data.get("reasoning", ""),
+            risk_assessment=decision_data.get("risk_assessment", ""),
+            confidence=_clean_float(decision_data.get("confidence"), 0.5),
+            context_snapshot=_snapshot(base_ctx),
+            hard_blocks_checked={"daily_loss_ok": True},
+            execution_status="SENT_TO_EXECUTION",
         )
-        alert = resp.data[0] if resp.data else {"id": alert_id, "severity": "CRITICAL"}
-    except Exception as exc:
-        logger.error("handle_critical_alert: alert fetch failed — %s", exc)
-        alert = {"id": alert_id, "severity": "CRITICAL"}
 
-    from backend.agents.pm_prompts.base_context import build_base_context
-    from backend.agents.pm_prompts.crisis import build_crisis_prompt
+        execution_status = _route_decision(decision_data, record)
+        record["execution_status"] = execution_status
+        _log_pm_decision(record)
 
-    base_ctx = build_base_context(_get_client())
-    system_prompt, user_message = build_crisis_prompt(alert, base_ctx)
-    decision_data = _call_claude(system_prompt, user_message)
-
-    if not decision_data:
-        return {"error": "Claude call failed for reactive CRITICAL handler"}
-
-    decision_id = _next_decision_id()
-    action_details = decision_data.get("action_details", {})
-    action_details["alert_id"] = alert_id
-
-    record = _build_decision_record(
-        decision_id=decision_id,
-        category="CRISIS",
-        ticker=alert.get("ticker"),
-        decision=decision_data.get("decision", "MONITOR"),
-        action_details=action_details,
-        reasoning=decision_data.get("reasoning", ""),
-        risk_assessment=decision_data.get("risk_assessment", ""),
-        confidence=float(decision_data.get("confidence", 0.5)),
-        context_snapshot=_snapshot(base_ctx),
-        hard_blocks_checked={"daily_loss_ok": True},
-        execution_status="SENT_TO_EXECUTION",
-    )
-
-    execution_status = _route_decision(decision_data, record)
-    record["execution_status"] = execution_status
-    _log_pm_decision(record)
-
-    logger.info(
-        "PM: reactive CRITICAL → %s (confidence=%.2f)",
-        decision_data.get("decision"),
-        decision_data.get("confidence", 0.5),
-    )
-    return record
+        logger.info(
+            "PM: reactive CRITICAL → %s (confidence=%.2f)",
+            decision_data.get("decision"),
+            decision_data.get("confidence", 0.5),
+        )
+        return record
+    finally:
+        _release_pm_lock()
 
 
 async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
@@ -1576,38 +1674,51 @@ async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
     """
     logger.info("PM: reactive regime change cycle — new_regime=%s", new_regime)
 
-    from backend.agents.pm_prompts.base_context import build_base_context
-    from backend.agents.pm_prompts.rebalance import build_rebalance_prompt
+    max_wait_seconds = 120
+    waited = 0
+    while not _acquire_pm_lock():
+        if waited >= max_wait_seconds:
+            logger.error("handle_regime_change: Timeout waiting for PM lock.")
+            return {"error": "PM lock timeout — cycle aborted"}
+        logger.info("PM is currently running. Reactive REGIME handler waiting...")
+        await asyncio.sleep(5)
+        waited += 5
 
-    base_ctx = build_base_context(_get_client())
-    base_ctx["macro_regime"] = new_regime  # use incoming regime for this review
+    try:
+        from backend.agents.pm_prompts.base_context import build_base_context
+        from backend.agents.pm_prompts.rebalance import build_rebalance_prompt
 
-    system_prompt, user_message = build_rebalance_prompt(base_ctx)
-    decision_data = _call_claude(system_prompt, user_message)
+        base_ctx = build_base_context(_get_client())
+        base_ctx["macro_regime"] = new_regime  # use incoming regime for this review
 
-    if not decision_data:
-        return {"error": "Claude call failed for reactive regime change handler"}
+        system_prompt, user_message = build_rebalance_prompt(base_ctx)
+        decision_data = _call_claude(system_prompt, user_message)
 
-    decision_id = _next_decision_id()
-    record = _build_decision_record(
-        decision_id=decision_id,
-        category="REBALANCE",
-        ticker=None,
-        decision=decision_data.get("decision", "NO_ACTION"),
-        action_details=decision_data.get("action_details", {}),
-        reasoning=decision_data.get("reasoning", ""),
-        risk_assessment=decision_data.get("risk_assessment", ""),
-        confidence=float(decision_data.get("confidence", 0.5)),
-        context_snapshot=_snapshot(base_ctx),
-        hard_blocks_checked={},
-        execution_status="SENT_TO_EXECUTION",
-    )
+        if not decision_data:
+            return {"error": "Claude call failed for reactive regime change handler"}
 
-    execution_status = _route_decision(decision_data, record)
-    record["execution_status"] = execution_status
-    _log_pm_decision(record)
+        decision_id = _next_decision_id()
+        record = _build_decision_record(
+            decision_id=decision_id,
+            category="REBALANCE",
+            ticker=None,
+            decision=decision_data.get("decision", "NO_ACTION"),
+            action_details=decision_data.get("action_details", {}),
+            reasoning=decision_data.get("reasoning", ""),
+            risk_assessment=decision_data.get("risk_assessment", ""),
+            confidence=_clean_float(decision_data.get("confidence"), 0.5),
+            context_snapshot=_snapshot(base_ctx),
+            hard_blocks_checked={},
+            execution_status="SENT_TO_EXECUTION",
+        )
 
-    return record
+        execution_status = _route_decision(decision_data, record)
+        record["execution_status"] = execution_status
+        _log_pm_decision(record)
+
+        return record
+    finally:
+        _release_pm_lock()
 
 
 # ── Legacy compatibility shims ────────────────────────────────────────────────
