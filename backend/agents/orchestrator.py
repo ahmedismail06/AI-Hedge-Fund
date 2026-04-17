@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,9 @@ _last_cycle_state: Dict[str, Any] = {
 _DEPLOY_CASH_COOLDOWN_SECONDS = 14400  # 4 hours
 _deploy_cash_triggered_at: Optional[datetime] = None
 
+# ── Event scan throttle — prevents excessive Polygon API calls ───────────────
+_last_event_scan: Dict[str, datetime] = {}
+
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -96,16 +100,34 @@ def _get_pm_config() -> Dict[str, Any]:
         "halted_until": None,
     }
 def _acquire_pm_lock() -> bool:
-    """Try to acquire the global PM lock. Returns True if acquired, False if already locked."""
+    """Try to acquire the global PM lock. Returns True if acquired, False if already locked.
+    Includes a 2-hour 'steal' timeout to prevent lock-death.
+    """
     try:
         client = _get_client()
         # Read current state
-        resp = client.table("pm_config").select("pm_is_running").eq("id", 1).single().execute()
+        resp = client.table("pm_config").select("pm_is_running, pm_lock_timestamp").eq("id", 1).single().execute()
         if resp.data and resp.data.get("pm_is_running"):
-            return False  # Lock is currently held by another process
+            # Check for lock timeout (2 hours)
+            lock_ts_str = resp.data.get("pm_lock_timestamp")
+            if lock_ts_str:
+                try:
+                    lock_ts = datetime.fromisoformat(lock_ts_str.replace("Z", "+00:00"))
+                    if (datetime.now(timezone.utc) - lock_ts).total_seconds() > 7200:
+                        logger.warning("_acquire_pm_lock: lock timed out (>2h) — stealing lock.")
+                    else:
+                        return False  # Lock is fresh and held by another process
+                except Exception:
+                    return False
+            else:
+                return False
         
         # Acquire lock
-        client.table("pm_config").update({"pm_is_running": True}).eq("id", 1).execute()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        client.table("pm_config").update({
+            "pm_is_running": True,
+            "pm_lock_timestamp": now_iso
+        }).eq("id", 1).execute()
         return True
     except Exception as exc:
         logger.warning("_acquire_pm_lock: failed to check/set lock — %s", exc)
@@ -247,7 +269,7 @@ def _handle_empty_portfolio_deploy(
         action = "triggered_screener_run"
         detail = "no unqueued screener results found for today"
         try:
-            _trigger_screener()
+            threading.Thread(target=_trigger_screener, daemon=True).start()
         except Exception as exc:
             logger.error(
                 "_handle_empty_portfolio_deploy: screener trigger failed — %s", exc
@@ -303,29 +325,17 @@ def _trigger_deploy_cash_pipeline() -> str:
         logger.warning("_trigger_deploy_cash_pipeline: watchlist query failed — %s", exc)
 
     if not top_tickers:
-        # No candidates yet — run screener synchronously first
+        # No candidates yet — run screener in background
         try:
-            _trigger_screener()
-            logger.info("_trigger_deploy_cash_pipeline: screener complete, re-querying watchlist")
+            threading.Thread(target=_trigger_screener, daemon=True).start()
+            detail = "triggered_screener_background (no candidates found after screen)"
+            logger.info("_trigger_deploy_cash_pipeline: screener triggered in background")
         except Exception as exc:
             logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
-
-        # Screener ran synchronously — re-query for fresh results
-        try:
-            resp = (
-                _get_client()
-                .table("watchlist")
-                .select("ticker,composite_score")
-                .eq("run_date", today_str)
-                .eq("queued_for_research", False)
-                .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
-                .order("composite_score", desc=True)
-                .limit(3)
-                .execute()
-            )
-            top_tickers = [row["ticker"] for row in (resp.data or [])]
-        except Exception as exc:
-            logger.warning("_trigger_deploy_cash_pipeline: post-screener watchlist query failed — %s", exc)
+            detail = "screener_trigger_failed"
+        
+        _deploy_cash_triggered_at = datetime.now(timezone.utc)
+        return detail
 
     if top_tickers:
         try:
@@ -358,9 +368,8 @@ def _compute_portfolio_value() -> float:
     Method:
       1. Sum share_count * current_price for all OPEN positions.
       2. Add cash balance from pm_config (column: cash_balance) if present.
-      3. Fall back to _PAPER_TRADING_NAV if neither source is available.
 
-    Never raises — returns fallback on any error.
+    Returns 0.0 on any failure or if NAV cannot be determined.
     """
     try:
         client = _get_client()
@@ -399,16 +408,13 @@ def _compute_portfolio_value() -> float:
 
         nav = invested + cash
         if nav <= 0:
-            logger.info(
-                "_compute_portfolio_value: NAV computed as %.2f — using paper trading fallback $%.0f",
-                nav, _PAPER_TRADING_NAV,
-            )
-            return _PAPER_TRADING_NAV
+            logger.error("_compute_portfolio_value: NAV computed as %.2f (invalid/empty)", nav)
+            return 0.0
         return nav
 
     except Exception as exc:
-        logger.warning("_compute_portfolio_value: unexpected error — %s; using fallback", exc)
-        return _PAPER_TRADING_NAV
+        logger.error("_compute_portfolio_value: unexpected error — %s", exc)
+        return 0.0
 
 
 # ── Hard-block enforcement ────────────────────────────────────────────────────
@@ -483,21 +489,26 @@ def _check_hard_blocks(
     return blocks
 
 
-def _is_market_open() -> bool:
-    """Return True if current ET time is within 9:30 AM – 4:00 PM Mon–Fri."""
+def _is_market_hours() -> bool:
+    """Return True if current ET time is within regular market hours (9:30 AM – 4:00 PM Mon–Fri)."""
     try:
         from zoneinfo import ZoneInfo
         now_et = datetime.now(ZoneInfo("America/New_York"))
     except Exception:
-        import time as _time
-        # Rough fallback: UTC-4 (EDT)
-        now_et = datetime.now(timezone.utc) - timedelta(hours=4)
+        # Fallback to manual offset if zoneinfo is unavailable
+        # Note: This does not account for DST transitions perfectly but is a safe fallback.
+        # Most environments running this (Python 3.9+) will have zoneinfo.
+        now_utc = datetime.now(timezone.utc)
+        # EST is UTC-5, EDT is UTC-4. Default to EST for safety or 
+        # assume most of the time it's UTC-4/5.
+        now_et = now_utc - timedelta(hours=5) 
 
     if now_et.weekday() >= 5:  # Saturday/Sunday
         return False
+    
     market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    return market_open <= now_et <= market_close
+    return market_open <= now_et < market_close
 
 
 def _check_intraday_drawdown(portfolio_value: float) -> float:
@@ -1180,6 +1191,16 @@ def run_pm_cycle(
         from backend.agents.pm_prompts.base_context import build_base_context
         base_ctx = build_base_context(_get_client())
         base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
+        
+        if base_ctx["portfolio_value_usd"] <= 0:
+            logger.error("PM cycle aborted — portfolio value could not be computed (nav <= 0).")
+            return {
+                "cycle_id": cycle_id,
+                "cycle_type": cycle_type,
+                "skipped": True,
+                "reason": "invalid_portfolio_value",
+                "decisions_made": [],
+            }
 
         # ── Step 3b: Event-driven research triggers (market hours only) ───────────
         try:
@@ -1343,7 +1364,6 @@ def run_pm_cycle(
                 memo_id: Optional[str] = None
                 if category == "NEW_ENTRY" and ticker:
                     memo_id = data.get("memo", {}).get("id")
-                    _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
 
                 # Pass memo_id into record_template so _route_decision can use it
                 record_template["memo_id"] = memo_id
@@ -1352,7 +1372,7 @@ def run_pm_cycle(
                 # autonomous → size + approve immediately, no human step
                 # supervised → size but leave as PENDING_APPROVAL for human review
                 pv = base_ctx.get("portfolio_value_usd")
-                if _is_market_open():
+                if _is_market_hours():
                     auto_approve = (mode == "autonomous")
                     execution_status = _route_decision(
                         decision_data, record_template,
@@ -1409,6 +1429,10 @@ def run_pm_cycle(
                         )
 
                 record_template["execution_status"] = execution_status
+
+                # Post-routing memo update (Fix for desynchronization)
+                if category == "NEW_ENTRY" and ticker and execution_status != "BLOCKED":
+                    _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
 
                 # Embed alert_id in action_details for CRISIS deduplication
                 if category == "CRISIS" and data.get("alert", {}).get("id"):
@@ -1929,17 +1953,6 @@ def create_orchestrator_scheduler():
 
 # ── Event-driven research triggers ───────────────────────────────────────────
 
-def _is_market_hours() -> bool:
-    """Return True if current ET time is within regular market hours (9:30–16:00)."""
-    from zoneinfo import ZoneInfo
-    et_now = datetime.now(ZoneInfo("America/New_York"))
-    if et_now.weekday() >= 5:
-        return False
-    market_open = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
-    return market_open <= et_now < market_close
-
-
 def _check_news_spike(ticker: str) -> bool:
     """Return True if today's news count is > 3x the 30-day daily average."""
     polygon_key = os.getenv("POLYGON_API_KEY")
@@ -2053,7 +2066,9 @@ def _bulk_earnings_dropped_today(client, tickers: set[str]) -> set[str]:
 
 
 def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None:
-    """Set material_event flag on the most recent watchlist entry for this ticker."""
+    """Set material_event flag on the most recent watchlist entry for this ticker.
+    If no entry exists for today, creates a new one to ensure the trigger is not lost.
+    """
     today_str = date.today().isoformat()
     priority = 1 if is_held else 2
     try:
@@ -2065,19 +2080,26 @@ def _set_material_event(client, ticker: str, reason: str, is_held: bool) -> None
                 "priority": priority,
             }
         ).eq("ticker", ticker).eq("run_date", today_str).execute()
+        
         if result.data:
             logger.info(
                 "_set_material_event(%s): reason='%s' priority=%d rows_updated=%d",
                 ticker, reason, priority, len(result.data),
             )
         else:
-            # No watchlist row for today — held ticker not in today's screen run.
-            # The material_event flag cannot be set without a matching run_date row.
-            # The operator should run the screener or set the flag manually via Dashboard.
-            logger.warning(
-                "_set_material_event(%s): no watchlist row for run_date=%s — "
-                "material_event NOT persisted. Ticker may not be in today's screen.",
-                ticker, today_str,
+            # No watchlist row for today — create a new one so the trigger is persisted
+            client.table("watchlist").insert({
+                "ticker": ticker,
+                "run_date": today_str,
+                "material_event": True,
+                "material_event_reason": reason,
+                "queued_for_research": True,
+                "priority": priority,
+                "composite_score": 0.0, # Placeholder
+            }).execute()
+            logger.info(
+                "_set_material_event(%s): created new watchlist row for today (reason='%s')",
+                ticker, reason
             )
     except Exception as exc:
         logger.warning("_set_material_event(%s): failed — %s", ticker, exc)
@@ -2088,8 +2110,8 @@ def _scan_event_triggers() -> None:
 
     Runs inside the 5-minute PM cycle during market hours only.
     Three triggers:
-      - News volume > 3x 30-day daily average
-      - Intraday price move > 10%
+      - News volume > 3x 30-day daily average (Throttled: 1/hour)
+      - Intraday price move > 10% (Throttled: 1/hour)
       - Earnings call document became available today (from ticker_events)
 
     When triggered, sets material_event=True and queues for research at P1 (held)
@@ -2135,16 +2157,24 @@ def _scan_event_triggers() -> None:
     # Bulk-fetch which tickers have earnings available today — one query for all.
     earnings_dropped = _bulk_earnings_dropped_today(client, tickers_to_check)
 
+    now = datetime.now(timezone.utc)
     for ticker in tickers_to_check:
         is_held = ticker in open_tickers
         trigger_reason: str | None = None
 
         if ticker in earnings_dropped:
             trigger_reason = "earnings_call_available"
-        elif _check_news_spike(ticker):
-            trigger_reason = "news_volume_spike"
-        elif _is_market_hours() and _check_intraday_move(ticker):
-            trigger_reason = "intraday_move_gt10pct"
+        else:
+            # Throttle news and move checks to once per hour per ticker
+            last_scan = _last_event_scan.get(ticker)
+            if last_scan and (now - last_scan).total_seconds() < 3600:
+                continue
+            
+            _last_event_scan[ticker] = now
+            if _check_news_spike(ticker):
+                trigger_reason = "news_volume_spike"
+            elif _check_intraday_move(ticker):
+                trigger_reason = "intraday_move_gt10pct"
 
         if trigger_reason:
             _set_material_event(client, ticker, trigger_reason, is_held)
@@ -2222,8 +2252,7 @@ def _refresh_ticker_events_calendar() -> None:
                                     "source": "polygon",
                                 },
                                 on_conflict="ticker,event_type,fiscal_period",
-                                # Do NOT overwrite document_fetched=True rows
-                                # (ignore_duplicates equivalent — only insert new)
+                                ignore_duplicates=True,
                             ).execute()
                             rows_upserted += 1
                         except Exception:
@@ -2263,6 +2292,7 @@ def _refresh_ticker_events_calendar() -> None:
                             "source": "sec_edgar",
                         },
                         on_conflict="ticker,event_type,fiscal_period",
+                        ignore_duplicates=True,
                     ).execute()
                     rows_upserted += 1
                 except Exception:
