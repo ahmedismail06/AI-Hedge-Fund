@@ -77,6 +77,8 @@ ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS daily_research_count INTEGER NOT 
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS daily_research_date  DATE;
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS av_daily_count       INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS av_daily_date        DATE;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_lock_timestamp    TIMESTAMPTZ;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_is_running       BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ── Portfolio value tracking (added for _compute_portfolio_value) ─────────────
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS cash_balance NUMERIC(12, 2) NOT NULL DEFAULT 0;
