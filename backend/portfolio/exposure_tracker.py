@@ -201,11 +201,11 @@ def check_exposure_breach(
 
     # ── Check 2: Gross exposure cap ──────────────────────────────────────────────
     projected_gross = gross_now + new_pct
-    if projected_gross > max_gross:
+    if projected_gross > max_gross + 1e-6:
         reason = (
-            f"Adding this position would push gross exposure to {projected_gross:.1%}, "
+            f"Adding this position would push gross exposure to {projected_gross:.2%}, "
             f"exceeding the {regime} cap of {max_gross:.0%} "
-            f"(current gross: {gross_now:.1%})."
+            f"(current gross: {gross_now:.2%})."
         )
         logger.warning("Exposure breach — %s", reason)
         return True, reason
@@ -213,11 +213,11 @@ def check_exposure_breach(
     # ── Check 3: Net long cap (LONG positions only) ──────────────────────────────
     if direction_upper == "LONG":
         projected_net = net_now + new_pct
-        if projected_net > max_net_long:
+        if projected_net > max_net_long + 1e-6:
             reason = (
-                f"Adding this LONG position would push net exposure to {projected_net:.1%}, "
+                f"Adding this LONG position would push net exposure to {projected_net:.2%}, "
                 f"exceeding the {regime} net-long cap of {max_net_long:.0%} "
-                f"(current net: {net_now:.1%})."
+                f"(current net: {net_now:.2%})."
             )
             logger.warning("Exposure breach — %s", reason)
             return True, reason
@@ -225,11 +225,11 @@ def check_exposure_breach(
     # ── Check 4: Net short floor (SHORT positions only) ──────────────────────────
     if direction_upper == "SHORT":
         projected_net = net_now - new_pct
-        if projected_net < max_net_short:
+        if projected_net < max_net_short - 1e-6:
             reason = (
-                f"Adding this SHORT position would push net exposure to {projected_net:.1%}, "
+                f"Adding this SHORT position would push net exposure to {projected_net:.2%}, "
                 f"breaching the {regime} net-short floor of {max_net_short:.0%} "
-                f"(current net: {net_now:.1%})."
+                f"(current net: {net_now:.2%})."
             )
             logger.warning("Exposure breach — %s", reason)
             return True, reason
