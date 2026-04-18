@@ -169,6 +169,16 @@ def health():
 # ── Research ─────────────────────────────────────────────────────────────────
 
 
+@app.post("/research/run-queued")
+async def trigger_research_queue():
+    """Manually fire the research queue poller — processes today's queued_for_research tickers."""
+    import asyncio as _asyncio
+    from backend.agents.research_scheduler import _poll_research_queue
+    loop = _asyncio.get_event_loop()
+    processed = await loop.run_in_executor(None, _poll_research_queue)
+    return {"queued_tickers_processed": processed}
+
+
 @app.post("/research/{ticker}")
 def trigger_research(ticker: str, use_cache: bool = False):
     """
@@ -193,16 +203,6 @@ def trigger_research(ticker: str, use_cache: bool = False):
         memo["_storage_error"] = str(exc)
 
     return memo
-
-
-@app.post("/research/run-queued")
-async def trigger_research_queue():
-    """Manually fire the research queue poller — processes today's queued_for_research tickers."""
-    import asyncio as _asyncio
-    from backend.agents.research_scheduler import _poll_research_queue
-    loop = _asyncio.get_event_loop()
-    processed = await loop.run_in_executor(None, _poll_research_queue)
-    return {"queued_tickers_processed": processed}
 
 
 @app.get("/research/history")
