@@ -749,7 +749,7 @@ def _route_decision(
                     if new_shares:
                         update["share_count"] = new_shares
                     if new_dollar:
-                        update["dollar_amount"] = new_dollar
+                        update["dollar_size"] = new_dollar
                     if update:
                         pos_status = "APPROVED" if auto_approve else "PENDING_APPROVAL"
                         client.table("positions").update(update).eq("ticker", ticker).eq(
