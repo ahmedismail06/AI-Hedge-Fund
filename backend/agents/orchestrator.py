@@ -212,6 +212,11 @@ def _fingerprints_match(fp_a: Dict[str, Any], fp_b: Dict[str, Any]) -> bool:
     return all(fp_a.get(k) == fp_b.get(k) for k in keys)
 
 
+def _run_screener_async() -> None:
+    """Wrapper for background threads to ensure pipeline status is updated."""
+    _trigger_screener()
+
+
 def _handle_empty_portfolio_deploy(
     cycle_id: str,
     cycle_type: str,
@@ -269,7 +274,7 @@ def _handle_empty_portfolio_deploy(
         action = "triggered_screener_run"
         detail = "no unqueued screener results found for today"
         try:
-            threading.Thread(target=_trigger_screener, daemon=True).start()
+            threading.Thread(target=_run_screener_async, daemon=True).start()
         except Exception as exc:
             logger.error(
                 "_handle_empty_portfolio_deploy: screener trigger failed — %s", exc
@@ -327,7 +332,7 @@ def _trigger_deploy_cash_pipeline() -> str:
     if not top_tickers:
         # No candidates yet — run screener in background
         try:
-            threading.Thread(target=_trigger_screener, daemon=True).start()
+            threading.Thread(target=_run_screener_async, daemon=True).start()
             detail = "triggered_screener_background (no candidates found after screen)"
             logger.info("_trigger_deploy_cash_pipeline: screener triggered in background")
         except Exception as exc:
@@ -2309,25 +2314,51 @@ def _refresh_ticker_events_calendar() -> None:
     )
 
 
+def _update_pipeline_status(is_running: bool) -> None:
+    """Update pipeline_is_running and pipeline_last_run in pm_config.
+    Called when background tasks (screener, research, macro) start/finish.
+    """
+    try:
+        update = {
+            "pipeline_is_running": is_running,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if is_running:
+            update["pipeline_last_run"] = datetime.now(timezone.utc).isoformat()
+        
+        _get_client().table("pm_config").update(update).eq("id", 1).execute()
+    except Exception as exc:
+        logger.warning("_update_pipeline_status: failed — %s", exc)
+
+
 def _trigger_macro_agent() -> None:
     from backend.agents.macro_agent import run_macro_pipeline
+    _update_pipeline_status(True)
     try:
         run_macro_pipeline()
     except Exception as exc:
         logger.error("PM scheduler: macro agent trigger failed — %s", exc)
+    finally:
+        _update_pipeline_status(False)
 
 
 def _trigger_screener() -> None:
     from backend.agents.screening_agent import run_screening
+    _update_pipeline_status(True)
     try:
         run_screening()
     except Exception as exc:
         logger.error("PM scheduler: screener trigger failed — %s", exc)
+    finally:
+        _update_pipeline_status(False)
 
 
 def _trigger_research_queue() -> None:
     from backend.agents.research_scheduler import _poll_research_queue
+    _update_pipeline_status(True)
     try:
         _poll_research_queue()
     except Exception as exc:
         logger.error("PM scheduler: research queue trigger failed — %s", exc)
+    finally:
+        _update_pipeline_status(False)
