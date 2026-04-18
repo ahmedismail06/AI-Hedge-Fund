@@ -32,6 +32,22 @@ class PMConfig(BaseModel):
         default=None,
         description="ISO UTC timestamp when the halt expires (None = no active halt)",
     )
+    pm_is_running: bool = Field(
+        default=False,
+        description="True while a PM decision cycle is actively running",
+    )
+    pipeline_is_running: bool = Field(
+        default=False,
+        description="True while a background pipeline (screener, research, or macro) is running",
+    )
+    pipeline_last_run: Optional[datetime] = Field(
+        default=None,
+        description="UTC timestamp of the last background pipeline start",
+    )
+    pm_lock_timestamp: Optional[datetime] = Field(
+        default=None,
+        description="UTC timestamp of the current cycle lock acquisition",
+    )
 
 
 class PMContextSnapshot(BaseModel):

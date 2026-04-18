@@ -138,10 +138,11 @@ class SizingRecommendation(BaseModel):
     share_count: float = Field(
         description="Number of shares: dollar_size / entry_price."
     )
-    size_label: Literal["large", "medium", "small", "micro"] = Field(
+    size_label: Literal["large", "medium", "small", "micro", "PM_OVERRIDE"] = Field(
         description=(
             "Discrete size label derived from pct_of_portfolio: "
-            "large ≥ 6%, medium ≥ 3.5%, small ≥ 1.5%, micro otherwise."
+            "large ≥ 6%, medium ≥ 3.5%, small ≥ 1.5%, micro otherwise. "
+            "Set to 'PM_OVERRIDE' when explicitly set by the PM agent."
         )
     )
     pct_of_portfolio: float = Field(
