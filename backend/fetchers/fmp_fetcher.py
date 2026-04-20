@@ -197,6 +197,9 @@ def fetch_fmp(ticker: str) -> dict:
         "accounts_payable": None,
         "market_cap": None,
         "market_cap_source": None, # Bug 10: "yfinance" (live) or "polygon_reference" (stale)
+        "beta": None,
+        "interest_expense": None,
+        "polygon_financials_raw": None,
         "error": None,
     }
 
@@ -213,6 +216,14 @@ def fetch_fmp(ticker: str) -> dict:
         result["analyst_count"] = info.get("numberOfAnalystOpinions")
         result["target_mean_price"] = info.get("targetMeanPrice")
         result["sector"] = info.get("sector")
+
+        # Beta
+        try:
+            beta_val = info.get("beta")
+            if beta_val is not None:
+                result["beta"] = float(beta_val)
+        except Exception:
+            pass
 
         # Bug 10: yfinance marketCap is live (updated intraday); use as primary source.
         # Polygon /v3/reference/tickers returns a static reference field that can be
@@ -304,11 +315,13 @@ def fetch_fmp(ticker: str) -> dict:
         try:
             r = requests.get(
                 f"{POLYGON_BASE}/vX/reference/financials",
-                params={"ticker": sym, "limit": 2, "apiKey": polygon_key},
+                params={"ticker": sym, "limit": 3, "apiKey": polygon_key},
                 timeout=15,
             )
             if r.status_code == 200:
-                results = r.json().get("results", [])
+                raw_json = r.json()
+                result["polygon_financials_raw"] = raw_json
+                results = raw_json.get("results", [])
                 if results:
                     # Use most recent filing for balance sheet
                     bs = results[0].get("financials", {}).get("balance_sheet", {})
@@ -318,6 +331,20 @@ def fetch_fmp(ticker: str) -> dict:
                         result["long_term_debt"] = ltd
                     if ap is not None:
                         result["accounts_payable"] = ap
+
+                    # Interest expense from FY[0] income statement
+                    try:
+                        fy_results = [r2 for r2 in results if r2.get("fiscal_period") == "FY"]
+                        if fy_results:
+                            inc0 = fy_results[0].get("financials", {}).get("income_statement", {})
+                            ie = (
+                                inc0.get("interest_expense_operating", {}).get("value")
+                                or inc0.get("interest_expense", {}).get("value")
+                            )
+                            if ie is not None:
+                                result["interest_expense"] = abs(float(ie))
+                    except Exception:
+                        pass
 
                     # Net income — prefer TTM filing if available
                     net_income = None

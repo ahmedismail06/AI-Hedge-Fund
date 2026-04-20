@@ -1032,6 +1032,52 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "priority": 1,
                 })
 
+    # 3b. Positions overextended vs DCF bull target (>15% above bull case)
+    _open_positions = [p for p in base_ctx.get("positions", []) if p.get("ticker") and p.get("status") == "OPEN"]
+    if _open_positions:
+        try:
+            import os
+            import supabase as _sb_orch
+            _orch_client = _sb_orch.create_client(
+                os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
+            )
+            _tickers = [p["ticker"] for p in _open_positions]
+            _fm_resp = (
+                _orch_client.table("financial_models")
+                .select("ticker,dcf_bull_target,run_date")
+                .in_("ticker", _tickers)
+                .order("run_date", desc=True)
+                .execute()
+            )
+            # Keep only the latest model per ticker
+            _latest_fm: dict = {}
+            for row in (_fm_resp.data or []):
+                t = row["ticker"]
+                if t not in _latest_fm:
+                    _latest_fm[t] = row
+
+            for p in _open_positions:
+                t = p.get("ticker")
+                current_p = float(p.get("current_price") or 0)
+                fm = _latest_fm.get(t)
+                if fm and fm.get("dcf_bull_target") and current_p > 0:
+                    bull = float(fm["dcf_bull_target"])
+                    if bull > 0 and current_p > bull * 1.15:
+                        # Avoid duplicate if stop_proximity already queued this ticker
+                        already_queued = any(
+                            i.get("category") == "EXIT_TRIM"
+                            and i.get("data", {}).get("position", {}).get("ticker") == t
+                            for i in items
+                        )
+                        if not already_queued:
+                            items.append({
+                                "category": "EXIT_TRIM",
+                                "data": {"position": p, "trigger": "valuation_overextended"},
+                                "priority": 1,
+                            })
+        except Exception as exc:
+            logger.warning("_scan_actionable_items: DCF overextended scan failed — %s", exc)
+
     # 4. Positions with earnings within 14 days
     cutoff = date.today() + timedelta(days=_EARNINGS_LOOKAHEAD_DAYS)
     for p in base_ctx.get("positions", []):
@@ -1558,6 +1604,10 @@ def _build_prompt(
                 original_memo = resp.data[0] if resp.data else None
             except Exception:
                 pass
+        # Inject trigger reason so prompt knows why review was triggered
+        _trigger = data.get("trigger")
+        if _trigger:
+            position = {**position, "_trigger_reason": _trigger}
         return build_exit_trim_prompt(position, position_alerts, base_ctx, original_memo)
 
     elif category == "REBALANCE":
