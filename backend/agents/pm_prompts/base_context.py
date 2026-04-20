@@ -62,7 +62,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             supabase_client.table("positions")
             .select(
                 "id,ticker,direction,share_count,entry_price,current_price,"
-                "conviction_score,pct_of_portfolio,stop_loss_price,"
+                "conviction_score,dollar_size,pct_of_portfolio,stop_loss_price,"
                 "stop_tier1,stop_tier2,stop_tier3,next_earnings_date,"
                 "exit_action,exit_trim_pct,sector,memo_id,opened_at,status"
             )
@@ -73,11 +73,19 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["positions"] = positions
         ctx["position_count"] = len(positions)
 
-        # Compute exposure from pct_of_portfolio (already normalised to portfolio)
+        # Compute live exposure using dollar_size against current portfolio value
+        # (avoids stale pct_of_portfolio which was baked in at sizing time)
+        try:
+            from backend.broker.ibkr import get_portfolio_value
+            portfolio_value = get_portfolio_value()
+        except Exception:
+            portfolio_value = 25_000.0
+
         gross = 0.0
         net = 0.0
         for p in positions:
-            w = float(p.get("pct_of_portfolio") or 0.0)
+            dollar_size = float(p.get("dollar_size") or 0.0)
+            w = dollar_size / portfolio_value if portfolio_value > 0 else 0.0
             direction = p.get("direction", "LONG")
             gross += abs(w)
             net += w if direction == "LONG" else -w
@@ -87,15 +95,15 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["cash_pct"] = round(max(0.0, 1.0 - gross), 4)
 
         # Weighted unrealized P&L across all open positions (proxy for daily drawdown)
-        # = sum(pct_of_portfolio * position_pnl_pct) — approximate when weights are stale
         portfolio_pnl = 0.0
         for p in positions:
             entry = float(p.get("entry_price") or 0)
             current = float(p.get("current_price") or 0)
-            weight = float(p.get("pct_of_portfolio") or 0.0)
-            if entry > 0 and current > 0 and weight != 0:
+            dollar_size = float(p.get("dollar_size") or 0.0)
+            w = dollar_size / portfolio_value if portfolio_value > 0 else 0.0
+            if entry > 0 and current > 0 and w != 0:
                 pos_pnl = (current - entry) / entry
-                portfolio_pnl += weight * pos_pnl
+                portfolio_pnl += w * pos_pnl
         ctx["portfolio_unrealized_pnl_pct"] = round(portfolio_pnl, 4)
 
     except Exception as exc:
