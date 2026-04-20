@@ -67,6 +67,44 @@ def _has_critical_alerts() -> bool:
         return False  # Don't block execution if the check itself fails
 
 
+# ── Reconciliation helper ─────────────────────────────────────────────────────
+
+def run_fill_recon() -> int:
+    """
+    Query IBKR for all fills in the current session and reconcile them with
+    the Supabase fills table.
+
+    This catches fills that were missed due to disconnections or if the
+    real-time callback didn't fire before the previous cycle disconnected.
+
+    Returns:
+        Number of fills processed.
+    """
+    try:
+        ib = _ibkr.connect()
+        # ib.fills() returns a list of Fill objects
+        fills = ib.fills()
+        if not fills:
+            return 0
+
+        logger.info("Reconciling %d fills from IBKR...", len(fills))
+        count = 0
+        for fill in fills:
+            # fill.execution.permId identifies the order
+            perm_id = fill.execution.permId
+            if not perm_id:
+                continue
+            
+            # Pass to fill_recorder for idempotent processing
+            _fill_recorder.handle_exec_detail(trade=None, fill=fill, perm_id_override=perm_id)
+            count += 1
+            
+        return count
+    except Exception as exc:
+        logger.warning("Fill reconciliation failed: %s", exc)
+        return 0
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
@@ -100,7 +138,13 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
     this_cycle_order_ids: List[str] = []
 
     try:
-        # ── C: Handle timed-out orders ────────────────────────────────────────
+        # ── C: Reconciliation ─────────────────────────────────────────────────
+        # Catch any fills missed by the previous cycle's real-time handler.
+        recon_count = run_fill_recon()
+        if recon_count > 0:
+            logger.info("Fill reconciliation complete: processed %d executions", recon_count)
+
+        # ── D: Handle timed-out orders ────────────────────────────────────────
         # check_timeouts() sets PARTIAL_FILLED (has fills) or TIMEOUT (zero fills).
         # REJECTED is reserved for explicit IBKR error callbacks — never timeout.
         timed_out_position_ids = _order_manager.check_timeouts()
