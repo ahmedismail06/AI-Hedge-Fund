@@ -285,6 +285,7 @@ create table if not exists fills (
     exchange        text,
     slippage_bps    numeric(8, 2),
     intended_price  numeric(12, 4),
+    ibkr_exec_id    text unique,
     created_at      timestamptz not null default now()
 );
 

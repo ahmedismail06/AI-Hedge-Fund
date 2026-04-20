@@ -113,20 +113,16 @@ def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None, skip
             fill_time_iso = _parse_ibkr_time(str(raw_time))
 
         # ── Idempotency Check ─────────────────────────────────────────────────
-        # Check by ibkr_exec_id first (most robust), then fallback to (order_id, time, qty)
-        # for historical fills that might not have the exec_id in the DB.
-        existing_q = client.table("fills").select("id").eq("order_id", order_id)
+        # Check by ibkr_exec_id globally (most robust)
         if exec_id:
-            existing_q = existing_q.eq("ibkr_exec_id", exec_id)
+            existing_fill = client.table("fills").select("id").eq("ibkr_exec_id", exec_id).execute()
+            if existing_fill.data:
+                return False
         else:
-            existing_q = existing_q.eq("fill_time", fill_time_iso).eq("fill_qty", fill_qty)
-        
-        existing_fill = existing_q.execute()
-        if existing_fill.data:
-            # If not skipping aggregate update, we still update to ensure state is correct
-            if not skip_aggregate_update:
-                _update_order_aggregate(order_id, order_row, fill_qty)
-            return False
+            # Fallback for old records without exec_id
+            existing_fill = client.table("fills").select("id").eq("order_id", order_id).eq("fill_time", fill_time_iso).eq("fill_qty", fill_qty).execute()
+            if existing_fill.data:
+                return False
 
         # 3. Compute slippage in basis points (positive = filled above intended).
         slippage_bps: Optional[float] = None
