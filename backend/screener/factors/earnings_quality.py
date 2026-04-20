@@ -125,13 +125,20 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
 
     # ── GMI: Gross Margin Index ───────────────────────────────────────────────
     # ((Rev[t-1] - COGS[t-1]) / Rev[t-1]) / ((Rev[t] - COGS[t]) / Rev[t])
-    gm_t  = _safe_div((t["revenue"] or 0) - (t["cogs"] or 0),   t["revenue"])
-    gm_t1 = _safe_div((t1["revenue"] or 0) - (t1["cogs"] or 0), t1["revenue"])
-    # Prefer explicit gross_profit if available
-    if t.get("gross_profit") is not None and t["revenue"]:
-        gm_t = t["gross_profit"] / t["revenue"]
-    if t1.get("gross_profit") is not None and t1["revenue"]:
-        gm_t1 = t1["gross_profit"] / t1["revenue"]
+    gm_t: Optional[float] = None
+    if t["revenue"] and t["revenue"] != 0:
+        if t.get("gross_profit") is not None:
+            gm_t = t["gross_profit"] / t["revenue"]
+        elif t.get("cogs") is not None:
+            gm_t = (t["revenue"] - t["cogs"]) / t["revenue"]
+
+    gm_t1: Optional[float] = None
+    if t1["revenue"] and t1["revenue"] != 0:
+        if t1.get("gross_profit") is not None:
+            gm_t1 = t1["gross_profit"] / t1["revenue"]
+        elif t1.get("cogs") is not None:
+            gm_t1 = (t1["revenue"] - t1["cogs"]) / t1["revenue"]
+
     GMI = _safe_div(gm_t1, gm_t)
     if GMI is None:
         missing.append("GMI")
@@ -144,8 +151,11 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
         ca = f["current_assets"]
         if ta is None or ta == 0:
             return None
-        numer = 1 - ((ppe or 0) + (ca or 0)) / ta
-        return numer
+        # PPE and Current Assets can be 0, but if both are None, ratio is None
+        if ppe is None and ca is None:
+            return None
+        sum_assets = (ppe or 0) + (ca or 0)
+        return 1 - (sum_assets / ta)
 
     aqi_t  = _aqi_ratio(t)
     aqi_t1 = _aqi_ratio(t1)
@@ -163,10 +173,12 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
     def _depi_ratio(f: dict) -> Optional[float]:
         dep = f["depreciation"]
         ppe = f["ppe_net"]
-        if dep is None:
+        if dep is None or (dep == 0 and (ppe is None or ppe == 0)):
             return None
         denom = (dep or 0) + (ppe or 0)
-        return _safe_div(dep, denom)
+        if denom == 0:
+            return None
+        return dep / denom
 
     depi_t  = _depi_ratio(t)
     depi_t1 = _depi_ratio(t1)
@@ -195,9 +207,13 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
     # (LTD[t] + CL[t]) / TA[t]) / ((LTD[t-1] + CL[t-1]) / TA[t-1])
     def _lvgi_ratio(f: dict) -> Optional[float]:
         ta = f["total_assets"]
+        ltd = f["ltd"]
+        cl = f["current_liabilities"]
         if ta is None or ta == 0:
             return None
-        return ((f["ltd"] or 0) + (f["current_liabilities"] or 0)) / ta
+        if ltd is None and cl is None:
+            return None
+        return ((ltd or 0) + (cl or 0)) / ta
 
     lvgi_t  = _lvgi_ratio(t)
     lvgi_t1 = _lvgi_ratio(t1)
