@@ -82,8 +82,15 @@ def run_fill_recon() -> int:
     """
     try:
         ib = _ibkr.connect()
-        # ib.fills() returns a list of Fill objects
-        fills = ib.fills()
+        loop = _ibkr.get_loop()
+
+        # ib.fills() must be called on the dedicated loop thread.
+        async def _get_fills():
+            return ib.fills()
+
+        future = asyncio.run_coroutine_threadsafe(_get_fills(), loop)
+        fills = future.result(timeout=10)
+
         if not fills:
             return 0
 
@@ -94,11 +101,11 @@ def run_fill_recon() -> int:
             perm_id = fill.execution.permId
             if not perm_id:
                 continue
-            
+
             # Pass to fill_recorder for idempotent processing
             _fill_recorder.handle_exec_detail(trade=None, fill=fill, perm_id_override=perm_id)
             count += 1
-            
+
         return count
     except Exception as exc:
         logger.warning("Fill reconciliation failed: %s", exc)
