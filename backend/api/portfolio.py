@@ -155,11 +155,18 @@ def get_exposure(portfolio_value: Optional[float] = Query(None, gt=0)):
 
     return {
         "regime": regime,
-        "gross_exposure_pct": exposure["gross_exposure_pct"],
-        "net_exposure_pct": exposure["net_exposure_pct"],
+        "gross_exposure_pct": round(exposure["gross_exposure_pct"] * 100, 2),
+        "net_exposure_pct": round(exposure["net_exposure_pct"] * 100, 2),
         "position_count": exposure["position_count"],
-        "sector_concentration": exposure["sector_concentration"],
-        "caps": caps,
+        "sector_concentration": {
+            sector: round(pct * 100, 2)
+            for sector, pct in exposure["sector_concentration"].items()
+        },
+        "caps": {
+            "max_gross": round(caps["max_gross"] * 100, 1),
+            "max_net_long": round(caps["max_net_long"] * 100, 1),
+            "max_net_short": round(caps["max_net_short"] * 100, 1),
+        },
     }
 
 
