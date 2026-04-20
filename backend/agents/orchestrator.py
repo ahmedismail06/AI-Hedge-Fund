@@ -2078,12 +2078,22 @@ def _check_intraday_move(ticker: str) -> bool:
     polygon_key = os.getenv("POLYGON_API_KEY")
     if not polygon_key:
         return False
+    
+    import requests as _req
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    # Configure a session with retries for transient network issues
+    session = _req.Session()
+    retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+
     try:
-        import requests as _req
-        prev_resp = _req.get(
+        # 1. Get previous close
+        prev_resp = session.get(
             f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev",
             params={"apiKey": polygon_key},
-            timeout=10,
+            timeout=5,
         )
         if not prev_resp.ok:
             return False
@@ -2094,10 +2104,11 @@ def _check_intraday_move(ticker: str) -> bool:
         if not prev_close:
             return False
 
-        trade_resp = _req.get(
+        # 2. Get last trade price
+        trade_resp = session.get(
             f"https://api.polygon.io/v2/last/trade/{ticker}",
             params={"apiKey": polygon_key},
-            timeout=10,
+            timeout=5,
         )
         if not trade_resp.ok:
             return False
