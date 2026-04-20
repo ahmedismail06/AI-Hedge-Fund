@@ -143,11 +143,41 @@ export default function Portfolio() {
     } catch { loadPending(); }
   };
 
-  const totalUnrealized = positions.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
+  // Group multiple positions for the same ticker
+  const groupedPositions = positions.reduce((acc, p) => {
+    if (!acc[p.ticker]) {
+      acc[p.ticker] = { ...p };
+    } else {
+      const existing = acc[p.ticker];
+      const totalShares = (existing.share_count || 0) + (p.share_count || 0);
+      if (totalShares > 0) {
+        existing.entry_price = ((existing.entry_price || 0) * (existing.share_count || 0) + (p.entry_price || 0) * (p.share_count || 0)) / totalShares;
+      }
+      existing.share_count = totalShares;
+      // We'll recalculate P&L below for the whole group
+    }
+    return acc;
+  }, {});
+
+  const displayedPositions = Object.values(groupedPositions).map(p => {
+    const isLong = p.direction === 'LONG';
+    const entry = p.entry_price || 0;
+    const current = p.current_price || entry;
+    const shares = p.share_count || 0;
+
+    // Calculate P&L: (Current - Entry) * Shares for LONG, (Entry - Current) * Shares for SHORT
+    const pnl = isLong ? (current - entry) * shares : (entry - current) * shares;
+    const totalCost = entry * shares;
+    const pnl_pct = totalCost > 0 ? pnl / totalCost : 0;
+
+    return { ...p, pnl, pnl_pct };
+  });
+
+  const totalUnrealized = displayedPositions.reduce((s, p) => s + (p.pnl ?? 0), 0);
 
   const TABS = [
     ...(pending.length > 0 ? [{ key: 'pending', label: `Pending (${pending.length})` }] : []),
-    { key: 'active', label: `Active (${positions.length})` },
+    { key: 'active', label: `Active (${displayedPositions.length})` },
     { key: 'closed', label: `Closed (${closed.length})` },
   ];
 
@@ -229,13 +259,13 @@ export default function Portfolio() {
             <>
               <div className="flex justify-end mb-3">
                 <button
-                  onClick={() => exportCSV(positions, 'positions.csv')}
+                  onClick={() => exportCSV(displayedPositions, 'positions.csv')}
                   className="text-xs px-3 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
                 >
                   Export CSV
                 </button>
               </div>
-              {positions.length === 0 ? (
+              {displayedPositions.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-8">No open positions</p>
               ) : (
                 <div className="overflow-x-auto">
@@ -246,7 +276,7 @@ export default function Portfolio() {
                       </tr>
                     </thead>
                     <tbody>
-                      {positions.map(p => <PositionRow key={p.id ?? p.ticker} position={p} />)}
+                      {displayedPositions.map(p => <PositionRow key={p.id ?? p.ticker} position={p} />)}
                     </tbody>
                   </table>
                 </div>
@@ -278,7 +308,7 @@ export default function Portfolio() {
                     </thead>
                     <tbody>
                       {closed.map((p, i) => {
-                        const pnlPos = (p.realized_pnl ?? 0) >= 0;
+                        const pnlPos = (p.pnl ?? 0) >= 0;
                         return (
                           <tr key={p.id ?? i} className="border-b border-gray-100 text-sm">
                             <td className="px-4 py-3 font-mono font-bold">{p.ticker}</td>
@@ -287,11 +317,11 @@ export default function Portfolio() {
                                 {p.direction}
                               </span>
                             </td>
-                            <td className="px-4 py-3 text-gray-700">{p.shares?.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-gray-700">{p.share_count?.toLocaleString()}</td>
                             <td className="px-4 py-3 text-gray-700">${p.entry_price?.toFixed(2)}</td>
                             <td className="px-4 py-3 text-gray-700">${p.exit_price?.toFixed(2) ?? '—'}</td>
                             <td className={`px-4 py-3 font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`}>
-                              {p.realized_pnl != null ? `${pnlPos ? '+' : ''}$${p.realized_pnl.toFixed(2)}` : '—'}
+                              {p.pnl != null ? `${pnlPos ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
                             </td>
                             <td className="px-4 py-3 text-gray-400 text-xs">
                               {p.closed_at ? new Date(p.closed_at).toLocaleDateString() : '—'}

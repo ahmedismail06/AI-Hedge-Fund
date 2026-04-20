@@ -4,7 +4,7 @@ const fmt$ = (v) =>
 const fmtPct = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
 
 export default function PositionRow({ position: p, onClick }) {
-  const pnlPos = (p.unrealized_pnl ?? 0) >= 0;
+  const pnlPos = (p.pnl ?? 0) >= 0;
   const stopDist = p.entry_price && p.stop_loss_price
     ? ((p.stop_loss_price - p.entry_price) / p.entry_price) * 100
     : null;
@@ -25,12 +25,12 @@ export default function PositionRow({ position: p, onClick }) {
           </span>
         </div>
       </td>
-      <td className="px-4 py-3 text-sm text-gray-700">{p.shares?.toLocaleString() ?? '—'}</td>
+      <td className="px-4 py-3 text-sm text-gray-700">{p.share_count?.toLocaleString() ?? '—'}</td>
       <td className="px-4 py-3 text-sm text-gray-700">{fmt$(p.entry_price)}</td>
       <td className="px-4 py-3 text-sm text-gray-700">{fmt$(p.current_price)}</td>
       <td className={`px-4 py-3 text-sm font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`}>
-        <div>{fmt$(p.unrealized_pnl)}</div>
-        <div className="text-xs">{fmtPct(p.unrealized_pnl_pct)}</div>
+        <div>{fmt$(p.pnl)}</div>
+        <div className="text-xs">{fmtPct(p.pnl_pct ? p.pnl_pct * 100 : null)}</div>
       </td>
       <td className="px-4 py-3 text-sm">
         <div className="text-gray-700">{fmt$(p.stop_loss_price)}</div>
