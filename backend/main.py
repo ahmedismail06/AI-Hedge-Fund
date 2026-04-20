@@ -31,6 +31,7 @@ from backend.api.execution import router as execution_router
 from backend.api.orchestrator import router as orchestrator_router
 from backend.api.pm import router as pm_router
 from backend.api.financial_modeling import router as financial_modeling_router
+from backend.api.earnings_alpha import router as earnings_alpha_router
 from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics, startup_heartbeat
 from backend.agents.execution_agent import run_execution_cycle
 
@@ -130,6 +131,7 @@ app.include_router(execution_router)
 app.include_router(orchestrator_router)
 app.include_router(pm_router)
 app.include_router(financial_modeling_router)
+app.include_router(earnings_alpha_router)
 
 app.add_middleware(
     CORSMiddleware,

@@ -1167,6 +1167,7 @@ def _build_synthesis_message(
     retrieved_chunks: list[dict],
     macro_context: Optional[str] = None,
     financial_modeling_context: Optional[str] = None,
+    earnings_alpha_context: Optional[str] = None,
 ) -> str:
     """Assemble final synthesis prompt combining structured data and retrieved narrative chunks."""
     if retrieved_chunks:
@@ -1183,11 +1184,17 @@ def _build_synthesis_message(
     else:
         fm_section = ""
 
+    if earnings_alpha_context:
+        ea_section = f"\n{earnings_alpha_context}\n"
+    else:
+        ea_section = ""
+
     message = (
         f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
         f"{structured_block}\n\n"
         f"{chunks_section}\n"
-        f"{fm_section}\n"
+        f"{fm_section}"
+        f"{ea_section}\n"
         "Valuation multiples rule: whenever you cite an EV/Revenue multiple, label it inline as either (FY2025E) or (FY2026E). "
         "Never cite an EV/Revenue multiple without a year label.\n"
         f"Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.\n"
@@ -1678,6 +1685,36 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     except Exception as exc:
         logger.warning("run_research(%s): financial modeling failed — %s", ticker, exc)
 
+    # ── Phase 2.6: Earnings Alpha ─────────────────────────────────────────────
+    earnings_alpha_context: Optional[str] = None
+    try:
+        from backend.fetchers.earnings_reactions import get_earnings_reactions
+        from backend.earnings_alpha.runner import run_earnings_alpha
+
+        reactions = get_earnings_reactions(ticker)
+
+        # Read conviction from latest stored memo; default to 5.0 (no SIZE_UP gate)
+        # for first-time research runs where no memo exists yet
+        conviction_for_ea: float = 5.0
+        try:
+            from backend.memory.vector_store import get_memo
+            existing = get_memo(ticker)
+            if existing and existing.get("conviction_score") is not None:
+                conviction_for_ea = float(existing["conviction_score"])
+        except Exception:
+            pass
+
+        ea_output = run_earnings_alpha(ticker, reactions, fmp_data, conviction_for_ea)
+        earnings_alpha_context = ea_output.summary
+        logger.info(
+            "run_research(%s): earnings alpha complete — signal=%s drift_hold=%s",
+            ticker,
+            ea_output.pre_earnings.signal,
+            ea_output.drift_hold.active,
+        )
+    except Exception as exc:
+        logger.warning("run_research(%s): earnings alpha failed — %s", ticker, exc)
+
     usage_log: list[dict] = []
 
     # ── Phase 3: ReAct agentic retrieval ─────────────────────────────────────
@@ -1706,6 +1743,7 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     synthesis_message = _build_synthesis_message(
         ticker, structured_block, retrieved_chunks, macro_context,
         financial_modeling_context=financial_modeling_context,
+        earnings_alpha_context=earnings_alpha_context,
     )
     response = client.messages.create(                                                       
       model="claude-sonnet-4-6",                            
