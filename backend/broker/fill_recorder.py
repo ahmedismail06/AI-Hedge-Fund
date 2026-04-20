@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def handle_exec_detail(trade, fill) -> None:
+def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> None:
     """
     Handle a single ib_insync execDetailsEvent callback.
 
@@ -56,15 +56,20 @@ def handle_exec_detail(trade, fill) -> None:
     order reaches fully-filled status, transitions the position from
     APPROVED to OPEN via _close_position_loop.
 
+    Idempotency: Checks for existing row with same (order_id, fill_time, fill_qty)
+    to prevent duplicate entries during manual or recon-triggered runs.
+
     Never raises — IBKR event callbacks must not propagate exceptions.
 
     Args:
         trade: ib_insync Trade object; trade.order.permId identifies the order.
+               Can be None if perm_id_override is provided.
         fill:  ib_insync Fill object; carries contract, execution, and
                commissionReport attributes.
+        perm_id_override: Optional permId to use if trade is None (for recon).
     """
     try:
-        perm_id = trade.order.permId
+        perm_id = perm_id_override or (trade.order.permId if trade else None)
         if not perm_id:
             logger.warning("Received fill with no permId — skipping")
             return
@@ -79,7 +84,7 @@ def handle_exec_detail(trade, fill) -> None:
             .execute()
         )
         if not result.data:
-            logger.warning(
+            logger.debug(
                 "No orders row found for permId=%s — possibly from a prior session",
                 perm_id,
             )
@@ -103,14 +108,28 @@ def handle_exec_detail(trade, fill) -> None:
 
         exchange: Optional[str] = fill.execution.exchange or None
 
-        # Parse fill_time — ib_insync may return a datetime or a string such as
-        # "20260401 14:35:22 ET" or "20260401  14:35:22". Fall back to UTC now
-        # when the format is unrecognised so fills are never dropped on parse errors.
         raw_time = fill.execution.time
         if isinstance(raw_time, datetime):
             fill_time_iso: str = raw_time.isoformat()
         else:
             fill_time_iso = _parse_ibkr_time(str(raw_time))
+
+        # ── Idempotency Check ─────────────────────────────────────────────────
+        # Avoid duplicate fill entries if recon runs on a trade that was already
+        # partially or fully captured by the real-time callback.
+        existing_fill = (
+            client.table("fills")
+            .select("id")
+            .eq("order_id", order_id)
+            .eq("fill_time", fill_time_iso)
+            .eq("fill_qty", fill_qty)
+            .execute()
+        )
+        if existing_fill.data:
+            logger.debug("Fill already recorded for order_id=%s time=%s qty=%s", order_id, fill_time_iso, fill_qty)
+            # Still update aggregate to be safe, but skip insert
+            _update_order_aggregate(order_id, order_row, fill_qty)
+            return
 
         # 3. Compute slippage in basis points (positive = filled above intended).
         slippage_bps: Optional[float] = None
@@ -139,12 +158,7 @@ def handle_exec_detail(trade, fill) -> None:
         _update_order_aggregate(order_id, order_row, fill_qty)
 
     except Exception as exc:
-        perm_id_safe = None
-        try:
-            perm_id_safe = trade.order.permId
-        except Exception:
-            pass
-        logger.error("fill handler error for permId=%s: %s", perm_id_safe, exc)
+        logger.error("fill handler error for permId=%s: %s", perm_id if 'perm_id' in locals() else 'unknown', exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
