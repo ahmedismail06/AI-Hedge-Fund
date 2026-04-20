@@ -65,22 +65,29 @@ def _get_pm_config_row() -> Dict[str, Any]:
 
 
 def _get_portfolio_summary() -> Dict[str, Any]:
-    """Quick portfolio summary for the status endpoint."""
+    """Quick portfolio summary for the status endpoint.
+
+    Uses dollar_size / live portfolio_value so the fractions stay consistent
+    with GET /portfolio/exposure (which also uses the exposure tracker).
+    Returns fractions (0–1 scale); the Orchestrator frontend multiplies by 100.
+    """
     try:
+        from backend.broker.ibkr import get_portfolio_value
+        from backend.portfolio.exposure_tracker import get_current_exposure
+
         resp = (
             _get_client()
             .table("positions")
-            .select("ticker,direction,pct_of_portfolio,current_price,entry_price,share_count")
+            .select("ticker,direction,dollar_size")
             .eq("status", "OPEN")
             .execute()
         )
         positions = resp.data or []
+        portfolio_value = get_portfolio_value()
+        exposure = get_current_exposure(positions, portfolio_value)
 
-        gross = sum(abs(float(p.get("pct_of_portfolio") or 0)) for p in positions)
-        net = sum(
-            float(p.get("pct_of_portfolio") or 0) * (1 if p.get("direction") == "LONG" else -1)
-            for p in positions
-        )
+        gross = exposure["gross_exposure_pct"] / 100  # tracker returns %, convert back to fraction
+        net   = exposure["net_exposure_pct"]   / 100
 
         return {
             "position_count": len(positions),
