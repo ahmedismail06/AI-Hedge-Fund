@@ -83,12 +83,12 @@ def _load_memo(memo_id: str) -> dict:
             memo_json = {}
     row["_memo_json_parsed"] = memo_json
 
-    verdict = memo_json.get("verdict") or row.get("verdict", "")
+    verdict = str(memo_json.get("verdict") or row.get("verdict", "")).upper()
     conviction_score = float(memo_json.get("conviction_score") or row.get("conviction_score") or 0.0)
 
-    if verdict != "LONG":
+    if verdict not in ("LONG", "SHORT"):
         raise PortfolioAgentError(
-            f"Phase 1: SHORT verdicts deferred to Phase 2 (verdict={verdict!r})"
+            f"Phase 1: verdict must be LONG or SHORT to size (got {verdict!r})"
         )
     if conviction_score < 5.0:
         raise PortfolioAgentError(
@@ -182,18 +182,25 @@ def _build_portfolio_snapshot_after(
     new_sector: Optional[str],
     portfolio_value: float,
     open_positions: list,
+    direction: str = "LONG",
 ) -> PortfolioSnapshot:
     """
-    Build the projected PortfolioSnapshot assuming the new LONG position is added.
+    Build the projected PortfolioSnapshot assuming the new position is added.
 
-    Adds the new position's notional to the gross and net exposure fractions,
-    updates sector concentration, and increments position count by 1.
+    Adds the new position's notional to the gross exposure.
+    Adds (LONG) or subtracts (SHORT) from the net exposure.
     """
     safe_value = portfolio_value if portfolio_value > 0 else 1.0
     new_pct = abs(new_dollar_size) / safe_value
 
     gross_after = round(float(exposure_state["gross_exposure_pct"]) + new_pct, 6)
-    net_after = round(float(exposure_state["net_exposure_pct"]) + new_pct, 6)
+    
+    # Net adjustment based on direction
+    current_net = float(exposure_state["net_exposure_pct"])
+    if direction.upper() == "SHORT":
+        net_after = round(current_net - new_pct, 6)
+    else:
+        net_after = round(current_net + new_pct, 6)
 
     # Project sector concentration including the new position
     sector_conc: dict = dict(exposure_state.get("sector_concentration") or {})
@@ -285,7 +292,7 @@ async def run_portfolio_sizing(
         if memo_json.get("price_target") is not None
         else None
     )
-    direction = "LONG"  # Phase 1 is long-only; SHORT deferred to Phase 2
+    direction = str(memo_json.get("verdict") or row.get("verdict", "LONG")).upper()
 
     # ── Phase 2: Read macro regime ─────────────────────────────────────────────
     regime = _read_regime()
@@ -308,6 +315,7 @@ async def run_portfolio_sizing(
             portfolio_value=portfolio_value,
             entry_price=entry_price,
             regime=regime,
+            direction=direction,
         )
     except ValueError as exc:
         if override_dollar_amount is None:
@@ -315,8 +323,11 @@ async def run_portfolio_sizing(
         else:
             # Sizing engine rejected the trade, but we have a PM override
             logger.info("Phase 4: Base Kelly sizing rejected trade (%s), proceeding with PM Override.", exc)
+            
+            # Default stop for short override is +10%
+            default_stop = round(entry_price * 1.1, 4) if direction == "SHORT" else round(entry_price * 0.9, 4)
             sizing = {
-                "stop_loss_price": round(entry_price * 0.9, 4),
+                "stop_loss_price": default_stop,
                 "sizing_rationale": f"Base Kelly logic bypassed due to engine exception: {exc}",
                 "kelly_fraction": 0.0
             }
@@ -327,7 +338,13 @@ async def run_portfolio_sizing(
         share_count = float(int(dollar_size // entry_price))
         size_label = "PM_OVERRIDE"
         pct_of_portfolio = round(dollar_size / portfolio_value, 6)
-        stop_loss_price = sizing.get("stop_loss_price", round(entry_price * 0.9, 4))
+        
+        # Determine stop_loss_price for override
+        if "stop_loss_price" in sizing:
+             stop_loss_price = sizing["stop_loss_price"]
+        else:
+             stop_loss_price = round(entry_price * 1.1, 4) if direction == "SHORT" else round(entry_price * 0.9, 4)
+             
         kelly_fraction = sizing.get("kelly_fraction", 0.0)
         
         base_rationale = sizing.get("sizing_rationale", "")
@@ -375,6 +392,7 @@ async def run_portfolio_sizing(
                     portfolio_value=portfolio_value,
                     entry_price=entry_price,
                     regime=regime,
+                    direction=direction,
                 )
             except ValueError as exc:
                 raise PortfolioAgentError(
@@ -439,8 +457,13 @@ async def run_portfolio_sizing(
     # ── Risk/reward ratio ──────────────────────────────────────────────────────
     risk_reward_ratio: Optional[float] = None
     if target_price is not None:
-        upside = target_price - entry_price
-        downside = entry_price - stop_loss_price
+        if direction == "SHORT":
+            upside = entry_price - target_price  # price falling is good
+            downside = stop_loss_price - entry_price # price rising is bad
+        else:
+            upside = target_price - entry_price
+            downside = entry_price - stop_loss_price
+        
         if downside > 0:
             risk_reward_ratio = round(upside / downside, 4)
 
@@ -451,6 +474,7 @@ async def run_portfolio_sizing(
         new_sector=sector,
         portfolio_value=portfolio_value,
         open_positions=open_positions,
+        direction=direction,
     )
 
     recommendation = SizingRecommendation(
@@ -476,13 +500,17 @@ async def run_portfolio_sizing(
     )
 
     # ── Compute 3-tier stops from entry price + regime ────────────────────────
-    # Tier 1: position stop  (-8% standard, -5% Risk-Off/Stagflation)
-    # Tier 2: strategy stop  (-15% standard, -10% Risk-Off/Stagflation)
-    # Tier 3: portfolio stop (-20% standard, -15% Risk-Off/Stagflation)
     _tight_regime = regime in ("Risk-Off", "Stagflation")
-    stop_tier1 = round(entry_price * (1 - (0.05 if _tight_regime else 0.08)), 4)
-    stop_tier2 = round(entry_price * (1 - (0.10 if _tight_regime else 0.15)), 4)
-    stop_tier3 = round(entry_price * (1 - (0.15 if _tight_regime else 0.20)), 4)
+    if direction == "SHORT":
+        # Tiers are ABOVE entry
+        stop_tier1 = round(entry_price * (1 + (0.05 if _tight_regime else 0.08)), 4)
+        stop_tier2 = round(entry_price * (1 + (0.10 if _tight_regime else 0.15)), 4)
+        stop_tier3 = round(entry_price * (1 + (0.15 if _tight_regime else 0.20)), 4)
+    else:
+        # Tiers are BELOW entry
+        stop_tier1 = round(entry_price * (1 - (0.05 if _tight_regime else 0.08)), 4)
+        stop_tier2 = round(entry_price * (1 - (0.10 if _tight_regime else 0.15)), 4)
+        stop_tier3 = round(entry_price * (1 - (0.15 if _tight_regime else 0.20)), 4)
 
     # ── next_earnings_date from memo context ──────────────────────────────────
     next_earnings_date: Optional[str] = None

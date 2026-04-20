@@ -16,7 +16,7 @@ You entered this position with a specific variant perception and repricing catal
 
 ## Key Evaluation Framework
 1. **Thesis check**: Is the original variant perception still intact? Has the catalyst materialised, been disproven, or moved further away?
-2. **Risk/reward**: Given current price vs original entry, what is the remaining upside vs downside?
+2. **Risk/reward**: Given current price vs original entry, what is the remaining upside vs downside? If dcf_valuation is provided, reference upside_to_bull and downside_to_bear when assessing whether the remaining risk/reward justifies holding the position.
 3. **Stop proximity**: How close is the current price to the stop-loss levels?
 4. **Earnings drift**: Is this position in a post-earnings drift hold window?
 5. **Position weight**: Has this position drifted above/below its intended portfolio weight?
@@ -142,6 +142,40 @@ def build_exit_trim_prompt(
         "opened_at": str(position.get("opened_at") or ""),
         "holding_period_days": holding_period_days,
     }
+
+    # DCF valuation context — fetch latest model for this ticker
+    dcf_context: dict = {}
+    if ticker:
+        try:
+            import os
+            import supabase as _sb
+            _client = _sb.create_client(
+                os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
+            )
+            fm_resp = (
+                _client.table("financial_models")
+                .select("dcf_bull_target,dcf_base_target,dcf_bear_target,wacc,quality_grade")
+                .eq("ticker", ticker)
+                .order("run_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if fm_resp.data:
+                fm = fm_resp.data[0]
+                bull = float(fm["dcf_bull_target"]) if fm.get("dcf_bull_target") else None
+                bear = float(fm["dcf_bear_target"]) if fm.get("dcf_bear_target") else None
+                dcf_context = {
+                    "dcf_bull_target": bull,
+                    "dcf_base_target": float(fm["dcf_base_target"]) if fm.get("dcf_base_target") else None,
+                    "dcf_bear_target": bear,
+                    "quality_grade": fm.get("quality_grade"),
+                    "upside_to_bull": round((bull - current) / current, 4) if (bull and current) else None,
+                    "downside_to_bear": round((current - bear) / current, 4) if (bear and current) else None,
+                }
+        except Exception:
+            pass
+
+    position_summary["dcf_valuation"] = dcf_context if dcf_context else "unavailable"
 
     user_message = f"""## Decision Required: Position Review — {ticker}
 

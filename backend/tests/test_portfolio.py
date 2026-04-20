@@ -456,7 +456,7 @@ def test_non_long_verdict_raises():
     mock_client = _make_mock_supabase(memo_row=memo_row)
 
     with patch("backend.agents.portfolio_agent._get_client", return_value=mock_client):
-        with pytest.raises(PortfolioAgentError, match="SHORT verdicts deferred"):
+        with pytest.raises(PortfolioAgentError, match="verdict must be LONG or SHORT"):
             _run(run_portfolio_sizing("test-id-001", portfolio_value=25_000))
 
 
@@ -495,3 +495,59 @@ def test_missing_entry_price_raises():
         with patch("backend.agents.portfolio_agent.yf.Ticker", return_value=mock_ticker):
             with pytest.raises(PortfolioAgentError, match="could not fetch entry price"):
                 _run(run_portfolio_sizing("test-id-003", portfolio_value=25_000))
+
+# ===========================================================================
+# SHORT position logic tests
+# ===========================================================================
+
+def test_short_stop_loss_risk_on():
+    """SHORT + Risk-On → Tier 1 stop = entry × 1.08 (8% stop above)."""
+    entry = 100.0
+    result = calculate_size(
+        conviction_score=7.0, 
+        portfolio_value=50_000, 
+        entry_price=entry, 
+        regime="Risk-On",
+        direction="SHORT"
+    )
+    expected_stop = round(entry * 1.08, 4)
+    assert math.isclose(result["stop_loss_price"], expected_stop, rel_tol=1e-6)
+    assert result["stop_loss_price"] > entry
+
+
+def test_short_stop_loss_risk_off():
+    """SHORT + Risk-Off → Tier 1 stop = entry × 1.05 (5% stop above)."""
+    entry = 100.0
+    result = calculate_size(
+        conviction_score=7.0, 
+        portfolio_value=50_000, 
+        entry_price=entry, 
+        regime="Risk-Off",
+        direction="SHORT"
+    )
+    expected_stop = round(entry * 1.05, 4)
+    assert math.isclose(result["stop_loss_price"], expected_stop, rel_tol=1e-6)
+
+
+def test_short_verdict_routing():
+    """Memo with verdict=SHORT → Should NOT raise PortfolioAgentError anymore."""
+    memo_row = {
+        "id": "test-short-001",
+        "ticker": "EVIL",
+        "verdict": "SHORT",
+        "conviction_score": 7.5,
+        "memo_json": {"verdict": "SHORT", "conviction_score": 7.5, "ticker": "EVIL"},
+    }
+    # Use Transitional regime because Risk-On (default) has max_net_short=0
+    mock_client = _make_mock_supabase(memo_row=memo_row, regime="Transitional")
+    
+    # Mock yfinance to return a valid price
+    mock_ticker = MagicMock()
+    mock_ticker.info = {"regularMarketPrice": 50.0}
+
+    with patch("backend.agents.portfolio_agent._get_client", return_value=mock_client):
+        with patch("backend.agents.portfolio_agent.yf.Ticker", return_value=mock_ticker):
+            # Should NOT raise anymore
+            res = _run(run_portfolio_sizing("test-short-001", portfolio_value=25_000))
+            assert res.direction == "SHORT"
+            assert res.stop_loss_price > res.entry_price

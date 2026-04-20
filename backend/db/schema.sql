@@ -391,3 +391,24 @@ alter table orders
         'PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'PARTIAL', 'FILLED',
         'CANCELLED', 'REJECTED', 'TIMEOUT', 'PARTIAL_FILLED'
     ));
+
+-- ── Financial Models ─────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS financial_models (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticker              TEXT NOT NULL,
+    run_date            DATE NOT NULL,
+    dcf_bull_target     NUMERIC(12,4),
+    dcf_base_target     NUMERIC(12,4),
+    dcf_bear_target     NUMERIC(12,4),
+    wacc                NUMERIC(6,4),
+    terminal_growth     NUMERIC(6,4),
+    beneish_m_score     NUMERIC(7,4),
+    beneish_gate        TEXT,
+    accruals_ratio      NUMERIC(8,4),
+    quality_grade       TEXT,
+    model_json          JSONB NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (ticker, run_date)
+);
+CREATE INDEX IF NOT EXISTS financial_models_ticker_idx
+    ON financial_models (ticker, run_date DESC);

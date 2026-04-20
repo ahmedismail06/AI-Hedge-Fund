@@ -1166,6 +1166,7 @@ def _build_synthesis_message(
     structured_block: str,
     retrieved_chunks: list[dict],
     macro_context: Optional[str] = None,
+    financial_modeling_context: Optional[str] = None,
 ) -> str:
     """Assemble final synthesis prompt combining structured data and retrieved narrative chunks."""
     if retrieved_chunks:
@@ -1177,10 +1178,16 @@ def _build_synthesis_message(
     else:
         chunks_section = "[No narrative documents retrieved — base memo on structured data only]"
 
+    if financial_modeling_context:
+        fm_section = f"\n{financial_modeling_context}\n"
+    else:
+        fm_section = ""
+
     message = (
         f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
         f"{structured_block}\n\n"
-        f"{chunks_section}\n\n"
+        f"{chunks_section}\n"
+        f"{fm_section}\n"
         "Valuation multiples rule: whenever you cite an EV/Revenue multiple, label it inline as either (FY2025E) or (FY2026E). "
         "Never cite an EV/Revenue multiple without a year label.\n"
         f"Respond with a single valid JSON object. No markdown, no code fences, no explanatory text — pure JSON only.\n"
@@ -1655,6 +1662,22 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     # ── Phase 2: Build structured block ──────────────────────────────────────
     structured_block = _build_structured_block(ticker, sec_data, news_data, form4_data, fmp_data)
 
+    # ── Phase 2.5: Financial Modeling ────────────────────────────────────────
+    financial_modeling_context: Optional[str] = None
+    financial_model_output = None
+    try:
+        from backend.financial_modeling.runner import run_financial_model
+        financial_model_output = run_financial_model(ticker, fmp_data)
+        financial_modeling_context = financial_model_output.summary
+        logger.info(
+            "run_research(%s): financial model complete — base_target=%s quality=%s",
+            ticker,
+            financial_model_output.dcf.base.price_target if not financial_model_output.dcf.unavailable else "N/A",
+            financial_model_output.earnings_quality.quality_grade,
+        )
+    except Exception as exc:
+        logger.warning("run_research(%s): financial modeling failed — %s", ticker, exc)
+
     usage_log: list[dict] = []
 
     # ── Phase 3: ReAct agentic retrieval ─────────────────────────────────────
@@ -1680,7 +1703,10 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     print(f"{'─'*62}")
 
     client = _build_client()
-    synthesis_message = _build_synthesis_message(ticker, structured_block, retrieved_chunks, macro_context)
+    synthesis_message = _build_synthesis_message(
+        ticker, structured_block, retrieved_chunks, macro_context,
+        financial_modeling_context=financial_modeling_context,
+    )
     response = client.messages.create(                                                       
       model="claude-sonnet-4-6",                            
       max_tokens=16000,
@@ -1789,6 +1815,13 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
 
     # ── Token usage summary ───────────────────────────────────────────────────
     _print_usage_summary(ticker, usage_log)
+
+    if financial_model_output and not financial_model_output.dcf.unavailable:
+        result["price_target"] = financial_model_output.dcf.base.price_target
+        result["price_target_basis"] = (
+            f"DCF (WACC {financial_model_output.dcf.wacc * 100:.1f}%, "
+            f"terminal {financial_model_output.dcf.terminal_growth * 100:.1f}%)"
+        )
 
     result["_raw_docs"] = {
         "sec": sec_data,

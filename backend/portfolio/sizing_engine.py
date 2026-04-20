@@ -80,19 +80,24 @@ def _get_tier(conviction_score: float) -> dict:
     )
 
 
-def _compute_stop_loss(entry_price: float, regime: str) -> float:
+def _compute_stop_loss(entry_price: float, regime: str, direction: str = "LONG") -> float:
     """
-    Return the Tier 1 stop-loss price based on the macro regime.
+    Return the Tier 1 stop-loss price based on the macro regime and direction.
 
     Risk-Off and Stagflation use a tighter 5% stop; all other regimes use 8%.
-    Raises ValueError for unrecognised regime strings.
+    For LONG: entry * (1 - stop_pct).
+    For SHORT: entry * (1 + stop_pct).
     """
     if regime not in _VALID_REGIMES:
         raise ValueError(
             f"Unknown regime '{regime}'. Must be one of {_VALID_REGIMES}"
         )
+    
     tight_regimes = {"Risk-Off", "Stagflation"}
     stop_pct = 0.05 if regime in tight_regimes else 0.08
+    
+    if direction.upper() == "SHORT":
+        return entry_price * (1.0 + stop_pct)
     return entry_price * (1.0 - stop_pct)
 
 
@@ -103,6 +108,7 @@ def calculate_size(
     portfolio_value: float,
     entry_price: float,
     regime: str = "Risk-On",
+    direction: str = "LONG",
 ) -> dict:
     """
     Convert a conviction score into a concrete position size using 25% fractional Kelly.
@@ -120,6 +126,8 @@ def calculate_size(
         Intended entry price per share in USD.
     regime : str
         Current macro regime: "Risk-On", "Risk-Off", "Transitional", or "Stagflation".
+    direction : str
+        "LONG" or "SHORT".
 
     Returns
     -------
@@ -168,14 +176,15 @@ def calculate_size(
             f"Increase portfolio_value or lower entry_price threshold."
         )
 
-    stop_loss_price = _compute_stop_loss(entry_price, regime)
+    stop_loss_price = _compute_stop_loss(entry_price, regime, direction)
 
     sizing_rationale = (
-        f"Conviction {conviction_score:.1f} → {size_label} ({pct_of_portfolio * 100:.1f}%): "
+        f"Conviction {conviction_score:.1f} ({direction}) → {size_label} ({pct_of_portfolio * 100:.1f}%): "
         f"Kelly f*={kelly_fraction:.4f} (p={win_rate}, b={b}), adjusted {adjusted_kelly:.4f}, "
         f"capped at {pct_of_portfolio * 100:.1f}% of "
         f"${portfolio_value:,.2f} = ${dollar_size:,.2f}"
     )
+
 
     return {
         "kelly_fraction": round(kelly_fraction, 6),
