@@ -174,7 +174,9 @@ create table if not exists positions (
     stop_tier2          numeric(12, 4),
     stop_tier3          numeric(12, 4),
     -- Earnings date (populated by portfolio_agent from memo context)
-    next_earnings_date  date
+    next_earnings_date  date,
+    -- EarningsAlpha: suppresses Risk-Off stop tightening while active
+    drift_hold_until    date
 );
 
 create index if not exists positions_ticker_idx on positions (ticker);
@@ -412,3 +414,30 @@ CREATE TABLE IF NOT EXISTS financial_models (
 );
 CREATE INDEX IF NOT EXISTS financial_models_ticker_idx
     ON financial_models (ticker, run_date DESC);
+
+-- ── EarningsAlpha Events ─────────────────────────────────────────────────────
+-- One row per earnings event per ticker.  Pre-earnings signal and post-print
+-- drift-hold state are persisted here for audit and stop-loss gating.
+CREATE TABLE IF NOT EXISTS earnings_events (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticker                  TEXT NOT NULL,
+    event_date              DATE NOT NULL,
+    fiscal_period           TEXT,                   -- e.g. 'Q1 2026'
+    reported_eps            NUMERIC(10, 4),
+    consensus_eps           NUMERIC(10, 4),
+    internal_eps_estimate   NUMERIC(10, 4),
+    surprise_pct            NUMERIC(8, 4),          -- (reported - consensus) / |consensus|
+    price_reaction_1d       NUMERIC(8, 4),
+    price_reaction_5d       NUMERIC(8, 4),
+    drift_hold_active       BOOLEAN NOT NULL DEFAULT FALSE,
+    drift_hold_until        DATE,
+    pre_earnings_signal     TEXT CHECK (pre_earnings_signal IN ('SIZE_UP', 'HOLD', 'REDUCE')),
+    run_date                DATE NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (ticker, event_date)
+);
+CREATE INDEX IF NOT EXISTS earnings_events_ticker_idx
+    ON earnings_events (ticker, event_date DESC);
+CREATE INDEX IF NOT EXISTS earnings_events_drift_idx
+    ON earnings_events (ticker, drift_hold_active, drift_hold_until)
+    WHERE drift_hold_active = TRUE;
