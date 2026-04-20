@@ -85,10 +85,11 @@ class ScreenerResult:
 def _normalize_universe(
     values: dict[str, Optional[float]],
     higher_is_better: bool = True,
-) -> dict[str, float]:
+) -> dict[str, Optional[float]]:
     """
     Percentile-rank values to 0–10 using average-rank normalization for ties.
-    None values → 5.0 (neutral). All identical → 5.0.
+    None values → None (excluded from average in _compute_factor_score).
+    All identical → 5.0.
 
     Tied raw values receive the same normalized score (average of their ranks),
     which is the standard statistical percentile-rank approach.
@@ -98,34 +99,38 @@ def _normalize_universe(
         higher_is_better: If False, lower raw values get higher normalized scores.
 
     Returns:
-        {ticker: normalized_score_0_to_10}
+        {ticker: normalized_score_0_to_10 | None}
     """
     import math
     valid = {t: v for t, v in values.items() if v is not None and not math.isnan(v)}
 
-    if len(valid) < 2:
-        return {t: 5.0 for t in values}
+    if not valid:
+        return {t: None for t in values}
+
+    if len(valid) < 2 or len(set(valid.values())) == 1:
+        # Not enough variation to rank → neutral 5.0 for those with data
+        return {t: (5.0 if t in valid else None) for t in values}
 
     sorted_vals = sorted(valid.values())
     n = len(sorted_vals)
-
-    if n == 1 or len(set(sorted_vals)) == 1:
-        # All identical → neutral for everyone
-        return {t: 5.0 for t in values}
 
     # Map each unique value → average rank of all its occurrences → score 0–10
     val_to_score: dict[float, float] = {}
     for unique_val in set(sorted_vals):
         positions = [i for i, v in enumerate(sorted_vals) if v == unique_val]
         avg_rank = sum(positions) / len(positions)
-        pct = avg_rank / (n - 1)
+        # Scale to 0-10
+        if n > 1:
+            pct = avg_rank / (n - 1)
+        else:
+            pct = 0.5
         score = pct * 10.0
         if not higher_is_better:
             score = 10.0 - score
         val_to_score[unique_val] = round(score, 3)
 
     return {
-        t: val_to_score[valid[t]] if t in valid else 5.0
+        t: val_to_score[valid[t]] if t in valid else None
         for t in values
     }
 
@@ -134,14 +139,20 @@ def _compute_factor_score(
     normalized_sub: dict[str, float],  # {sub_metric: normalized_0_to_10}
     weights: dict[str, float],
 ) -> float:
-    """Weighted average of normalized sub-scores."""
+    """Weighted average of normalized sub-scores. Excludes metrics with no data."""
     total_w = 0.0
     total   = 0.0
     for metric, w in weights.items():
-        score = normalized_sub.get(metric, 5.0)
-        total   += score * w
-        total_w += w
-    return round(total / total_w, 3) if total_w > 0 else 5.0
+        score = normalized_sub.get(metric)
+        if score is not None:
+            total   += score * w
+            total_w += w
+    
+    # If no data at all for this factor group, return neutral 5.0
+    if total_w == 0:
+        return 5.0
+        
+    return round(total / total_w, 3)
 
 
 # ── Main composite function ───────────────────────────────────────────────────
