@@ -248,6 +248,18 @@ def _poll_research_queue() -> list[str]:
                 ticker, is_held, has_material_event,
             )
 
+        # ── Dequeue atomically before processing (prevents duplicate runs) ────
+        try:
+            client.table("watchlist").update({"queued_for_research": False}).eq(
+                "ticker", ticker
+            ).eq("run_date", today).execute()
+        except Exception as exc:
+            logger.warning(
+                "_poll_research_queue: failed to dequeue %s before research — %s; skipping",
+                ticker, exc,
+            )
+            continue
+
         # ── Run research ──────────────────────────────────────────────────────
         try:
             memo = run_research(ticker, use_cache=False, update_mode=update_mode)
@@ -291,16 +303,19 @@ def _poll_research_queue() -> list[str]:
         except Exception as exc:
             logger.error("_poll_research_queue: PM handoff failed for %s — %s", ticker, exc)
 
-    # Clear queued_for_research for processed + staleness-skipped tickers
-    to_clear = processed + staleness_skipped
-    if to_clear:
+    # Clear queued_for_research for staleness-skipped tickers
+    # (processed tickers are already cleared per-ticker before run_research())
+    if staleness_skipped:
         try:
             client.table("watchlist").update({"queued_for_research": False}).in_(
-                "ticker", to_clear
+                "ticker", staleness_skipped
             ).eq("run_date", today).execute()
-            logger.info("_poll_research_queue: cleared queued_for_research for %s", to_clear)
+            logger.info(
+                "_poll_research_queue: cleared queued_for_research for staleness-skipped: %s",
+                staleness_skipped,
+            )
         except Exception as exc:
-            logger.warning("_poll_research_queue: failed to clear flag — %s", exc)
+            logger.warning("_poll_research_queue: failed to clear staleness-skipped flag — %s", exc)
 
     return processed
 

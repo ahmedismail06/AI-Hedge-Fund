@@ -5,11 +5,11 @@ Returns raw values for each sub-metric. Normalization (0–10 percentile rank)
 is deferred to scorer.py so rankings are relative across the full universe.
 
 Sub-components:
-  gross_margin       25%  — FMP income-statement (primary), Polygon fallback
-  revenue_growth_yoy 20%  — Polygon FY (primary), FMP annual fallback
-  roe                20%  — Polygon: net_income / equity
-  debt_to_equity     20%  — FMP balance-sheet-statement (lower = better)
-  eps_beat_rate      15%  — yfinance earningsHistory
+  gross_margin       27.5% — FMP income-statement (primary), Polygon fallback
+  revenue_growth_yoy 25%   — Polygon FY (primary), FMP annual fallback
+  roe                22.5% — Polygon: net_income / equity
+  debt_to_equity     25%   — FMP balance-sheet-statement (lower = better)
+  eps_beat_rate      —     — computed and returned in raw_values but NOT scored
 
 Sector-specific bonuses are applied in scorer.py after normalization.
 """
