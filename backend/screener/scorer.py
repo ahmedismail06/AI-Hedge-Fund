@@ -10,7 +10,7 @@ Pipeline:
   4. Compute composite = Quality×w + Value×w + Momentum×w (regime-adjusted weights)
   5. Apply discrete adjustments: FLAGGED penalty, insider bonus, regime caps
   6. Sort descending, assign rank
-  7. Return all ScreenerResult objects (caller filters ≥ 7.0)
+  7. Return all ScreenerResult objects (caller filters ≥ 6.5)
 
 Regime weights:
   Risk-On:      Quality 50%, Value 30%, Momentum 20%
@@ -38,12 +38,13 @@ _REGIME_WEIGHTS: dict[str, dict[str, float]] = {
 _DEFAULT_REGIME = "Risk-On"
 
 # Quality sub-metric weights (must sum to 1.0)
+# eps_beat_rate removed; weight redistributed to remaining metrics
 _QUALITY_SUB_WEIGHTS = {
-    "gross_margin":       0.25,
-    "revenue_growth_yoy": 0.20,
-    "roe":                0.20,
-    "debt_to_equity":     0.20,  # inverted (lower = better)
-    "eps_beat_rate":      0.15,
+    "gross_margin":       0.275,
+    "revenue_growth_yoy": 0.25,
+    "roe":                0.225,
+    "debt_to_equity":     0.25,  # inverted (lower = better)
+    # eps_beat_rate retained in raw_values output but excluded from score computation
 }
 
 # Value sub-metric weights (must sum to 1.0)
@@ -186,13 +187,20 @@ def compute_composite(
     tickers = [c.ticker for c in universe]
     ticker_to_cand = {c.ticker: c for c in universe}
 
-    # ── Step 1: Identify EXCLUDED tickers (Beneish hard gate) ────────────────
+    # ── Step 1: Identify EXCLUDED tickers (Beneish hard gate + pre-revenue) ──
     excluded_set: set[str] = set()
+    excluded: list[dict] = []
     for ticker in tickers:
         beneish = raw_factor_results.get(ticker, {}).get("beneish", {})
         if beneish.get("gate_result") == "EXCLUDED":
             excluded_set.add(ticker)
             logger.debug("%s: Beneish EXCLUDED — removed from scoring pool", ticker)
+            continue
+        quality_metrics = raw_factor_results.get(ticker, {}).get("quality", {})
+        if quality_metrics.get("pre_revenue_flag"):
+            excluded_set.add(ticker)
+            excluded.append({"ticker": ticker, "reason": "PRE_REVENUE"})
+            logger.info("%s: PRE_REVENUE — excluded from scoring pool", ticker)
 
     eligible = [t for t in tickers if t not in excluded_set]
 
