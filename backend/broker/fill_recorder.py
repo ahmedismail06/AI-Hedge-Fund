@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> None:
+def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None, skip_aggregate_update: bool = False) -> bool:
     """
     Handle a single ib_insync execDetailsEvent callback.
 
@@ -56,23 +56,19 @@ def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> N
     order reaches fully-filled status, transitions the position from
     APPROVED to OPEN via _close_position_loop.
 
-    Idempotency: Checks for existing row with same (order_id, fill_time, fill_qty)
-    to prevent duplicate entries during manual or recon-triggered runs.
+    Idempotency: Checks for existing row with same ibkr_exec_id to prevent
+    duplicate entries.
 
-    Never raises — IBKR event callbacks must not propagate exceptions.
-
-    Args:
-        trade: ib_insync Trade object; trade.order.permId identifies the order.
-               Can be None if perm_id_override is provided.
-        fill:  ib_insync Fill object; carries contract, execution, and
-               commissionReport attributes.
-        perm_id_override: Optional permId to use if trade is None (for recon).
+    Returns:
+        True if a new fill was recorded, False if it was already in the DB.
     """
     try:
         perm_id = perm_id_override or (trade.order.permId if trade else None)
+        exec_id = fill.execution.execId if fill and fill.execution else None
+
         if not perm_id:
             logger.warning("Received fill with no permId — skipping")
-            return
+            return False
 
         client = _get_client()
 
@@ -84,11 +80,13 @@ def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> N
             .execute()
         )
         if not result.data:
-            logger.debug(
-                "No orders row found for permId=%s — possibly from a prior session",
-                perm_id,
-            )
-            return
+            # Silence this for recon, only log for real-time
+            if not perm_id_override:
+                logger.debug(
+                    "No orders row found for permId=%s — possibly from a prior session",
+                    perm_id,
+                )
+            return False
 
         order_row = result.data[0]
         order_id: str = order_row["id"]
@@ -115,21 +113,20 @@ def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> N
             fill_time_iso = _parse_ibkr_time(str(raw_time))
 
         # ── Idempotency Check ─────────────────────────────────────────────────
-        # Avoid duplicate fill entries if recon runs on a trade that was already
-        # partially or fully captured by the real-time callback.
-        existing_fill = (
-            client.table("fills")
-            .select("id")
-            .eq("order_id", order_id)
-            .eq("fill_time", fill_time_iso)
-            .eq("fill_qty", fill_qty)
-            .execute()
-        )
+        # Check by ibkr_exec_id first (most robust), then fallback to (order_id, time, qty)
+        # for historical fills that might not have the exec_id in the DB.
+        existing_q = client.table("fills").select("id").eq("order_id", order_id)
+        if exec_id:
+            existing_q = existing_q.eq("ibkr_exec_id", exec_id)
+        else:
+            existing_q = existing_q.eq("fill_time", fill_time_iso).eq("fill_qty", fill_qty)
+        
+        existing_fill = existing_q.execute()
         if existing_fill.data:
-            logger.debug("Fill already recorded for order_id=%s time=%s qty=%s", order_id, fill_time_iso, fill_qty)
-            # Still update aggregate to be safe, but skip insert
-            _update_order_aggregate(order_id, order_row, fill_qty)
-            return
+            # If not skipping aggregate update, we still update to ensure state is correct
+            if not skip_aggregate_update:
+                _update_order_aggregate(order_id, order_row, fill_qty)
+            return False
 
         # 3. Compute slippage in basis points (positive = filled above intended).
         slippage_bps: Optional[float] = None
@@ -151,14 +148,19 @@ def handle_exec_detail(trade, fill, perm_id_override: Optional[int] = None) -> N
                 "exchange": exchange,
                 "slippage_bps": slippage_bps,
                 "intended_price": intended_price if intended_price > 0 else None,
+                "ibkr_exec_id": exec_id,
             }
         ).execute()
 
         # 5. Recompute the VWAP aggregate on the parent orders row.
-        _update_order_aggregate(order_id, order_row, fill_qty)
+        if not skip_aggregate_update:
+            _update_order_aggregate(order_id, order_row, fill_qty)
+
+        return True
 
     except Exception as exc:
         logger.error("fill handler error for permId=%s: %s", perm_id if 'perm_id' in locals() else 'unknown', exc)
+        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────

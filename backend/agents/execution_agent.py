@@ -74,17 +74,16 @@ def run_fill_recon() -> int:
     Query IBKR for all fills in the current session and reconcile them with
     the Supabase fills table.
 
-    This catches fills that were missed due to disconnections or if the
-    real-time callback didn't fire before the previous cycle disconnected.
+    Groups fills by order_id so that the aggregate (VWAP) update happens
+    only once per order, rather than for every single fill.
 
     Returns:
-        Number of fills processed.
+        Number of NEW fills recorded.
     """
     try:
         ib = _ibkr.connect()
         loop = _ibkr.get_loop()
 
-        # ib.fills() must be called on the dedicated loop thread.
         async def _get_fills():
             return ib.fills()
 
@@ -95,18 +94,41 @@ def run_fill_recon() -> int:
             return 0
 
         logger.info("Reconciling %d fills from IBKR...", len(fills))
-        count = 0
+        
+        # 1. Record new fills (with aggregate update skipped)
+        new_fill_count = 0
+        orders_to_update = set()
+        
         for fill in fills:
-            # fill.execution.permId identifies the order
             perm_id = fill.execution.permId
             if not perm_id:
                 continue
 
-            # Pass to fill_recorder for idempotent processing
-            _fill_recorder.handle_exec_detail(trade=None, fill=fill, perm_id_override=perm_id)
-            count += 1
+            # Record the fill. handle_exec_detail returns True if it's new.
+            is_new = _fill_recorder.handle_exec_detail(
+                trade=None, 
+                fill=fill, 
+                perm_id_override=perm_id,
+                skip_aggregate_update=True
+            )
+            
+            if is_new:
+                new_fill_count += 1
+                orders_to_update.add(perm_id)
 
-        return count
+        # 2. Update aggregate once for each order that received new fills
+        if orders_to_update:
+            logger.info("Updating aggregates for %d orders...", len(orders_to_update))
+            client = _get_client()
+            for perm_id in orders_to_update:
+                res = client.table("orders").select("*").eq("ibkr_order_id", perm_id).execute()
+                if res.data:
+                    order_row = res.data[0]
+                    # Passing 0 as new_fill_qty because _update_order_aggregate 
+                    # re-queries ALL fills from the DB anyway.
+                    _fill_recorder._update_order_aggregate(order_row["id"], order_row, 0)
+
+        return new_fill_count
     except Exception as exc:
         logger.warning("Fill reconciliation failed: %s", exc)
         return 0
