@@ -10,6 +10,7 @@ Thresholds automatically tighten in Risk-Off and Stagflation regimes (per domain
 
 import logging
 from collections import defaultdict
+from datetime import date
 from typing import Optional
 
 from backend.risk.schemas import StopEvent
@@ -37,8 +38,23 @@ _TIER3_NORMAL = -0.20   # -20% portfolio stop (normal)
 _TIER3_TIGHT  = -0.15   # -15% portfolio stop (tight)
 
 
-def _tier1_threshold(regime: str) -> float:
+def _tier1_threshold(regime: str, drift_hold_active: bool = False) -> float:
+    # Drift-hold suppresses Risk-Off/Stagflation tightening for 45 days post
+    # positive earnings surprise, allowing post-print momentum to run.
+    if drift_hold_active:
+        return _TIER1_NORMAL
     return _TIER1_TIGHT if regime in _TIGHT_REGIMES else _TIER1_NORMAL
+
+
+def _drift_hold_active(pos: dict) -> bool:
+    """Return True if this position has an active post-earnings drift-hold window."""
+    hold_until = pos.get("drift_hold_until")
+    if not hold_until:
+        return False
+    try:
+        return date.fromisoformat(str(hold_until)[:10]) >= date.today()
+    except (ValueError, TypeError):
+        return False
 
 
 def _tier2_threshold(regime: str) -> float:
@@ -65,7 +81,6 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
     """
     events: list[StopEvent] = []
 
-    t1_thresh = _tier1_threshold(regime)
     t2_thresh = _tier2_threshold(regime)
     t3_thresh = _tier3_threshold(regime)
 
@@ -78,14 +93,20 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
         entry_price = _safe_float(pos.get("entry_price"))
         sector = pos.get("sector")
 
+        # Per-position threshold — drift-hold suppresses Risk-Off tightening
+        drift_held = _drift_hold_active(pos)
+        t1_thresh = _tier1_threshold(regime, drift_hold_active=drift_held)
+
         logger.info(
-            "stop_check %s: pnl_pct=%.2f%% current=$%.4f entry=$%.4f stop=$%.4f tier1_thresh=%.1f%%",
+            "stop_check %s: pnl_pct=%.2f%% current=$%.4f entry=$%.4f stop=$%.4f "
+            "tier1_thresh=%.1f%% drift_hold=%s",
             ticker,
             (pnl_pct or 0) * 100,
             current_price or 0,
             entry_price or 0,
             stop_price or 0,
             t1_thresh * 100,
+            drift_held,
         )
 
         if pnl_pct <= t1_thresh:

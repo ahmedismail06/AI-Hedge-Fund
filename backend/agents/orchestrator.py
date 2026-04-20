@@ -1086,6 +1086,25 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             try:
                 earnings_date = date.fromisoformat(str(earnings_str)[:10])
                 if date.today() <= earnings_date <= cutoff:
+                    # Enrich with latest EarningsAlpha signal from earnings_events
+                    ea_signal_data: dict = {}
+                    try:
+                        ea_row = (
+                            _get_client()
+                            .table("earnings_events")
+                            .select(
+                                "pre_earnings_signal,internal_eps_estimate,"
+                                "consensus_eps,surprise_pct,drift_hold_active,drift_hold_until"
+                            )
+                            .eq("ticker", p.get("ticker", ""))
+                            .order("event_date", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        if ea_row.data:
+                            ea_signal_data = ea_row.data[0]
+                    except Exception:
+                        pass
                     items.append({
                         "category": "PRE_EARNINGS",
                         "data": {
@@ -1093,6 +1112,7 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                             "earnings_data": {
                                 "next_earnings_date": str(earnings_date),
                                 "days_to_earnings": (earnings_date - date.today()).days,
+                                "earnings_alpha": ea_signal_data,
                             },
                         },
                         "priority": 2,

@@ -94,14 +94,37 @@ def build_pre_earnings_prompt(
         "opened_at": str(position.get("opened_at") or ""),
     }
 
+    # Build EarningsAlpha signal section from earnings_data["earnings_alpha"] if present
+    ea_data = earnings_data.get("earnings_alpha", {})
+    if ea_data:
+        ea_signal = ea_data.get("pre_earnings_signal", "N/A")
+        int_eps = ea_data.get("internal_eps_estimate")
+        con_eps = ea_data.get("consensus_eps")
+        surprise = ea_data.get("surprise_pct")
+        drift_active = ea_data.get("drift_hold_active", False)
+        drift_until = ea_data.get("drift_hold_until", "")
+        int_eps_str = f"${int_eps:.2f}" if int_eps is not None else "N/A"
+        con_eps_str = f"${con_eps:.2f}" if con_eps is not None else "N/A"
+        surprise_str = f"{surprise:+.1%}" if surprise is not None else "N/A"
+        drift_str = f"ACTIVE until {drift_until}" if drift_active else "INACTIVE"
+        ea_section = (
+            f"\n### EarningsAlpha Signal (quantitative pre-earnings model)\n"
+            f"- Pre-earnings signal: **{ea_signal}**\n"
+            f"- Internal EPS estimate: {int_eps_str}  |  Consensus: {con_eps_str}\n"
+            f"- Last reported surprise: {surprise_str}\n"
+            f"- Drift-hold window: {drift_str}\n"
+        )
+    else:
+        ea_section = ""
+
     user_message = f"""## Decision Required: Pre-Earnings Positioning — {ticker}
 
 ### Position State
 {json.dumps(position_summary, indent=2, default=str)}
 
 ### Earnings Setup Data
-{json.dumps(earnings_data, indent=2, default=str)}
-
+{json.dumps({k: v for k, v in earnings_data.items() if k != "earnings_alpha"}, indent=2, default=str)}
+{ea_section}
 ### Historical Earnings Reactions (last 8 quarters, most recent first)
 {json.dumps(historical_reactions, indent=2, default=str) if historical_reactions else "Unavailable (Polygon key missing or no history)"}
 
@@ -118,7 +141,7 @@ def build_pre_earnings_prompt(
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
 ---
-Decide how to position this name into earnings. Be honest about whether you have a differentiated view on the earnings outcome itself — if you don't, HOLD or TRIM, not SIZE_UP.
+Decide how to position this name into earnings. The EarningsAlpha signal above reflects a quantitative model comparing internal EPS extrapolation against consensus — treat it as one data point, not a directive. Be honest about whether you have a differentiated view on the earnings outcome itself — if you don't, HOLD or TRIM, not SIZE_UP.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""
 
