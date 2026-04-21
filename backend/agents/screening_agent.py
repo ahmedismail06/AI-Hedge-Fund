@@ -24,7 +24,7 @@ from datetime import date
 
 from dotenv import load_dotenv
 
-from backend.screener.universe import UniverseCandidate, build_universe, fetch_ticker_data
+from backend.screener.universe import UniverseCandidate, build_universe, fetch_ticker_data, filter_by_profitability
 from backend.screener.factors.earnings_quality import compute_beneish
 from backend.screener.factors.quality import score_quality
 from backend.screener.factors.value import score_value
@@ -353,8 +353,19 @@ def run_screening(regime: str | None = None) -> list[dict]:
     try:
         fmp_quality_map = fetch_quality_fmp_batch(all_tickers)
         logger.info("FMP quality data fetched for %d tickers", len(fmp_quality_map))
+        
+        # Merge fmp_quality_map back into raw_data_map['fmp'] for filtering
+        for ticker, quality_data in fmp_quality_map.items():
+            if ticker in raw_data_map:
+                raw_data_map[ticker]["fmp"] = quality_data
     except Exception as exc:
         logger.error("FMP quality batch fetch failed — proceeding without FMP quality data: %s", exc)
+
+    # Step 2c: Apply profitability pre-filter
+    universe = filter_by_profitability(universe, raw_data_map)
+    # Re-sync raw_data_map to filtered universe
+    eligible_tickers = {c.ticker for c in universe}
+    raw_data_map = {t: d for t, d in raw_data_map.items() if t in eligible_tickers}
 
     # Step 3: Score each ticker (quality, value, momentum, beneish)
     raw_factor_results: dict[str, dict] = {}

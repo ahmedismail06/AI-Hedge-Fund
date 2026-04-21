@@ -38,13 +38,12 @@ _REGIME_WEIGHTS: dict[str, dict[str, float]] = {
 _DEFAULT_REGIME = "Risk-On"
 
 # Quality sub-metric weights (must sum to 1.0)
-# eps_beat_rate removed; weight redistributed to remaining metrics
 _QUALITY_SUB_WEIGHTS = {
-    "gross_margin":       0.275,
-    "revenue_growth_yoy": 0.25,
-    "roe":                0.225,
-    "debt_to_equity":     0.25,  # inverted (lower = better)
-    # eps_beat_rate retained in raw_values output but excluded from score computation
+    "gross_margin":       0.20,
+    "revenue_growth_yoy": 0.20,
+    "roe":                0.20,
+    "debt_to_equity":     0.20,  # inverted (lower = better)
+    "eps_beat_rate":      0.20,
 }
 
 # Value sub-metric weights (must sum to 1.0)
@@ -245,29 +244,21 @@ def compute_composite(
         for ticker, score in norm.items():
             quality_normalized.setdefault(ticker, {})[sub] = score
 
-    # Pre-revenue penalty: Healthcare tickers with no revenue get 2.0 on
-    # gross_margin and revenue_growth_yoy instead of the neutral-fill 5.0.
-    # This correctly penalises pre-revenue biotech rather than treating them
-    # as median-quality businesses.
-    _PRE_REVENUE_SCORE = 2.0
+    # Apply discrete quality adjustments before factor score computation
     for ticker in eligible:
-        q = raw_factor_results.get(ticker, {}).get("quality", {})
-        if not q.get("pre_revenue_flag"):
-            continue
-        ticker_sector = (
-            sectors.get(ticker)
-            or (ticker_to_cand[ticker].sector if ticker in ticker_to_cand else None)
-        )
-        if ticker_sector == "Healthcare":
-            rv = q.get("raw_values", {})
-            if rv.get("gross_margin") is None:
-                quality_normalized.setdefault(ticker, {})["gross_margin"] = _PRE_REVENUE_SCORE
-            if rv.get("revenue_growth_yoy") is None:
-                quality_normalized.setdefault(ticker, {})["revenue_growth_yoy"] = _PRE_REVENUE_SCORE
-            logger.debug(
-                "%s: pre-revenue Healthcare penalty → gm=%.1f rev_growth=%.1f",
-                ticker, _PRE_REVENUE_SCORE, _PRE_REVENUE_SCORE,
-            )
+        q_norm = quality_normalized.get(ticker, {})
+        q_raw = raw_factor_results.get(ticker, {}).get("quality", {}).get("raw_values", {})
+        
+        # If eps_beat_rate is null, score it as 4.0 (slight negative)
+        if q_raw.get("eps_beat_rate") is None:
+            q_norm["eps_beat_rate"] = 4.0
+            
+        # If gross_margin > 0.98 and ROE < 0, apply pre-revenue penalty (2.0)
+        roe = q_raw.get("roe")
+        gm = q_raw.get("gross_margin")
+        if gm is not None and gm > 0.98 and roe is not None and roe < 0:
+            q_norm["gross_margin"] = 2.0
+            logger.debug("%s: High GM (>0.98) with negative ROE -> gross_margin penalty 2.0", ticker)
 
     # ── Step 4: Normalize — Value (sector-relative) ────────────────────────────
     value_normalized: dict[str, dict[str, float]] = {}
@@ -303,6 +294,14 @@ def compute_composite(
         q_score = _compute_factor_score(quality_normalized.get(ticker, {}),  _QUALITY_SUB_WEIGHTS)
         v_score = _compute_factor_score(value_normalized.get(ticker, {}),    _VALUE_SUB_WEIGHTS)
         m_score = _compute_factor_score(momentum_normalized.get(ticker, {}), _MOMENTUM_SUB_WEIGHTS)
+
+        # ── Discrete Quality Caps ─────────────────────────────────────────────
+        # If is_profitable is false in the value block, cap quality score at 5.0
+        val_rv = raw_factor_results.get(ticker, {}).get("value", {}).get("raw_values", {})
+        if not val_rv.get("is_profitable", True):
+            if q_score > 5.0:
+                logger.debug("%s: Unprofitable -> capping quality_score at 5.0 (was %.3f)", ticker, q_score)
+                q_score = 5.0
 
         # Composite
         composite = (
