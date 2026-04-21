@@ -26,8 +26,10 @@ export const resumePM = () =>
 export const getCalibration = () =>
   axios.get(`${BASE}/pm/calibration`).then(r => r.data);
 
-export const runPMCycle = (portfolioValue = 25000) =>
-  axios.post(`${BASE}/pm/cycle/run`, null, { params: { portfolio_value: portfolioValue } }).then(r => r.data);
+export const runPMCycle = (portfolioValue = null) =>
+  axios.post(`${BASE}/pm/cycle/run`, null, {
+    params: portfolioValue != null ? { portfolio_value: portfolioValue } : {},
+  }).then(r => r.data);
 
 export const getPMConfig = () =>
   axios.get(`${BASE}/pm/config`).then(r => r.data);
