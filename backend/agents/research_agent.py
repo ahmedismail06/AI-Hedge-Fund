@@ -116,17 +116,22 @@ def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
     if not metrics_10k and not metrics_10q:
         return "[Pre-extraction unavailable — not in source documents]"
 
-    # Prefer 10-Q values for income statement items (more recent); 10-K for annual context
-    m = metrics_10q if metrics_10q else metrics_10k
+    # Income statement items (revenue, margins, net income) use the 10-K (full fiscal year)
+    # so the figures are annual, matching the Polygon/FMP fundamentals data the LLM also sees.
+    # Balance sheet items (cash, debt, AP) prefer the 10-Q (more recent point-in-time).
+    # Bug 15 fix: greedy [\s\S]{0,60} was capturing the prior-year comparison column
+    # instead of the current-period column; fixed to non-greedy in sec_fetcher.py.
+    m_income = metrics_10k if metrics_10k else metrics_10q   # annual for P&L
+    m_balance = metrics_10q if metrics_10q else metrics_10k  # most recent for B/S
     m_annual = metrics_10k if metrics_10k else {}
 
-    def _val(key: str, source: dict = m) -> str:
+    def _val(key: str, source: dict) -> str:
         v = source.get(key)
         return str(v) if v is not None else "unavailable"
 
-    atm = m.get("atm_or_shelf") or m_annual.get("atm_or_shelf", False)
-    maturities = m.get("debt_maturities") or m_annual.get("debt_maturities")
-    reporting_unit = m.get("reporting_unit") or m_annual.get("reporting_unit")
+    atm = m_annual.get("atm_or_shelf") or (metrics_10q or {}).get("atm_or_shelf", False)
+    maturities = m_annual.get("debt_maturities") or (metrics_10q or {}).get("debt_maturities")
+    reporting_unit = m_annual.get("reporting_unit") or (metrics_10q or {}).get("reporting_unit")
 
     if reporting_unit:
         unit_label = f"[REPORTING UNIT: values are in {reporting_unit.upper()} (detected from filing header)]"
@@ -136,16 +141,17 @@ def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
     lines = [
         "=== PRE-EXTRACTED FINANCIAL METRICS ===",
         "[Programmatically extracted — verify against filing text if values seem off]",
+        "[Income statement items from 10-K (full fiscal year); balance sheet from most recent filing]",
         unit_label,
         "",
-        f"Revenue (recent):    {_val('revenue_recent')}",
-        f"Revenue (prior):     {_val('revenue_prior')}",
-        f"Gross margin:        {_val('gross_margin')}",
-        f"Operating income:    {_val('operating_income')}",
-        f"Net income/loss:     {_val('net_income')}",
-        f"Cash:                {_val('cash')}",
-        f"Long-term debt:      {_val('long_term_debt')}",
-        f"Accounts payable:    {_val('accounts_payable')}",
+        f"Revenue (recent):    {_val('revenue_recent', m_income)}",
+        f"Revenue (prior):     {_val('revenue_prior', m_income)}",
+        f"Gross margin:        {_val('gross_margin', m_income)}",
+        f"Operating income:    {_val('operating_income', m_income)}",
+        f"Net income/loss:     {_val('net_income', m_income)}",
+        f"Cash:                {_val('cash', m_balance)}",
+        f"Long-term debt:      {_val('long_term_debt', m_balance)}",
+        f"Accounts payable:    {_val('accounts_payable', m_balance)}",
         f"Capital raise risk:  {'ATM program on file' if atm else 'None found'}",
         f"Debt maturities:     {maturities if maturities else 'None found'}",
     ]

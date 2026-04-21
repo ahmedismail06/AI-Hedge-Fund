@@ -209,20 +209,27 @@ def extract_financial_metrics(text: str) -> dict:
         metrics["gross_margin"] = f"{gm.group(1)}%"
 
     # Operating income / loss
-    op = re.search(
-        r"(?:income|loss)\s+from\s+operations[\s\S]{0,60}" + _DOLLAR,
+    # Non-greedy {0,60}? ensures we capture the FIRST dollar amount on the row
+    # (current period), not the second (prior year comparison). Bug 15.
+    # Among all matches, prefer the one whose captured value has the most digits
+    # (financial table rows, e.g. "15,627,660") over short narrative mentions ("15.6").
+    op_matches = list(re.finditer(
+        r"(?:income|loss)\s+from\s+operations[\s\S]{0,60}?" + _DOLLAR,
         text, re.I
-    )
-    if op:
-        metrics["operating_income"] = f"${op.group(1)}"
+    ))
+    if op_matches:
+        best = max(op_matches, key=lambda m: len(re.sub(r"\D", "", m.group(1))))
+        metrics["operating_income"] = f"${best.group(1)}"
 
-    # Net income / loss — anchor tightly to avoid capturing unrelated values
-    net = re.search(
-        r"\bnet\s+(?:income|loss)\b[\s\S]{0,60}" + _DOLLAR,
+    # Net income / loss — prefer longest (most-digits) match to favour table rows
+    # over rounded narrative mentions like "$15.6 million".
+    net_matches = list(re.finditer(
+        r"\bnet\s+(?:income|loss)\b[\s\S]{0,60}?" + _DOLLAR,
         text, re.I
-    )
-    if net:
-        metrics["net_income"] = f"${net.group(1)}"
+    ))
+    if net_matches:
+        best = max(net_matches, key=lambda m: len(re.sub(r"\D", "", m.group(1))))
+        metrics["net_income"] = f"${best.group(1)}"
 
     # Cash and cash equivalents — only allow horizontal whitespace between label and value.
     # Using [\s\S] here caused the regex to cross row boundaries and match the
