@@ -243,13 +243,23 @@ def extract_financial_metrics(text: str) -> dict:
         if len(val) >= 3:  # at least "X,X" to filter single-char junk
             metrics["cash"] = f"${val}"
 
-    # Long-term debt (dollar sign optional — many SEC table rows omit it)
-    ltd = re.search(
-        r"long[\-\s]term\s+debt(?:\s*,\s*(?:net|current\s+portion)?)?[\s\S]{0,80}" + _DOLLAR_OR_NUM,
-        text, re.I
-    )
-    if ltd:
-        val = ltd.group(1)
+    # Long-term debt (dollar sign optional — many SEC table rows omit it).
+    # Bug 16: greedy [\s\S]{0,80} + re.search caused two problems:
+    #   (a) matched "long-term debt" inside "Current portion of long-term debt"
+    #       (appears first in Current Liabilities), extracting the current-maturity
+    #       amount instead of the long-term balance.
+    #   (b) greedy span could capture the prior-year comparison column.
+    # Fix: anchor to line-start (re.MULTILINE) so "Current portion of long-term debt"
+    # — which starts the line with "Current", not "long-term" — is excluded.
+    # Non-greedy {0,80}? captures the first (current-period) dollar amount.
+    # finditer + max-by-digits selects the largest/most-specific match.
+    ltd_matches = list(re.finditer(
+        r"^\s*long[\-\s]term\s+debt[^\n]{0,80}?" + _DOLLAR_OR_NUM,
+        text, re.I | re.MULTILINE
+    ))
+    if ltd_matches:
+        best = max(ltd_matches, key=lambda m: len(re.sub(r"\D", "", m.group(1))))
+        val = best.group(1)
         if len(val) >= 5:  # at least "1,234" to filter junk
             metrics["long_term_debt"] = f"${val}"
 
