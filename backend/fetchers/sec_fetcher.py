@@ -374,7 +374,7 @@ def _load_cached_filing_text(ticker: str, form_type: str) -> str | None:
             ticker=ticker,
             query=f"{doc_type} business risk management",
             doc_types=[doc_type],
-            match_count=12,
+            n=8,
         )
         if not chunks:
             return None
