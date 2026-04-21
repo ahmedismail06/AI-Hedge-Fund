@@ -379,10 +379,42 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     return final
 
 
+def _polygon_roe(polygon_financials: dict) -> Optional[float]:
+    """
+    Compute ROE from Polygon annual financials.
+    Mirrors the logic in quality.py so the pre-filter uses the same data source
+    as the scorer when FMP income/balance data is unavailable.
+    """
+    results = polygon_financials.get("results", [])
+    fy_rows = [r for r in results if r.get("fiscal_period") == "FY"]
+    fy_rows.sort(key=lambda r: r.get("filing_date", ""), reverse=True)
+    if not fy_rows:
+        return None
+    fin = fy_rows[0].get("financials", {})
+    inc = fin.get("income_statement", {})
+    bs  = fin.get("balance_sheet", {})
+
+    def _v(stmt: dict, key: str) -> Optional[float]:
+        val = stmt.get(key, {})
+        return val.get("value") if isinstance(val, dict) else val
+
+    net_income = _v(inc, "net_income_loss")
+    equity     = _v(bs,  "equity")
+    if net_income is not None and equity and equity != 0:
+        return net_income / equity
+    return None
+
+
 def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dict[str, dict]) -> List[UniverseCandidate]:
     """
     Exclude tickers with negative ROE, pre-revenue biotech signature, or insufficient data.
     Runs after data fetch but before scoring.
+
+    ROE source priority:
+      1. FMP income_statement + balance_sheet (fetch_quality_fmp_batch output)
+      2. Polygon annual financials (always fetched in fetch_ticker_data)
+    If FMP data is absent (no FMP_API_KEY or API failure), the Polygon fallback
+    ensures negative-ROE tickers are still caught.
     """
     filtered: List[UniverseCandidate] = []
     exclusions = {
@@ -390,34 +422,45 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
         "PRE_REVENUE_BIOTECH": 0,
         "INSUFFICIENT_QUALITY_DATA": 0
     }
+    # Track per-ticker ROE for diagnostic log
+    roe_map: dict[str, Optional[float]] = {}
 
     for cand in universe:
         ticker = cand.ticker
         data = raw_data_map.get(ticker, {})
-        
-        # We need to extract enough to check the criteria.
-        # This mirrors some logic from quality.py but simplified for pre-filtering.
+
         fmp_quality = data.get("fmp", {})
         fmp_inc = fmp_quality.get("income_statement", [])
         fmp_bs = fmp_quality.get("balance_sheet", [])
-        
-        # ROE check (simplified)
+
+        # ROE — FMP primary, Polygon fallback
         roe: Optional[float] = None
+        roe_source = "none"
         if fmp_inc and fmp_bs:
             net_inc = fmp_inc[0].get("netIncome")
-            equity = fmp_bs[0].get("totalStockholdersEquity")
+            equity  = fmp_bs[0].get("totalStockholdersEquity")
             if net_inc is not None and equity and equity != 0:
                 roe = net_inc / equity
+                roe_source = "fmp"
 
-        # Gross Margin check (simplified)
+        if roe is None:
+            polygon_roe = _polygon_roe(data.get("polygon_financials", {}))
+            if polygon_roe is not None:
+                roe = polygon_roe
+                roe_source = "polygon"
+
+        roe_map[ticker] = roe
+        logger.debug("%s: ROE=%.3f (source=%s)", ticker, roe if roe is not None else float("nan"), roe_source)
+
+        # Gross Margin check
         gm: Optional[float] = None
         if fmp_inc:
             rev = fmp_inc[0].get("revenue")
-            gp = fmp_inc[0].get("grossProfit")
+            gp  = fmp_inc[0].get("grossProfit")
             if rev and rev != 0 and gp is not None:
                 gm = gp / rev
 
-        # Revenue Growth check (simplified)
+        # Revenue Growth check
         rev_growth: Optional[float] = None
         if len(fmp_inc) >= 2:
             r1 = fmp_inc[0].get("revenue")
@@ -428,7 +471,7 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
         # 1. Negative ROE
         if roe is not None and roe < 0:
             exclusions["NEGATIVE_ROE"] += 1
-            logger.info("%s: Excluded — NEGATIVE_ROE (%.3f)", ticker, roe)
+            logger.info("%s: Excluded — NEGATIVE_ROE (%.3f, source=%s)", ticker, roe, roe_source)
             continue
 
         # 2. Pre-revenue biotech signature
@@ -445,13 +488,19 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
 
         filtered.append(cand)
 
+    excluded_count = sum(exclusions.values())
     logger.info(
-        "Profitability pre-filter complete: %d excluded, %d remaining",
-        sum(exclusions.values()), len(filtered)
+        "Pre-filter removed %d tickers. Remaining: %d tickers. Breakdown: %s",
+        excluded_count,
+        len(filtered),
+        {r: c for r, c in exclusions.items() if c > 0},
     )
-    for reason, count in exclusions.items():
-        if count > 0:
-            logger.info("  - %s: %d", reason, count)
+    # Diagnostic: first 5 remaining tickers with their ROE values
+    sample = [
+        f"{c.ticker}(ROE={'%.3f' % roe_map[c.ticker] if roe_map.get(c.ticker) is not None else 'None'})"
+        for c in filtered[:5]
+    ]
+    logger.info("First 5 remaining: %s", sample)
 
     return filtered
 
