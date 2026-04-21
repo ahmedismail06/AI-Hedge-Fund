@@ -71,6 +71,13 @@ ALTER TABLE pm_decisions        FORCE ROW LEVEL SECURITY;
 ALTER TABLE pm_calibration      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pm_calibration      FORCE ROW LEVEL SECURITY;
 
+-- Financial Modeling & Earnings Alpha
+ALTER TABLE financial_models    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE financial_models    FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE earnings_events     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE earnings_events     FORCE ROW LEVEL SECURITY;
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RPC function security

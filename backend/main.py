@@ -291,7 +291,20 @@ def get_screener_watchlist(run_date: str | None = None, limit: int = 50, all_tim
     try:
         client = _get_client()
         if all_time:
-            query = client.table("watchlist").select("*").order("composite_score", desc=True).limit(limit)
+            # Fetch a larger pool to ensure we have enough for deduplication
+            query = client.table("watchlist").select("*").order("composite_score", desc=True).limit(limit * 5)
+            result = query.execute()
+            data = result.data or []
+            
+            seen = set()
+            deduped = []
+            for row in data:
+                if row["ticker"] not in seen:
+                    seen.add(row["ticker"])
+                    deduped.append(row)
+                    if len(deduped) >= limit:
+                        break
+            return deduped
         else:
             query = client.table("watchlist").select("*").order("rank", desc=False).limit(limit)
             if run_date:

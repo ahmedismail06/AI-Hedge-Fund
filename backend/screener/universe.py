@@ -379,6 +379,83 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     return final
 
 
+def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dict[str, dict]) -> List[UniverseCandidate]:
+    """
+    Exclude tickers with negative ROE, pre-revenue biotech signature, or insufficient data.
+    Runs after data fetch but before scoring.
+    """
+    filtered: List[UniverseCandidate] = []
+    exclusions = {
+        "NEGATIVE_ROE": 0,
+        "PRE_REVENUE_BIOTECH": 0,
+        "INSUFFICIENT_QUALITY_DATA": 0
+    }
+
+    for cand in universe:
+        ticker = cand.ticker
+        data = raw_data_map.get(ticker, {})
+        
+        # We need to extract enough to check the criteria.
+        # This mirrors some logic from quality.py but simplified for pre-filtering.
+        fmp_quality = data.get("fmp", {})
+        fmp_inc = fmp_quality.get("income_statement", [])
+        fmp_bs = fmp_quality.get("balance_sheet", [])
+        
+        # ROE check (simplified)
+        roe: Optional[float] = None
+        if fmp_inc and fmp_bs:
+            net_inc = fmp_inc[0].get("netIncome")
+            equity = fmp_bs[0].get("totalStockholdersEquity")
+            if net_inc is not None and equity and equity != 0:
+                roe = net_inc / equity
+
+        # Gross Margin check (simplified)
+        gm: Optional[float] = None
+        if fmp_inc:
+            rev = fmp_inc[0].get("revenue")
+            gp = fmp_inc[0].get("grossProfit")
+            if rev and rev != 0 and gp is not None:
+                gm = gp / rev
+
+        # Revenue Growth check (simplified)
+        rev_growth: Optional[float] = None
+        if len(fmp_inc) >= 2:
+            r1 = fmp_inc[0].get("revenue")
+            r2 = fmp_inc[1].get("revenue")
+            if r1 is not None and r2 and r2 != 0:
+                rev_growth = (r1 - r2) / abs(r2)
+
+        # 1. Negative ROE
+        if roe is not None and roe < 0:
+            exclusions["NEGATIVE_ROE"] += 1
+            logger.info("%s: Excluded — NEGATIVE_ROE (%.3f)", ticker, roe)
+            continue
+
+        # 2. Pre-revenue biotech signature
+        if roe is None and gm is not None and gm > 0.95:
+            exclusions["PRE_REVENUE_BIOTECH"] += 1
+            logger.info("%s: Excluded — PRE_REVENUE_BIOTECH (gm=%.3f)", ticker, gm)
+            continue
+
+        # 3. Insufficient data
+        if gm is None and rev_growth is None:
+            exclusions["INSUFFICIENT_QUALITY_DATA"] += 1
+            logger.info("%s: Excluded — INSUFFICIENT_QUALITY_DATA", ticker)
+            continue
+
+        filtered.append(cand)
+
+    logger.info(
+        "Profitability pre-filter complete: %d excluded, %d remaining",
+        sum(exclusions.values()), len(filtered)
+    )
+    for reason, count in exclusions.items():
+        if count > 0:
+            logger.info("  - %s: %d", reason, count)
+
+    return filtered
+
+
 def fetch_ticker_data(ticker: str) -> dict:
     """
     Single coordinated data fetch for a ticker.
