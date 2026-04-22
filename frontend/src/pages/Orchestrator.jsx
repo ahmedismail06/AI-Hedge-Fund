@@ -254,7 +254,7 @@ export default function Orchestrator() {
     : null;
 
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 space-y-5 max-w-7xl mx-auto">
       {/* Defer Modal */}
       {deferTarget && (
         <DeferModal
@@ -432,7 +432,7 @@ export default function Orchestrator() {
 
       {/* PM Decision Feed */}
       <div className="bg-white rounded-xl border border-gray-200">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+        <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-semibold text-gray-900">PM Decision Feed</p>
           <p className="text-xs text-gray-400">{filtered.length} of {decisions.length} decisions</p>
         </div>
@@ -447,14 +447,14 @@ export default function Orchestrator() {
             return (
               <div key={d.decision_id} className="px-5 py-4 hover:bg-gray-50 transition-colors">
                 {/* Main row */}
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
+                  <div className="flex flex-wrap items-start gap-2 sm:gap-3 flex-1 min-w-0">
                     {/* Category */}
                     <span className={`mt-0.5 shrink-0 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide ${CATEGORY_BADGE[d.category] || 'bg-gray-100 text-gray-600'}`}>
                       {d.category}
                     </span>
                     {/* Ticker */}
-                    <span className="mt-0.5 shrink-0 font-mono text-sm font-bold text-gray-800 w-16">
+                    <span className="mt-0.5 shrink-0 font-mono text-sm font-bold text-gray-800 w-auto sm:w-16">
                       {d.ticker || <span className="text-gray-400 font-normal text-xs">portfolio</span>}
                     </span>
                     {/* Decision */}
@@ -463,15 +463,15 @@ export default function Orchestrator() {
                     </span>
                     {/* Reasoning */}
                     <p
-                      className={`text-xs text-gray-600 leading-relaxed flex-1 min-w-0 cursor-pointer ${isExpanded ? '' : 'line-clamp-2'}`}
+                      className={`text-xs text-gray-600 leading-relaxed cursor-pointer basis-full md:basis-auto md:flex-1 min-w-0 ${isExpanded ? '' : 'line-clamp-3 md:line-clamp-2'}`}
                       onClick={() => setExpandedId(isExpanded ? null : d.decision_id)}
                     >
                       {d.reasoning || '—'}
                     </p>
                   </div>
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-4 w-full md:w-auto md:shrink-0">
                     <ConfidenceBar value={d.confidence} />
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${EXEC_STATUS_BADGE[d.execution_status] || 'bg-gray-100 text-gray-500'}`}>
+                    <span className={`text-[10px] leading-tight font-semibold px-2 py-0.5 rounded text-center max-w-[11rem] ${EXEC_STATUS_BADGE[d.execution_status] || 'bg-gray-100 text-gray-500'}`}>
                       {d.execution_status}
                     </span>
                     <span className="text-xs text-gray-400 whitespace-nowrap">{formatTime(d.timestamp)}</span>
@@ -518,7 +518,7 @@ export default function Orchestrator() {
                     )}
                     {/* Override buttons */}
                     {!d.human_override && d.execution_status === 'SENT_TO_EXECUTION' && (
-                      <div className="flex gap-2 pt-1">
+                      <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'BLOCK' })}
                           className="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
@@ -528,7 +528,7 @@ export default function Orchestrator() {
                       </div>
                     )}
                     {!d.human_override && d.execution_status === 'PENDING_HUMAN' && (
-                      <div className="flex gap-2 pt-1">
+                      <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
                           className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
@@ -550,7 +550,7 @@ export default function Orchestrator() {
                       </div>
                     )}
                     {!d.human_override && d.execution_status === 'DEFERRED' && (
-                      <div className="flex gap-2 pt-1">
+                      <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
                           className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"

@@ -87,7 +87,7 @@ export default function Execution() {
   const slippageChartData = fillsToday.map((f, i) => ({ i: i + 1, slippage: f.slippage_bps ?? 0, ticker: f.ticker }));
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 space-y-6 max-w-7xl mx-auto">
 
       {/* IBKR Status Bar */}
       <div className={`rounded-xl border p-4 flex flex-wrap items-center gap-4 ${ibkrOk ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
@@ -103,7 +103,7 @@ export default function Execution() {
         {!ibkrOk && (
           <p className="text-sm text-red-600 ml-2">Orders cannot be submitted until the gateway is connected.</p>
         )}
-        <div className="ml-auto flex items-center gap-3">
+        <div className="w-full sm:w-auto sm:ml-auto flex items-center gap-3">
           <span className="text-xs text-gray-500">Auto-refreshing every 10s</span>
           <button
             onClick={handleRunCycle}
@@ -124,7 +124,7 @@ export default function Execution() {
       </div>
 
       {/* Fill Quality Stats */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <StatCard
           label="Avg Slippage"
           plainLabel="Today's fills"
@@ -154,8 +154,8 @@ export default function Execution() {
           <h3 className="text-sm font-semibold text-gray-900">Live Orders</h3>
           <span className="text-xs text-gray-400">Real-time · updates every 10s</span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
+        <div className="responsive-table-wrap">
+          <table className="responsive-table w-full text-left">
             <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
               <tr>
                 <th className="px-5 py-3">Ticker</th>
@@ -220,8 +220,8 @@ export default function Execution() {
           <h3 className="text-sm font-semibold text-gray-900">Recent Fills</h3>
           <span className="text-xs text-gray-400">{fillsToday.length} fills today</span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
+        <div className="responsive-table-wrap">
+          <table className="responsive-table w-full text-left">
             <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
               <tr>
                 <th className="px-5 py-3">Ticker</th>

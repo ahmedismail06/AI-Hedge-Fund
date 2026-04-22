@@ -92,7 +92,7 @@ export default function Screener() {
   };
 
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 space-y-5 max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -152,8 +152,8 @@ export default function Screener() {
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="overflow-x-auto">
-          <table className="w-full text-left">
+          <div className="responsive-table-wrap">
+            <table className="responsive-table w-full text-left">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr className="text-xs text-gray-500 uppercase tracking-wide">
                 <th className="px-4 py-3 font-medium">Rank</th>
@@ -219,7 +219,7 @@ export default function Screener() {
                     <tr key={`${item.ticker}-expanded`} className="bg-blue-50 border-b border-gray-100">
                       <td colSpan={8} className="px-6 py-4">
                         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Raw Factor Detail — {item.ticker}</p>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-1.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-1.5">
                           {Object.entries(raw).flatMap(([group, v]) =>
                             v && typeof v === 'object' && !Array.isArray(v)
                               ? Object.entries(v).map(([k, val]) => ({ key: k, val, group }))
@@ -239,7 +239,7 @@ export default function Screener() {
                 ];
               })}
             </tbody>
-          </table>
+            </table>
           </div>
         </div>
       )}
