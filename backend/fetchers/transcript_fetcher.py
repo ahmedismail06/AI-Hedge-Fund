@@ -30,11 +30,77 @@ AV_PER_KEY_LIMIT = 25  # Free-tier limit per Alpha Vantage API key
 AV_DAILY_LIMIT = AV_PER_KEY_LIMIT  # baseline for one configured key
 AV_BUDGET_WARNING_THRESHOLD = 5  # Log warning when this many requests remain
 
-# Quarters to probe, most-recent first. Extend as needed each year.
-_QUARTERS_TO_TRY = [
-    "2025Q4", "2025Q3", "2025Q2", "2025Q1",
-    "2024Q4", "2024Q3", "2024Q2", "2024Q1",
-]
+# Quarters to probe, most-recent first. Generates the last 8 quarters dynamically.
+# Prioritizes the latest earnings call event found in ticker_events.
+def _get_quarters_to_try(ticker: str = None, num_quarters: int = 8) -> list[str]:
+    anchor_year = None
+    anchor_quarter = None
+
+    if ticker:
+        try:
+            from backend.memory.vector_store import _get_client
+            client = _get_client()
+            # Look for the most recent earnings call event
+            row = (
+                client.table("ticker_events")
+                .select("fiscal_period,event_date")
+                .eq("ticker", ticker.upper())
+                .eq("event_type", "earnings_call")
+                .order("event_date", desc=True)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if row and row[0].get("fiscal_period") and row[0].get("event_date"):
+                fp = row[0]["fiscal_period"]  # e.g. 'Q1_2026'
+                event_date_str = row[0]["event_date"]
+                
+                # If the event date is in the future, this quarter's transcript 
+                # definitely won't be on Alpha Vantage yet.
+                today = datetime.datetime.now(datetime.timezone.utc).date()
+                event_date = datetime.date.fromisoformat(event_date_str)
+                
+                if "_" in fp and fp.startswith("Q"):
+                    parts = fp.split("_")
+                    q = int(parts[0][1])
+                    y = int(parts[1])
+                    
+                    if event_date > today:
+                        # Event hasn't happened yet — anchor to the previous quarter
+                        logger.debug("_get_quarters_to_try(%s): %s is in future (%s), skipping anchor", ticker, fp, event_date_str)
+                        q -= 1
+                        if q == 0:
+                            q = 4
+                            y -= 1
+                    
+                    anchor_quarter = q
+                    anchor_year = y
+                    logger.debug("_get_quarters_to_try(%s): using anchor Q%d_%d", ticker, anchor_quarter, anchor_year)
+        except Exception as exc:
+            logger.debug("_get_quarters_to_try(%s): ticker_events lookup failed: %s", ticker, exc)
+
+    # Fallback: start from the most recently completed quarter based on current date
+    if anchor_year is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        anchor_year = now.year
+        # (now.month - 1) // 3 gives 0 for Jan-Mar, 1 for Apr-Jun, etc.
+        anchor_quarter = (now.month - 1) // 3
+        if anchor_quarter == 0:
+            anchor_quarter = 4
+            anchor_year -= 1
+        logger.debug("_get_quarters_to_try(%s): using fallback anchor %dQ%d", ticker, anchor_year, anchor_quarter)
+    
+    quarters = []
+    curr_q = anchor_quarter
+    curr_y = anchor_year
+    for _ in range(num_quarters):
+        quarters.append(f"{curr_y}Q{curr_q}")
+        curr_q -= 1
+        if curr_q == 0:
+            curr_q = 4
+            curr_y -= 1
+    return quarters
+
 
 # In-process session cache — reduces Supabase round-trips within a single run.
 # Supabase is the source of truth; this is only populated by _load_av_session_count().
@@ -47,7 +113,7 @@ def _load_av_session_count() -> int:
     Returns the current count (before any increment). Safe to call multiple
     times — subsequent calls within the same day return the cached value.
     """
-    today = datetime.datetime.utcnow().date().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     if _av_session["loaded"] and _av_session["date"] == today:
         return _av_session["count"]
 
@@ -76,7 +142,7 @@ def _load_av_session_count() -> int:
 
 def _persist_av_count(count: int) -> None:
     """Write the current AV request count back to Supabase."""
-    today = datetime.datetime.utcnow().date().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     try:
         from backend.memory.vector_store import _get_client
         client = _get_client()
@@ -92,7 +158,7 @@ def _av_request_allowed() -> bool:
 
     Does not increment the counter — call _increment_av_count() after success.
     """
-    today = datetime.datetime.utcnow().date().isoformat()
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     if _av_session["date"] != today:
         _av_session.update({"date": today, "count": 0, "loaded": False})
     return _av_session["count"] < _get_av_daily_limit()
@@ -205,7 +271,7 @@ def _mark_transcript_fetched(ticker: str, quarter_str: str, event_date: str | No
                 "event_date": event_date,
                 "document_available": True,
                 "document_fetched": True,
-                "fetched_at": datetime.datetime.utcnow().isoformat(),
+                "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "source": "alpha_vantage",
             },
             on_conflict="ticker,event_type,fiscal_period",
@@ -650,9 +716,10 @@ Thank you for your participation in today's conference. This does conclude the p
         )
     av_calls_made = 0  # track how many new API calls this invocation makes
 
+    quarters_to_try = _get_quarters_to_try(ticker=ticker)
     try:
         # Probe quarters in descending order; collect up to 2 transcripts.
-        for quarter_str in _QUARTERS_TO_TRY:
+        for quarter_str in quarters_to_try:
             if result["fetched_count"] >= 2:
                 break
 
@@ -733,7 +800,7 @@ Thank you for your participation in today's conference. This does conclude the p
             time.sleep(1)  # stay within free-tier rate limits
 
         if result["fetched_count"] == 0 and result["warning"] is None:
-            result["warning"] = f"No transcripts found for {ticker.upper()} in last {len(_QUARTERS_TO_TRY)} quarters"
+            result["warning"] = f"No transcripts found for {ticker.upper()} in last {len(quarters_to_try)} quarters"
 
     except Exception as exc:
         result["warning"] = str(exc)
