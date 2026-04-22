@@ -11,9 +11,9 @@ export const getMode = () =>
 export const setMode = (mode) =>
   axios.post(`${BASE}/orchestrator/mode`, { mode })
 
-export const runCycle = (portfolioValue = 25000) =>
+export const runCycle = (portfolioValue = null) =>
   axios.post(`${BASE}/orchestrator/cycle/run`, null, {
-    params: { portfolio_value: portfolioValue },
+    params: portfolioValue != null ? { portfolio_value: portfolioValue } : {},
   })
 
 export const getLog = (runDate, limit = 100) =>
