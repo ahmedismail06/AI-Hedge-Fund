@@ -171,9 +171,9 @@ export default function Research() {
                 <button
                   key={row.id ?? `${row.ticker}-${row.created_at}`}
                   onClick={() => handleHistoryClick(row)}
-                  className="w-full flex items-center justify-between gap-4 px-5 py-3 text-left hover:bg-gray-50 transition-colors"
+                  className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4 px-4 sm:px-5 py-3 text-left hover:bg-gray-50 transition-colors"
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                     <span
                       className={`h-2 w-2 rounded-full shrink-0 ${VERDICT_DOT[row.verdict] ?? 'bg-gray-400'}`}
                     />
@@ -182,7 +182,7 @@ export default function Research() {
                     </span>
                     <span className="text-xs text-gray-400">{row.date}</span>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex w-full sm:w-auto items-center justify-between sm:justify-end gap-3">
                     <ConvictionBadge score={row.conviction_score} />
                     <span className="text-xs text-gray-400 uppercase tracking-wide w-16 text-right">
                       {row.status}

@@ -153,92 +153,92 @@ export default function Screener() {
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <div className="responsive-table-wrap">
-            <table className="responsive-table w-full text-left">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr className="text-xs text-gray-500 uppercase tracking-wide">
-                <th className="px-4 py-3 font-medium">Rank</th>
-                <th className="px-4 py-3 font-medium">Ticker</th>
-                <th className="px-4 py-3 font-medium">Composite Score</th>
-                <th className="px-4 py-3 font-medium">Quality</th>
-                <th className="px-4 py-3 font-medium">Value</th>
-                <th className="px-4 py-3 font-medium">Momentum</th>
-                <th className="px-4 py-3 font-medium">Earnings Quality</th>
-                <th className="px-4 py-3 font-medium">Research Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((item, idx) => {
-                const isExpanded = expanded === item.ticker;
-                const mscore = MSCORE_META[item.beneish_flag] || MSCORE_META.INSUFFICIENT_DATA;
-                const raw = item.raw_factors || {};
-                return [
-                  <tr
-                    key={item.ticker}
-                    onClick={() => setExpanded(isExpanded ? null : item.ticker)}
-                    className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-4 py-3 text-sm font-medium text-gray-500">#{idx + 1}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-mono font-bold text-gray-900">{item.ticker}</div>
-                      {item.sector && <div className="text-xs text-gray-400">{item.sector}</div>}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`text-lg font-bold ${scoreColor(item.composite_score)}`}>
-                        {fmtScore(item.composite_score)}
-                      </span>
-                    </td>
-                    <td className={`px-4 py-3 text-sm ${scoreColor(item.quality_score)}`}>{fmtScore(item.quality_score)}</td>
-                    <td className={`px-4 py-3 text-sm ${scoreColor(item.value_score)}`}>{fmtScore(item.value_score)}</td>
-                    <td className={`px-4 py-3 text-sm ${scoreColor(item.momentum_score)}`}>{fmtScore(item.momentum_score)}</td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${mscore.color}`}>
-                        {mscore.label}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      {item.queued_for_research ? (
-                        <span className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 border border-green-200 font-medium">
-                          Queued ✓
-                        </span>
-                      ) : item.beneish_flag !== 'EXCLUDED' ? (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleQueue(item.ticker); }}
-                          disabled={queuedTickers.has(item.ticker)}
-                          className={`text-xs px-3 py-1.5 rounded-lg transition-colors font-medium ${
-                            queuedTickers.has(item.ticker)
-                              ? 'bg-gray-100 text-gray-400 cursor-default'
-                              : 'bg-blue-50 text-blue-600 hover:bg-blue-100 border border-blue-200'
-                          }`}
-                        >
-                          {queuedTickers.has(item.ticker) ? 'Queued ✓' : 'Queue Research'}
-                        </button>
-                      ) : null}
-                    </td>
-                  </tr>,
-                  isExpanded && Object.keys(raw).length > 0 && (
-                    <tr key={`${item.ticker}-expanded`} className="bg-blue-50 border-b border-gray-100">
-                      <td colSpan={8} className="px-6 py-4">
-                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Raw Factor Detail — {item.ticker}</p>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-1.5">
-                          {Object.entries(raw).flatMap(([group, v]) =>
-                            v && typeof v === 'object' && !Array.isArray(v)
-                              ? Object.entries(v).map(([k, val]) => ({ key: k, val, group }))
-                              : [{ key: group, val: v, group }]
-                          ).map(({ key, val }) => (
-                            <div key={key} className="flex justify-between text-xs border-b border-blue-100 pb-1">
-                              <span className="text-gray-500">{RAW_FACTOR_LABELS[key] || key}</span>
-                              <span className="font-medium text-gray-700 ml-2">
-                                {val == null ? '—' : typeof val === 'number' ? val.toFixed(3) : String(val)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
+            <table className="responsive-table mobile-stack w-full text-left">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr className="text-xs text-gray-500 uppercase tracking-wide">
+                  <th className="px-4 py-3 font-medium">Rank</th>
+                  <th className="px-4 py-3 font-medium">Ticker</th>
+                  <th className="px-4 py-3 font-medium">Composite Score</th>
+                  <th className="px-4 py-3 font-medium">Quality</th>
+                  <th className="px-4 py-3 font-medium">Value</th>
+                  <th className="px-4 py-3 font-medium">Momentum</th>
+                  <th className="px-4 py-3 font-medium">Earnings Quality</th>
+                  <th className="px-4 py-3 font-medium">Research Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((item, idx) => {
+                  const isExpanded = expanded === item.ticker;
+                  const mscore = MSCORE_META[item.beneish_flag] || MSCORE_META.INSUFFICIENT_DATA;
+                  const raw = item.raw_factors || {};
+                  return [
+                    <tr
+                      key={item.ticker}
+                      onClick={() => setExpanded(isExpanded ? null : item.ticker)}
+                      className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <td className="px-4 py-3 text-sm font-medium text-gray-500" data-label="Rank">#{idx + 1}</td>
+                      <td className="px-4 py-3" data-label="Ticker">
+                        <div className="font-mono font-bold text-gray-900">{item.ticker}</div>
+                        {item.sector && <div className="text-xs text-gray-400">{item.sector}</div>}
                       </td>
-                    </tr>
-                  ),
-                ];
-              })}
-            </tbody>
+                      <td className="px-4 py-3" data-label="Composite Score">
+                        <span className={`text-lg font-bold ${scoreColor(item.composite_score)}`}>
+                          {fmtScore(item.composite_score)}
+                        </span>
+                      </td>
+                      <td className={`px-4 py-3 text-sm ${scoreColor(item.quality_score)}`} data-label="Quality">{fmtScore(item.quality_score)}</td>
+                      <td className={`px-4 py-3 text-sm ${scoreColor(item.value_score)}`} data-label="Value">{fmtScore(item.value_score)}</td>
+                      <td className={`px-4 py-3 text-sm ${scoreColor(item.momentum_score)}`} data-label="Momentum">{fmtScore(item.momentum_score)}</td>
+                      <td className="px-4 py-3" data-label="Earnings Quality">
+                        <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${mscore.color}`}>
+                          {mscore.label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3" data-label="Research Status">
+                        {item.queued_for_research ? (
+                          <span className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 border border-green-200 font-medium">
+                            Queued ✓
+                          </span>
+                        ) : item.beneish_flag !== 'EXCLUDED' ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleQueue(item.ticker); }}
+                            disabled={queuedTickers.has(item.ticker)}
+                            className={`text-xs px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                              queuedTickers.has(item.ticker)
+                                ? 'bg-gray-100 text-gray-400 cursor-default'
+                                : 'bg-blue-50 text-blue-600 hover:bg-blue-100 border border-blue-200'
+                            }`}
+                          >
+                            {queuedTickers.has(item.ticker) ? 'Queued ✓' : 'Queue Research'}
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>,
+                    isExpanded && Object.keys(raw).length > 0 && (
+                      <tr key={`${item.ticker}-expanded`} className="stack-full-row bg-blue-50 border-b border-gray-100">
+                        <td colSpan={8} className="px-6 py-4">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Raw Factor Detail — {item.ticker}</p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-1.5">
+                            {Object.entries(raw).flatMap(([group, v]) =>
+                              v && typeof v === 'object' && !Array.isArray(v)
+                                ? Object.entries(v).map(([k, val]) => ({ key: k, val, group }))
+                                : [{ key: group, val: v, group }]
+                            ).map(({ key, val }) => (
+                              <div key={key} className="flex justify-between text-xs border-b border-blue-100 pb-1">
+                                <span className="text-gray-500">{RAW_FACTOR_LABELS[key] || key}</span>
+                                <span className="font-medium text-gray-700 ml-2">
+                                  {val == null ? '—' : typeof val === 'number' ? val.toFixed(3) : String(val)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    ),
+                  ];
+                })}
+              </tbody>
             </table>
           </div>
         </div>
