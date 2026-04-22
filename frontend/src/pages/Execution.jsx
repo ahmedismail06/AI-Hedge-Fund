@@ -155,7 +155,7 @@ export default function Execution() {
           <span className="text-xs text-gray-400">Real-time · updates every 10s</span>
         </div>
         <div className="responsive-table-wrap">
-          <table className="responsive-table w-full text-left">
+          <table className="responsive-table mobile-stack w-full text-left">
             <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
               <tr>
                 <th className="px-5 py-3">Ticker</th>
@@ -170,31 +170,31 @@ export default function Execution() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {orders.length === 0 && (
-                <tr><td colSpan="8" className="px-5 py-8 text-sm text-gray-400 text-center">No orders yet</td></tr>
+                <tr className="table-empty-row"><td colSpan="8" className="px-5 py-8 text-sm text-gray-400 text-center">No orders yet</td></tr>
               )}
               {orders.map(o => {
                 const cfg = STATUS_CONFIG[o.status] || STATUS_CONFIG.PENDING;
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-5 py-4">
+                    <td className="px-5 py-4" data-label="Ticker">
                       <span className="font-mono font-bold text-gray-900">{o.ticker}</span>
                     </td>
-                    <td className="px-5 py-4">
+                    <td className="px-5 py-4" data-label="Direction">
                       <span className={`text-xs px-2 py-0.5 rounded font-medium ${o.direction === 'LONG' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
                         {o.direction === 'LONG' ? 'BUY' : 'SELL'}
                       </span>
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-700">{o.order_type ?? '—'}</td>
-                    <td className="px-5 py-4 text-sm font-medium text-gray-900">{Number(o.requested_qty || 0).toFixed(0)}</td>
-                    <td className="px-5 py-4 text-sm text-gray-500">{Number(o.total_filled_qty || 0).toFixed(0)}</td>
-                    <td className="px-5 py-4">
+                    <td className="px-5 py-4 text-sm text-gray-700" data-label="Order Type">{o.order_type ?? '—'}</td>
+                    <td className="px-5 py-4 text-sm font-medium text-gray-900" data-label="Requested">{Number(o.requested_qty || 0).toFixed(0)}</td>
+                    <td className="px-5 py-4 text-sm text-gray-500" data-label="Filled">{Number(o.total_filled_qty || 0).toFixed(0)}</td>
+                    <td className="px-5 py-4" data-label="Status">
                       <div className={`inline-flex items-center gap-1.5 text-xs font-bold px-2 py-1 rounded-full ${cfg.classes}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
                         {o.status}
                       </div>
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-400 font-mono">{formatTs(o.submitted_at)}</td>
-                    <td className="px-5 py-4 text-right">
+                    <td className="px-5 py-4 text-sm text-gray-400 font-mono" data-label="Submitted">{formatTs(o.submitted_at)}</td>
+                    <td className="px-5 py-4 text-right" data-label="Action">
                       {['SUBMITTED', 'PARTIAL', 'PENDING'].includes(o.status) ? (
                         <button
                           onClick={() => setConfirm({ id: o.id, ticker: o.ticker })}
@@ -221,7 +221,7 @@ export default function Execution() {
           <span className="text-xs text-gray-400">{fillsToday.length} fills today</span>
         </div>
         <div className="responsive-table-wrap">
-          <table className="responsive-table w-full text-left">
+          <table className="responsive-table mobile-stack w-full text-left">
             <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
               <tr>
                 <th className="px-5 py-3">Ticker</th>
@@ -234,23 +234,23 @@ export default function Execution() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {fills.length === 0 && (
-                <tr><td colSpan="6" className="px-5 py-8 text-sm text-gray-400 text-center">No fills yet</td></tr>
+                <tr className="table-empty-row"><td colSpan="6" className="px-5 py-8 text-sm text-gray-400 text-center">No fills yet</td></tr>
               )}
               {fills.map(f => {
                 const slip = f.slippage_bps != null ? Number(f.slippage_bps) : null;
                 const slipHigh = slip != null && slip > 20;
                 return (
                   <tr key={f.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-5 py-4 font-mono font-bold text-gray-900">{f.ticker}</td>
-                    <td className="px-5 py-4 text-sm font-medium">{Number(f.fill_qty || 0).toFixed(0)}</td>
-                    <td className="px-5 py-4 text-sm font-mono">${Number(f.fill_price || 0).toFixed(2)}</td>
-                    <td className={`px-5 py-4 text-sm font-bold ${slipHigh ? 'text-red-600' : slip != null && slip > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
+                    <td className="px-5 py-4 font-mono font-bold text-gray-900" data-label="Ticker">{f.ticker}</td>
+                    <td className="px-5 py-4 text-sm font-medium" data-label="Fill Qty">{Number(f.fill_qty || 0).toFixed(0)}</td>
+                    <td className="px-5 py-4 text-sm font-mono" data-label="Fill Price">${Number(f.fill_price || 0).toFixed(2)}</td>
+                    <td className={`px-5 py-4 text-sm font-bold ${slipHigh ? 'text-red-600' : slip != null && slip > 0 ? 'text-yellow-600' : 'text-green-600'}`} data-label="Slippage">
                       {slip != null ? `${slip.toFixed(1)} bps` : '—'}
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-600">
+                    <td className="px-5 py-4 text-sm text-gray-600" data-label="Commission">
                       {f.commission != null ? `$${Number(f.commission).toFixed(2)}` : '—'}
                     </td>
-                    <td className="px-5 py-4 text-sm text-gray-400 text-right font-mono">{formatTs(f.fill_time)}</td>
+                    <td className="px-5 py-4 text-sm text-gray-400 text-right font-mono" data-label="Time">{formatTs(f.fill_time)}</td>
                   </tr>
                 );
               })}

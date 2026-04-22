@@ -15,7 +15,7 @@ export default function PositionRow({ position: p, onClick }) {
       onClick={onClick}
       className="border-b border-gray-100 hover:bg-blue-50 cursor-pointer transition-colors"
     >
-      <td className="px-4 py-3">
+      <td className="px-4 py-3" data-label="Ticker">
         <div className="flex items-center gap-2">
           <span className="font-mono font-bold text-gray-900">{p.ticker}</span>
           <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
@@ -25,14 +25,14 @@ export default function PositionRow({ position: p, onClick }) {
           </span>
         </div>
       </td>
-      <td className="px-4 py-3 text-sm text-gray-700">{p.share_count?.toLocaleString() ?? '—'}</td>
-      <td className="px-4 py-3 text-sm text-gray-700">{fmt$(p.entry_price)}</td>
-      <td className="px-4 py-3 text-sm text-gray-700">{fmt$(p.current_price)}</td>
-      <td className={`px-4 py-3 text-sm font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`}>
+      <td className="px-4 py-3 text-sm text-gray-700" data-label="Shares">{p.share_count?.toLocaleString() ?? '—'}</td>
+      <td className="px-4 py-3 text-sm text-gray-700" data-label="Entry">{fmt$(p.entry_price)}</td>
+      <td className="px-4 py-3 text-sm text-gray-700" data-label="Current">{fmt$(p.current_price)}</td>
+      <td className={`px-4 py-3 text-sm font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`} data-label="P&L">
         <div>{fmt$(p.pnl)}</div>
         <div className="text-xs">{fmtPct(p.pnl_pct ? p.pnl_pct * 100 : null)}</div>
       </td>
-      <td className="px-4 py-3 text-sm">
+      <td className="px-4 py-3 text-sm" data-label="Stop Loss">
         <div className="text-gray-700">{fmt$(p.stop_loss_price)}</div>
         {stopDist != null && (
           <div className={`text-xs ${stopClose ? 'text-orange-500 font-medium' : 'text-gray-400'}`}>
@@ -40,7 +40,7 @@ export default function PositionRow({ position: p, onClick }) {
           </div>
         )}
       </td>
-      <td className="px-4 py-3 text-xs text-gray-500">{p.size_label ?? '—'}</td>
+      <td className="px-4 py-3 text-xs text-gray-500" data-label="Size">{p.size_label ?? '—'}</td>
     </tr>
   );
 }

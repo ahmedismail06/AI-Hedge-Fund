@@ -269,7 +269,7 @@ export default function Portfolio() {
                 <p className="text-sm text-gray-400 text-center py-8">No open positions</p>
               ) : (
                 <div className="responsive-table-wrap">
-                  <table className="responsive-table w-full text-left">
+                  <table className="responsive-table mobile-stack w-full text-left">
                     <thead>
                       <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
                         {positionHeaders.map(h => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
@@ -298,7 +298,7 @@ export default function Portfolio() {
                 <p className="text-sm text-gray-400 text-center py-8">No closed trades yet</p>
               ) : (
                 <div className="responsive-table-wrap">
-                  <table className="responsive-table w-full text-left">
+                  <table className="responsive-table mobile-stack w-full text-left">
                     <thead>
                       <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
                         {['Ticker', 'Direction', 'Shares', 'Entry', 'Exit', 'Realized P&L', 'Closed At'].map(h => (
@@ -311,19 +311,19 @@ export default function Portfolio() {
                         const pnlPos = (p.pnl ?? 0) >= 0;
                         return (
                           <tr key={p.id ?? i} className="border-b border-gray-100 text-sm">
-                            <td className="px-4 py-3 font-mono font-bold">{p.ticker}</td>
-                            <td className="px-4 py-3">
+                            <td className="px-4 py-3 font-mono font-bold" data-label="Ticker">{p.ticker}</td>
+                            <td className="px-4 py-3" data-label="Direction">
                               <span className={`text-xs px-1.5 py-0.5 rounded ${p.direction === 'LONG' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
                                 {p.direction}
                               </span>
                             </td>
-                            <td className="px-4 py-3 text-gray-700">{p.share_count?.toLocaleString()}</td>
-                            <td className="px-4 py-3 text-gray-700">${p.entry_price?.toFixed(2)}</td>
-                            <td className="px-4 py-3 text-gray-700">${p.exit_price?.toFixed(2) ?? '—'}</td>
-                            <td className={`px-4 py-3 font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`}>
+                            <td className="px-4 py-3 text-gray-700" data-label="Shares">{p.share_count?.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-gray-700" data-label="Entry">${p.entry_price?.toFixed(2)}</td>
+                            <td className="px-4 py-3 text-gray-700" data-label="Exit">${p.exit_price?.toFixed(2) ?? '—'}</td>
+                            <td className={`px-4 py-3 font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`} data-label="Realized P&L">
                               {p.pnl != null ? `${pnlPos ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
                             </td>
-                            <td className="px-4 py-3 text-gray-400 text-xs">
+                            <td className="px-4 py-3 text-gray-400 text-xs" data-label="Closed At">
                               {p.closed_at ? new Date(p.closed_at).toLocaleDateString() : '—'}
                             </td>
                           </tr>
