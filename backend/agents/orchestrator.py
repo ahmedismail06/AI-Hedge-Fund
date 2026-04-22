@@ -41,6 +41,39 @@ from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
+def _parse_defer_time(input_val: Optional[str]) -> datetime:
+    """Parse a defer_until value (from Claude or human UI) into an absolute UTC datetime.
+
+    Accepts:
+      - Integer string ("3") → now + N days
+      - ISO date ("2026-05-01") → midnight UTC on that date
+      - ISO datetime string → parsed directly
+      - None / unparseable → now + 24 h fallback
+    """
+    if not input_val:
+        return datetime.now(timezone.utc) + timedelta(hours=24)
+    try:
+        days = int(str(input_val).strip())
+        return datetime.now(timezone.utc) + timedelta(days=days)
+    except ValueError:
+        pass
+    try:
+        s = str(input_val).strip()
+        # Date-only strings (YYYY-MM-DD) carry no time component — pin to midnight UTC
+        # so the result is unambiguous regardless of server locale.
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            s = s + "T00:00:00+00:00"
+        else:
+            s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        pass
+    return datetime.now(timezone.utc) + timedelta(hours=24)
+
+
 def _clean_float(value: Any, default: float = 0.0) -> float:
     """Strip currency symbols, commas, and percentages from LLM numeric outputs."""
     if value is None:
@@ -629,7 +662,12 @@ _DECISION_TO_MEMO_STATUS = {
 }
 
 
-def _update_memo_after_decision(ticker: str, decision: str, memo_id: Optional[str] = None) -> None:
+def _update_memo_after_decision(
+    ticker: str,
+    decision: str,
+    memo_id: Optional[str] = None,
+    defer_val: Optional[str] = None,
+) -> None:
     """Set memos.status to reflect the PM's decision so the row is not re-evaluated.
 
     Called unconditionally after every Claude call regardless of mode (autonomous /
@@ -639,8 +677,8 @@ def _update_memo_after_decision(ticker: str, decision: str, memo_id: Optional[st
     Filters by memo_id when available (preferred) to avoid updating the wrong memo
     when a ticker has multiple rows in PENDING_PM_REVIEW simultaneously.
 
-    For DEFER also sets deferred_until = NOW() + 24h so a future staleness gate
-    can re-queue the ticker when the deferral window expires.
+    For DEFER, sets deferred_until via _parse_defer_time(defer_val).  defer_val may be
+    an integer string ("3"), ISO date, or ISO datetime; falls back to 24 h if absent.
     """
     memo_status = _DECISION_TO_MEMO_STATUS.get(decision)
     if not memo_status:
@@ -649,9 +687,7 @@ def _update_memo_after_decision(ticker: str, decision: str, memo_id: Optional[st
     try:
         update: Dict[str, Any] = {"status": memo_status}
         if memo_status == "DEFERRED":
-            update["deferred_until"] = (
-                datetime.now(timezone.utc) + timedelta(hours=24)
-            ).isoformat()
+            update["deferred_until"] = _parse_defer_time(defer_val).isoformat()
 
         q = _get_client().table("memos").update(update)
         if memo_id:
@@ -1503,7 +1539,10 @@ def run_pm_cycle(
 
                 # Post-routing memo update (Fix for desynchronization)
                 if category == "NEW_ENTRY" and ticker and execution_status != "BLOCKED":
-                    _update_memo_after_decision(ticker, final_decision, memo_id=memo_id)
+                    _update_memo_after_decision(
+                        ticker, final_decision, memo_id=memo_id,
+                        defer_val=(decision_data.get("action_details") or {}).get("defer_until"),
+                    )
 
                 # Embed alert_id in action_details for CRISIS deduplication
                 if category == "CRISIS" and data.get("alert", {}).get("id"):

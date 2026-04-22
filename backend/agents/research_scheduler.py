@@ -13,7 +13,7 @@ Efficiency improvements (2026-04-10):
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -35,17 +35,17 @@ _STALENESS_DAYS = 7
 def _needs_research(client, ticker: str) -> bool:
     """Return True if this ticker requires a new research run.
 
-    False (skip) when ALL of these hold:
-      - A memo exists that is < 7 days old
-      - The watchlist entry does NOT have material_event=True
+    Priority order:
+      1. Most recent memo is DEFERRED + timer expired → True (re-research)
+      2. Most recent memo is DEFERRED + timer still active + no material event → False (block)
+      3. Most recent memo is < 7 days old + no material event → False (skip)
+      4. Otherwise → True
     """
-    cutoff = (date.today() - timedelta(days=_STALENESS_DAYS)).isoformat()
     try:
         result = (
             client.table("memos")
-            .select("id,date")
+            .select("id,date,status,deferred_until")
             .eq("ticker", ticker)
-            .gte("date", cutoff)
             .order("date", desc=True)
             .limit(1)
             .execute()
@@ -55,26 +55,71 @@ def _needs_research(client, ticker: str) -> bool:
         return True
 
     if not result.data:
-        return True  # no recent memo → full research
+        return True  # no memo at all → full research
 
-    # Recent memo exists — check for material event flag
-    try:
-        wl = (
-            client.table("watchlist")
-            .select("material_event")
-            .eq("ticker", ticker)
-            .order("run_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-    except Exception as exc:
-        logger.warning("_needs_research: watchlist query failed for %s — %s; defaulting to True", ticker, exc)
+    latest = result.data[0]
+    memo_status = latest.get("status")
+
+    # ── Deferred memo handling ────────────────────────────────────────────────
+    if memo_status == "DEFERRED":
+        deferred_until = latest.get("deferred_until")
+        if deferred_until:
+            try:
+                until_dt = datetime.fromisoformat(
+                    str(deferred_until).replace("Z", "+00:00")
+                )
+                if until_dt.tzinfo is None:
+                    until_dt = until_dt.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) < until_dt:
+                    # Timer still active — check material event bypass
+                    try:
+                        wl = (
+                            client.table("watchlist")
+                            .select("material_event")
+                            .eq("ticker", ticker)
+                            .order("run_date", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        if wl.data and wl.data[0].get("material_event", False):
+                            logger.info(
+                                "_needs_research: %s DEFERRED but material_event=True — bypassing timer",
+                                ticker,
+                            )
+                            return True
+                    except Exception:
+                        pass
+                    logger.info(
+                        "_needs_research: %s is DEFERRED until %s — blocking", ticker, deferred_until
+                    )
+                    return False
+            except (ValueError, TypeError):
+                pass
+        # Timer expired or unparseable → allow re-research
         return True
 
-    if not wl.data:
-        return False  # no watchlist row → conservatively skip
+    # ── Standard staleness gate ───────────────────────────────────────────────
+    cutoff = (date.today() - timedelta(days=_STALENESS_DAYS)).isoformat()
+    if str(latest.get("date", "")) >= cutoff:
+        try:
+            wl = (
+                client.table("watchlist")
+                .select("material_event")
+                .eq("ticker", ticker)
+                .order("run_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            logger.warning("_needs_research: watchlist query failed for %s — %s; defaulting to True", ticker, exc)
+            return True
 
-    return bool(wl.data[0].get("material_event", False))
+        if not wl.data:
+            return False  # no watchlist row → conservatively skip
+
+        return bool(wl.data[0].get("material_event", False))
+
+    return True  # old memo → research needed
 
 
 def _is_held_position(client, ticker: str) -> bool:
@@ -164,11 +209,16 @@ def _clear_material_event(client, ticker: str, today: str) -> None:
 # ── Main queue poller ─────────────────────────────────────────────────────────
 
 def _poll_research_queue() -> list[str]:
-    """Read queued_for_research=True rows, process in priority order, enforce daily cap.
+    """Build a unified research queue from screener rows and expired deferrals.
 
-    Returns list of tickers that were successfully researched.
-    Tickers skipped by staleness gate or daily cap retain their queued_for_research flag
-    (cap overflows carry to the next day; staleness skips are cleared immediately).
+    Priority order:
+      P1 — watchlist.priority=1  (held positions + material events)
+      P2 — memos.status=DEFERRED AND deferred_until <= NOW() (expired deferrals)
+      P3 — watchlist.priority>=2 (new candidates + material events)
+
+    Enforces DAILY_RESEARCH_CAP across all sources.  Tickers skipped by the
+    staleness gate are cleared from the screener queue; cap overflows carry to
+    the next day.  P2 items have no screener queue row to clear.
     """
     from backend.memory.vector_store import _get_client
     from backend.agents.research_agent import run_research
@@ -180,10 +230,11 @@ def _poll_research_queue() -> list[str]:
         return []
 
     today = date.today().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Fetch queue sorted by priority (P1 first) then composite rank
+    # ── P1 / P3: screener queue ────────────────────────────────────────────────
     try:
-        result = (
+        wl_result = (
             client.table("watchlist")
             .select("ticker,rank,priority,material_event")
             .eq("queued_for_research", True)
@@ -192,73 +243,113 @@ def _poll_research_queue() -> list[str]:
             .order("rank", desc=False)
             .execute()
         )
+        watchlist_rows = wl_result.data or []
     except Exception as exc:
         logger.error("_poll_research_queue: watchlist read failed — %s", exc)
-        return []
+        watchlist_rows = []
 
-    rows = result.data or []
-    if not rows:
+    p1_rows = [r for r in watchlist_rows if (r.get("priority") or 99) == 1]
+    p3_rows = [r for r in watchlist_rows if (r.get("priority") or 99) >= 2]
+
+    # ── P2: expired deferrals ──────────────────────────────────────────────────
+    try:
+        def_result = (
+            client.table("memos")
+            .select("ticker,deferred_until")
+            .eq("status", "DEFERRED")
+            .lte("deferred_until", now_iso)
+            .order("deferred_until", desc=False)
+            .execute()
+        )
+        deferred_rows = def_result.data or []
+    except Exception as exc:
+        logger.warning("_poll_research_queue: deferred memos query failed — %s", exc)
+        deferred_rows = []
+
+    # Deduplicate: tickers already in P1 stay in P1; tickers with multiple deferred
+    # memos appear only once (earliest deferred_until wins — query is ordered asc).
+    p1_tickers = {r["ticker"] for r in p1_rows}
+    _seen_p2: set[str] = set()
+    p2_rows = []
+    for r in deferred_rows:
+        t = r["ticker"]
+        if t not in p1_tickers and t not in _seen_p2:
+            _seen_p2.add(t)
+            p2_rows.append(
+                {"ticker": t, "rank": 999, "priority": 2,
+                 "material_event": False, "_from_deferred": True}
+            )
+    p2_tickers = {r["ticker"] for r in p2_rows}
+
+    # Remove from P3 any tickers promoted to P2 (expired deferral wins)
+    p3_rows = [r for r in p3_rows if r["ticker"] not in p1_tickers and r["ticker"] not in p2_tickers]
+
+    unified_rows = p1_rows + p2_rows + p3_rows
+
+    if not unified_rows:
         logger.info("_poll_research_queue: no tickers queued for research today")
         return []
 
     from backend.memory.vector_store import store_memo
 
-    tickers = [row["ticker"] for row in rows]
     logger.info(
-        "_poll_research_queue: %d tickers in queue (priority order): %s",
-        len(tickers), tickers,
+        "_poll_research_queue: unified queue — P1=%d, P2=%d, P3=%d",
+        len(p1_rows), len(p2_rows), len(p3_rows),
     )
 
     processed: list[str] = []
-    staleness_skipped: list[str] = []
+    staleness_skipped_wl: list[str] = []  # watchlist rows to clear
 
-    for row in rows:
+    for row in unified_rows:
         ticker = row["ticker"]
+        from_deferred = row.get("_from_deferred", False)
 
-        # ── Staleness gate (checked BEFORE consuming daily cap quota) ────────
+        # ── Staleness gate ────────────────────────────────────────────────────
         if not _needs_research(client, ticker):
             logger.info(
-                "staleness gate: skipping %s — memo < %d days old, no material event",
-                ticker, _STALENESS_DAYS,
+                "staleness gate: skipping %s — memo fresh, no material event", ticker,
             )
-            staleness_skipped.append(ticker)
+            if not from_deferred:
+                staleness_skipped_wl.append(ticker)
             continue
 
-        # ── Daily cap check ───────────────────────────────────────────────────
+        # ── Daily cap ─────────────────────────────────────────────────────────
         count = _get_and_increment_daily_count(client)
         if count > DAILY_RESEARCH_CAP:
             logger.warning(
-                "_poll_research_queue: daily cap (%d) hit — %s and remaining tickers "
-                "carry to next day",
+                "_poll_research_queue: daily cap (%d) hit at %s — remaining carry to next day",
                 DAILY_RESEARCH_CAP, ticker,
             )
-            break  # remaining rows keep queued_for_research=True
+            break
 
         # ── Determine update_mode ─────────────────────────────────────────────
         is_held = _is_held_position(client, ticker)
         has_material_event = bool(row.get("material_event", False))
-        # Incremental update: held positions with no material event use news+transcripts only
-        update_mode = is_held and not has_material_event
+        # P2 deferred tickers always get full research (thesis may have materially changed)
+        update_mode = is_held and not has_material_event and not from_deferred
 
-        if update_mode:
-            logger.info("_poll_research_queue: %s is held, no material event — using update_mode", ticker)
+        if from_deferred:
+            logger.info("_poll_research_queue: %s is P2 (expired deferral) — full research", ticker)
+        elif update_mode:
+            logger.info("_poll_research_queue: %s is held, no material event — update_mode", ticker)
         else:
             logger.info(
                 "_poll_research_queue: %s — full research (held=%s, material_event=%s)",
                 ticker, is_held, has_material_event,
             )
 
-        # ── Dequeue atomically before processing (prevents duplicate runs) ────
-        try:
-            client.table("watchlist").update({"queued_for_research": False}).eq(
-                "ticker", ticker
-            ).eq("run_date", today).execute()
-        except Exception as exc:
-            logger.warning(
-                "_poll_research_queue: failed to dequeue %s before research — %s; skipping",
-                ticker, exc,
-            )
-            continue
+        # ── Dequeue from watchlist (screener rows only) ───────────────────────
+        if not from_deferred:
+            try:
+                client.table("watchlist").update({"queued_for_research": False}).eq(
+                    "ticker", ticker
+                ).eq("run_date", today).execute()
+            except Exception as exc:
+                logger.warning(
+                    "_poll_research_queue: failed to dequeue %s before research — %s; skipping",
+                    ticker, exc,
+                )
+                continue
 
         # ── Run research ──────────────────────────────────────────────────────
         try:
@@ -269,14 +360,13 @@ def _poll_research_queue() -> list[str]:
             logger.error("_poll_research_queue: run_research(%s) failed — %s", ticker, exc)
             continue
 
-        # Clear material event flag after successful research
-        _clear_material_event(client, ticker, today)
+        if not from_deferred:
+            _clear_material_event(client, ticker, today)
 
-        # ── Hand off to PM agent — set status to PENDING_PM_REVIEW ──────────
+        # ── PM handoff ────────────────────────────────────────────────────────
         try:
             memo_id = store_memo(ticker, memo)
             if memo_id:
-                # Update memo status so the PM cycle picks it up on its next 5-min poll
                 client.table("memos").update(
                     {"status": "PENDING_PM_REVIEW"}
                 ).eq("id", memo_id).execute()
@@ -286,36 +376,33 @@ def _poll_research_queue() -> list[str]:
                     "conviction_score": memo.get("conviction_score"),
                     "sector": memo.get("sector"),
                     "price_target": memo.get("price_target"),
+                    "requeued_from_deferral": from_deferred,
                 })
                 logger.info(
-                    "_poll_research_queue: memo %s for %s set to PENDING_PM_REVIEW",
-                    memo_id, ticker,
+                    "_poll_research_queue: memo %s for %s → PENDING_PM_REVIEW%s",
+                    memo_id, ticker, " (from deferral)" if from_deferred else "",
                 )
-
-                # Portfolio sizing is triggered by the PM agent after it decides
-                # EXECUTE — not here. The memo sits in PENDING_PM_REVIEW until
-                # the PM cycle evaluates it.
             else:
                 logger.warning(
-                    "_poll_research_queue: store_memo returned no id for %s — skipping PM handoff",
-                    ticker,
+                    "_poll_research_queue: store_memo returned no id for %s", ticker,
                 )
         except Exception as exc:
             logger.error("_poll_research_queue: PM handoff failed for %s — %s", ticker, exc)
 
-    # Clear queued_for_research for staleness-skipped tickers
-    # (processed tickers are already cleared per-ticker before run_research())
-    if staleness_skipped:
+    # Clear queued_for_research for watchlist staleness-skips
+    if staleness_skipped_wl:
         try:
             client.table("watchlist").update({"queued_for_research": False}).in_(
-                "ticker", staleness_skipped
+                "ticker", staleness_skipped_wl
             ).eq("run_date", today).execute()
             logger.info(
-                "_poll_research_queue: cleared queued_for_research for staleness-skipped: %s",
-                staleness_skipped,
+                "_poll_research_queue: cleared staleness-skipped watchlist rows: %s",
+                staleness_skipped_wl,
             )
         except Exception as exc:
-            logger.warning("_poll_research_queue: failed to clear staleness-skipped flag — %s", exc)
+            logger.warning(
+                "_poll_research_queue: failed to clear staleness-skipped flag — %s", exc
+            )
 
     return processed
 

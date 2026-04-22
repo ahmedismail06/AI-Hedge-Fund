@@ -36,9 +36,11 @@ router = APIRouter(prefix="/pm", tags=["PM Agent"])
 # ── Request models ────────────────────────────────────────────────────────────
 
 class OverrideRequest(BaseModel):
-    override_type: Literal["BLOCK", "MODIFY", "FORCE_EXECUTE"]
+    override_type: Literal["BLOCK", "MODIFY", "FORCE_EXECUTE", "DEFER"]
     reason: str
     modified_action_details: Optional[Dict[str, Any]] = None
+    defer_until: Optional[str] = None   # ISO date, ISO datetime, or integer days string
+    defer_condition: Optional[str] = None
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -256,6 +258,56 @@ def override_decision(decision_id: str, body: OverrideRequest):
         elif body.override_type == "MODIFY" and body.modified_action_details:
             update["action_details"] = body.modified_action_details
             update["execution_status"] = "SENT_TO_EXECUTION"
+        elif body.override_type == "DEFER":
+            update["execution_status"] = "DEFERRED"
+            # Persist defer details into action_details for the audit trail
+            decision = resp.data[0]
+            existing_ad = dict(decision.get("action_details") or {})
+            existing_ad["defer_until"] = body.defer_until
+            existing_ad["defer_condition"] = body.defer_condition or body.reason
+            update["action_details"] = existing_ad
+            # Update the memo row directly so the scheduler sees the new timer
+            d_ticker = decision.get("ticker")
+            memo_id = decision.get("memo_id")
+            if d_ticker:
+                try:
+                    from backend.agents.orchestrator import _parse_defer_time
+                    new_until = _parse_defer_time(body.defer_until).isoformat()
+                    memo_q = _get_client().table("memos").update(
+                        {"status": "DEFERRED", "deferred_until": new_until}
+                    )
+                    if memo_id:
+                        memo_q = memo_q.eq("id", memo_id)
+                    else:
+                        memo_q = memo_q.eq("ticker", d_ticker).in_(
+                            "status", ["PENDING_PM_REVIEW", "DEFERRED"]
+                        )
+                    memo_q.execute()
+                    logger.info(
+                        "PM override DEFER: memo for %s set to DEFERRED until %s",
+                        d_ticker, new_until,
+                    )
+                    # Cancel any PENDING_APPROVAL position so Portfolio page doesn't
+                    # show it as approvable while the decision is deferred.
+                    try:
+                        _get_client().table("positions").update(
+                            {"status": "REJECTED"}
+                        ).eq("ticker", d_ticker).eq(
+                            "status", "PENDING_APPROVAL"
+                        ).execute()
+                        logger.info(
+                            "PM override DEFER: rejected PENDING_APPROVAL position for %s",
+                            d_ticker,
+                        )
+                    except Exception as pos_exc:
+                        logger.warning(
+                            "PM override DEFER: position rejection failed for %s — %s",
+                            d_ticker, pos_exc,
+                        )
+                except Exception as defer_exc:
+                    logger.warning(
+                        "PM override DEFER: memo update failed for %s — %s", d_ticker, defer_exc
+                    )
 
         _get_client().table("pm_decisions").update(update).eq(
             "decision_id", decision_id
