@@ -375,6 +375,16 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  .responsive-table-wrap {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .responsive-table {
+    min-width: 720px;
+  }
+
   /* ── Touch-friendly min height ───────────────────── */
   @media (max-width: 767px) {
     button, a[role="button"] {
@@ -382,6 +392,14 @@
     }
     .p-5 { padding: 0.875rem !important; }
     .px-5 { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+    .responsive-table {
+      min-width: 680px;
+    }
+    .responsive-table th,
+    .responsive-table td {
+      padding-left: 0.75rem !important;
+      padding-right: 0.75rem !important;
+    }
   }
 
   /* ── Critical pulse ──────────────────────────────── */

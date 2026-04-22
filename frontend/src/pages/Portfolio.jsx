@@ -184,7 +184,7 @@ export default function Portfolio() {
   const positionHeaders = ['Ticker', 'Shares', 'Entry', 'Current', 'P&L', 'Stop Loss', 'Size'];
 
   return (
-    <div className="p-6 space-y-5 max-w-7xl mx-auto">
+    <div className="p-4 sm:p-6 space-y-5 max-w-7xl mx-auto">
       {confirm && (
         <ConfirmDialog
           title={confirm.action === 'approve' ? `Approve trade for ${confirm.ticker}?` : `Reject trade for ${confirm.ticker}?`}
@@ -224,7 +224,7 @@ export default function Portfolio() {
 
       {/* Tabs */}
       <div className="bg-white rounded-xl border border-gray-200">
-        <div className="flex border-b border-gray-200">
+        <div className="flex border-b border-gray-200 overflow-x-auto">
           {TABS.map(t => (
             <button
               key={t.key}
@@ -268,8 +268,8 @@ export default function Portfolio() {
               {displayedPositions.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-8">No open positions</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
+                <div className="responsive-table-wrap">
+                  <table className="responsive-table w-full text-left">
                     <thead>
                       <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
                         {positionHeaders.map(h => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
@@ -297,8 +297,8 @@ export default function Portfolio() {
               {closed.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-8">No closed trades yet</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
+                <div className="responsive-table-wrap">
+                  <table className="responsive-table w-full text-left">
                     <thead>
                       <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
                         {['Ticker', 'Direction', 'Shares', 'Entry', 'Exit', 'Realized P&L', 'Closed At'].map(h => (
