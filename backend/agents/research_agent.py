@@ -706,8 +706,9 @@ Required JSON schema (output must match exactly):
     "margin_trend": "expanding | stable | contracting | unknown",
     "debt_level": "low | moderate | high | unknown",
     "fcf": "strong | neutral | weak | unknown",
-    "cash_runway_months": "number | null — required for sub-$2B market cap (formula: cash and equivalents ÷ average quarterly cash burn last two quarters × 3); null for larger companies"
-  }},
+    "cash_runway_months": "number | null — required for sub-$2B market cap. Provide ONLY the raw number or null; do not include any explanatory text, symbols (like '>'), or notes within this field."
+    },
+
   "valuation_note": "string — specific metric (EV/Revenue, EV/EBITDA, P/E, P/FCF) vs peers or historical range; EV must be cash-adjusted (market cap + total debt − cash); or 'unavailable — not in source documents'",
   "macro_sensitivity": "string — one sentence per regime: 'Risk-On: [outperform|underperform|neutral] because [mechanism]. Risk-Off: [...]. Transitional: [...]. Stagflation: [...].' All four required. Base on company-specific cost structure, pricing power, revenue mix — not generic sector assumptions.",
   "verdict": "LONG | SHORT | AVOID",
