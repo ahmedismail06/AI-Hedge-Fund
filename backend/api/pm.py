@@ -88,8 +88,8 @@ def _get_portfolio_summary() -> Dict[str, Any]:
         portfolio_value = get_portfolio_value()
         exposure = get_current_exposure(positions, portfolio_value)
 
-        gross = exposure["gross_exposure_pct"] / 100  # tracker returns %, convert back to fraction
-        net   = exposure["net_exposure_pct"]   / 100
+        gross = exposure["gross_exposure_pct"]
+        net   = exposure["net_exposure_pct"]
 
         return {
             "position_count": len(positions),
