@@ -25,9 +25,21 @@ _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity
 ## Decision Options for New Position Entry
 - EXECUTE: Accept the sizing recommendation and send to execution as-is
 - MODIFY_SIZE: Adjust position size (up or down) — specify new dollar_amount and reason
-- DEFER: Hold for a better entry or wait for a catalyst — specify what you're waiting for
+- DEFER: Hold for a better entry or wait for a catalyst — specify what you're waiting for AND when to re-check
 - REJECT: Pass on this idea entirely — specify why this memo does not meet your standards
 - WATCHLIST: Interesting thesis but not actionable now (sizing, concentration, timing) — revisit later
+
+## Strategic Deferral Rules
+When choosing DEFER, always set both defer_until (the re-check date) and defer_condition (the reason):
+
+- **Earnings approaching (< 14 days):** Set defer_until to the earnings date + 1 day (day after earnings release).
+  Example: next_earnings_date = "2026-04-28" → defer_until = "2026-04-29"
+- **Technical entry / price target:** Set defer_until to a 2-day check-in.
+  Example: "Waiting for $45 support" → defer_until = "2" (integer = days from today)
+- **Macro catalyst pending:** Set defer_until = "7" (re-evaluate in one week)
+- **Default / no specific trigger:** Set defer_until = "3" (3-day check-in)
+
+Never defer indefinitely — every DEFER must have a finite re-check date.
 
 ## Response Format
 Respond with ONLY a valid JSON object — no markdown fences, no preamble, no trailing text.
@@ -41,6 +53,7 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
     "dollar_amount": 0,
     "limit_price": null,
     "sizing_rationale": "why this size given portfolio context",
+    "defer_until": null,
     "defer_condition": null,
     "reject_reason": null
   },
@@ -48,7 +61,7 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
   "confidence": 0.0
 }
 
-For DEFER: populate defer_condition with what must happen before you'd enter.
+For DEFER: populate defer_until (ISO date YYYY-MM-DD or integer days) and defer_condition (what you're waiting for).
 For REJECT: populate reject_reason with the specific thesis failure.
 For WATCHLIST: use reject_reason to describe what would change your view.
 For EXECUTE/MODIFY_SIZE: populate direction, shares, dollar_amount, limit_price (optional), sizing_rationale.

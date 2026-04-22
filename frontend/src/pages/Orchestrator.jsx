@@ -70,6 +70,90 @@ function ConfidenceBar({ value }) {
   );
 }
 
+const DEFER_OPTIONS = [
+  { label: '1 Day',    value: '1' },
+  { label: '3 Days',   value: '3' },
+  { label: '1 Week',   value: '7' },
+  { label: 'Custom…',  value: 'custom' },
+];
+
+function DeferModal({ target, onConfirm, onCancel }) {
+  const [duration, setDuration] = useState('3');
+  const [customDate, setCustomDate] = useState('');
+  const [condition, setCondition] = useState('');
+
+  const deferUntil = duration === 'custom' ? customDate : duration;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4">
+        <h2 className="text-base font-bold text-gray-900">Defer Decision</h2>
+        <p className="text-sm text-gray-500">
+          Set when to re-evaluate <span className="font-mono font-semibold">{target.ticker || 'this decision'}</span>.
+          The research scheduler will re-queue it automatically on that date.
+        </p>
+
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Re-check in</label>
+          <div className="flex gap-2 mt-1.5 flex-wrap">
+            {DEFER_OPTIONS.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setDuration(opt.value)}
+                className={`text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors ${
+                  duration === opt.value
+                    ? 'bg-yellow-500 text-white border-yellow-500'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-yellow-300'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {duration === 'custom' && (
+            <input
+              type="date"
+              value={customDate}
+              onChange={e => setCustomDate(e.target.value)}
+              min={new Date().toISOString().slice(0, 10)}
+              className="mt-2 w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+            />
+          )}
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Reason / Condition <span className="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <textarea
+            value={condition}
+            onChange={e => setCondition(e.target.value)}
+            placeholder="e.g. Wait for post-earnings price stabilization"
+            rows={2}
+            className="mt-1.5 w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-yellow-400"
+          />
+        </div>
+
+        <div className="flex justify-end gap-3 pt-1">
+          <button
+            onClick={onCancel}
+            className="text-sm px-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm({ defer_until: deferUntil, defer_condition: condition })}
+            disabled={duration === 'custom' && !customDate}
+            className="text-sm px-4 py-2 rounded-lg bg-yellow-500 text-white font-semibold hover:bg-yellow-600 disabled:opacity-50 transition-colors"
+          >
+            Defer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Orchestrator() {
   const [decisions, setDecisions] = useState([]);
   const [status, setStatus] = useState(null);
@@ -79,6 +163,7 @@ export default function Orchestrator() {
   const [showHaltConfirm, setShowHaltConfirm] = useState(false);
   const [showResumeConfirm, setShowResumeConfirm] = useState(false);
   const [overrideTarget, setOverrideTarget] = useState(null); // {decision_id, action}
+  const [deferTarget, setDeferTarget] = useState(null);       // {decision_id, ticker}
   const [actionPending, setActionPending] = useState(false);
 
   const loadDecisions = () => {
@@ -130,6 +215,23 @@ export default function Orchestrator() {
     finally { setActionPending(false); }
   };
 
+  const handleDefer = async ({ defer_until, defer_condition }) => {
+    if (!deferTarget) return;
+    setActionPending(true);
+    const target = deferTarget;
+    setDeferTarget(null);
+    try {
+      await overrideDecision(target.decision_id, {
+        override_type: 'DEFER',
+        reason: defer_condition || 'Deferred by user via Dashboard',
+        defer_until,
+        defer_condition,
+      });
+      loadDecisions();
+    } catch {}
+    finally { setActionPending(false); }
+  };
+
   const toggleCategory = (c) => {
     setActiveCategories(prev => {
       const next = new Set(prev);
@@ -153,6 +255,15 @@ export default function Orchestrator() {
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">
+      {/* Defer Modal */}
+      {deferTarget && (
+        <DeferModal
+          target={deferTarget}
+          onConfirm={handleDefer}
+          onCancel={() => setDeferTarget(null)}
+        />
+      )}
+
       {/* Dialogs */}
       {showHaltConfirm && (
         <ConfirmDialog
@@ -416,6 +527,28 @@ export default function Orchestrator() {
                         </button>
                       </div>
                     )}
+                    {!d.human_override && d.execution_status === 'PENDING_HUMAN' && (
+                      <div className="flex gap-2 pt-1">
+                        <button
+                          onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
+                          className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
+                        >
+                          Force Execute
+                        </button>
+                        <button
+                          onClick={() => setDeferTarget({ decision_id: d.decision_id, ticker: d.ticker })}
+                          className="text-xs px-3 py-1.5 rounded border border-yellow-300 text-yellow-700 hover:bg-yellow-50 transition-colors"
+                        >
+                          Defer
+                        </button>
+                        <button
+                          onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'BLOCK' })}
+                          className="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                        >
+                          Block
+                        </button>
+                      </div>
+                    )}
                     {!d.human_override && d.execution_status === 'DEFERRED' && (
                       <div className="flex gap-2 pt-1">
                         <button
@@ -423,6 +556,12 @@ export default function Orchestrator() {
                           className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
                         >
                           Force Execute
+                        </button>
+                        <button
+                          onClick={() => setDeferTarget({ decision_id: d.decision_id, ticker: d.ticker })}
+                          className="text-xs px-3 py-1.5 rounded border border-yellow-300 text-yellow-700 hover:bg-yellow-50 transition-colors"
+                        >
+                          Re-Defer
                         </button>
                       </div>
                     )}
