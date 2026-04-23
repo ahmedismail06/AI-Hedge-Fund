@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from backend.agents.research_agent import run_research, ResearchAgentError
+from backend.notifications.events import notify_event
 from backend.memory.vector_store import (
     store_memo,
     get_memo,
@@ -201,6 +202,14 @@ def trigger_research(ticker: str, use_cache: bool = False):
     try:
         memo_id = store_memo(ticker, memo)
         memo["id"] = memo_id
+        if memo_id:
+            notify_event("RESEARCH_MEMO_COMPLETED", {
+                "ticker": ticker,
+                "verdict": memo.get("verdict"),
+                "conviction_score": memo.get("conviction_score"),
+                "sector": memo.get("sector"),
+                "price_target": memo.get("price_target"),
+            })
     except Exception as exc:
         # Storage failure should not block the user from seeing the memo
         memo["id"] = None
