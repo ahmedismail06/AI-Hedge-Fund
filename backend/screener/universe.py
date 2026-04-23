@@ -3,8 +3,12 @@ Universe Builder — filters ~800 US micro/small-cap equities for daily screenin
 
 Criteria:
   - Market cap: $50M–$2B
-  - Sectors: SaaS/Tech (SIC 7371-7379), Healthcare (SIC 2830-2836, 5047, 5122, 8000-8099),
-             Industrials (SIC 3400-3599, 3710-3799, 4800-4899)
+  - Sectors: broad US equities minus exclusions.
+             Excluded: Pharma/Biotech R&D (SIC 2830-2836, 8731), Mining/Metals (1000-1499,
+             3300-3399), Oil & Gas Exploration (1300-1389), Financial Services (6000-6411,
+             6700-6799), Utilities (4900-4999).
+             Kept sectors: SaaS, Healthcare (non-pharma), Industrials, Consumer,
+             Real Estate (operating cos), Other.
   - ADV ≥ $500K (30-day Polygon OHLCV)
   - Analyst count ≤ 5 (Financial Modeling Prep)
 
@@ -44,42 +48,58 @@ _CACHE_TTL_HOURS = 24
 # Manual sector overrides: ticker → sector string
 SECTOR_OVERRIDES: Dict[str, str] = {}
 
-# SIC code → sector mapping
-_SIC_SAAS = set(range(7371, 7380))  # 7371–7379 inclusive
-_SIC_HEALTHCARE = (
-    set(range(2830, 2837))  # 2830–2836
-    | {5047, 5122}
-    | set(range(8000, 8100))  # 8000–8099
-)
-_SIC_INDUSTRIALS = (
-    set(range(3400, 3600))   # 3400–3599
-    | set(range(3710, 3800)) # 3710–3799
-    | set(range(4800, 4900)) # 4800–4899
-)
+# SIC ranges excluded from the universe (inclusive on both ends).
+# Order matters only for readability — all ranges are checked.
+_EXCLUDED_SIC_RANGES = [
+    (1000, 1499),   # Mining (metal/coal), oil & gas extraction, nonmetallic minerals
+    (2830, 2836),   # Pharma & drug manufacturing (pre-revenue biotech / pharma R&D)
+    (3300, 3399),   # Primary metals industries (steel mills, aluminum smelters)
+    (4900, 4999),   # Utilities (electric, gas, sanitary services)
+    (6000, 6199),   # Banks, savings institutions, credit companies
+    (6200, 6289),   # Security & commodity brokers/dealers
+    (6300, 6411),   # Insurance carriers and agents
+    (6700, 6799),   # Investment holding companies and REITs
+]
+# Point exclusions not covered by the ranges above
+_EXCLUDED_SIC_POINT = frozenset({8731})  # Commercial physical & biological research (biotech R&D)
 
-VALID_SECTORS = {"SaaS", "Healthcare", "Industrials"}
+VALID_SECTORS = {"SaaS", "Healthcare", "Industrials", "Consumer", "Real Estate", "Other"}
 
 
 @dataclass
 class UniverseCandidate:
     ticker: str
     market_cap_m: float             # market cap in $M
-    sector: str                     # 'SaaS' | 'Healthcare' | 'Industrials'
+    sector: str                     # 'SaaS' | 'Healthcare' | 'Industrials' | 'Consumer' | 'Real Estate' | 'Other'
     adv_k: Optional[float] = None   # average daily volume in $K
     sic_code: Optional[int] = None
     analyst_count: Optional[int] = None
 
 
+def _is_excluded_sic(sic: int) -> bool:
+    if sic in _EXCLUDED_SIC_POINT:
+        return True
+    return any(lo <= sic <= hi for lo, hi in _EXCLUDED_SIC_RANGES)
+
+
 def _sic_to_sector(sic: Optional[int]) -> Optional[str]:
+    """Map a SIC code to a sector label, or None if the ticker is excluded from the universe."""
     if sic is None:
         return None
-    if sic in _SIC_SAAS:
-        return "SaaS"
-    if sic in _SIC_HEALTHCARE:
-        return "Healthcare"
-    if sic in _SIC_INDUSTRIALS:
-        return "Industrials"
-    return None
+    if _is_excluded_sic(sic):
+        return None
+    # Positive sector assignments (first match wins)
+    if 7371 <= sic <= 7379 or 3571 <= sic <= 3579 or 3671 <= sic <= 3679:
+        return "SaaS"       # software, IT services, computer/electronic hardware
+    if (8000 <= sic <= 8099) or (3841 <= sic <= 3851) or sic in {5047, 5122, 3826, 3827}:
+        return "Healthcare"  # health services, medical devices, instruments, distributors
+    if (3400 <= sic <= 3599) or (3710 <= sic <= 3799) or (4000 <= sic <= 4899):
+        return "Industrials"  # fabricated metals, machinery, transport equipment, comms
+    if (5000 <= sic <= 5999) or (2000 <= sic <= 2829) or (2837 <= sic <= 2999):
+        return "Consumer"    # retail, wholesale, food/textiles/chemicals manufacturing
+    if 6500 <= sic <= 6552:
+        return "Real Estate"  # operating companies only (not REITs — those are excluded above)
+    return "Other"
 
 
 def _polygon_get(url: str, params: dict, max_retries: int = 3) -> Optional[requests.Response]:
@@ -249,7 +269,7 @@ def _save_universe_cache(universe: List[UniverseCandidate]) -> None:
 def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     """
     Build the screener universe from Polygon reference tickers.
-    Filters: US exchange, Cap $50M–$2B, Valid SIC, ADV ≥ $500K, Analyst ≤ 5.
+    Filters: US exchange, Cap $50M–$2B, non-excluded SIC, ADV ≥ $500K, Analyst ≤ 5.
     """
     polygon_key = os.getenv("POLYGON_API_KEY")
     fmp_key = os.getenv("FMP_API_KEY")
