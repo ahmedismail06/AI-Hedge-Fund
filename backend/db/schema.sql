@@ -229,6 +229,30 @@ create table if not exists portfolio_metrics (
 create index if not exists portfolio_metrics_date_idx on portfolio_metrics (date desc);
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Broker: account_snapshots table
+-- High-frequency mirror of the IBKR account state.  One row is inserted after
+-- every order placed, fill received, order cancelled, and on each successful
+-- get_portfolio_value() IBKR read (opportunistic).  The most recent row is used
+-- as the NAV fallback when the live IBKR connection is unavailable.
+-- source allowed values: 'post_order' | 'post_fill' | 'post_cancel' |
+--                        'post_partial_fill' | 'opportunistic'
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists account_snapshots (
+    id               uuid primary key default gen_random_uuid(),
+    net_liquidation  numeric(16, 2) not null,
+    cash             numeric(16, 2),
+    total_cash_value numeric(16, 2),
+    unrealized_pnl   numeric(16, 2),
+    realized_pnl     numeric(16, 2),
+    source           text not null,
+    captured_at      timestamptz not null default now()
+);
+
+create index if not exists account_snapshots_captured_at_idx
+    on account_snapshots (captured_at desc);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Execution Agent: orders table
 -- Tracks IBKR order lifecycle from placement to fill/cancel.
 -- One order per APPROVED position (re-created on retry after timeout).

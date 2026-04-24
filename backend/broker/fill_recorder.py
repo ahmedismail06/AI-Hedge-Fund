@@ -37,7 +37,7 @@ from typing import Optional
 
 from backend.memory.vector_store import _get_client
 from backend.notifications.events import notify_event
-from backend.broker.ibkr import get_cash_balance
+from backend.broker.ibkr import get_account_summary, save_account_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -405,16 +405,18 @@ def _sync_cash_and_pct(client) -> None:
         client: Supabase client from _get_client() (already in scope at call site).
     """
     try:
-        cash = get_cash_balance()
+        summary = get_account_summary()
+        cash = summary.get("CashBalance") if summary else None
         if cash is None:
             logger.warning("_sync_cash_and_pct: IBKR unreachable — skipping sync")
             return
 
-        # 1. Persist cash balance.
+        # 1. Persist cash balance and save NAV snapshot.
         client.table("pm_config").update(
             {"cash_balance": round(cash, 2), "updated_at": datetime.now(timezone.utc).isoformat()}
         ).eq("id", 1).execute()
         logger.info("pm_config cash_balance synced: $%.2f", cash)
+        save_account_snapshot("post_fill", summary=summary)
 
         # 2. Load all OPEN positions.
         pos_result = (

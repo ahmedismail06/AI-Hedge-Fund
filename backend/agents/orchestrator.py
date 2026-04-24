@@ -395,9 +395,6 @@ def _trigger_deploy_cash_pipeline() -> str:
     return detail
 
 
-# ── Portfolio value (NAV) ─────────────────────────────────────────────────────
-
-_PAPER_TRADING_NAV = 1_000_000.0   # fallback until real NAV tracking exists
 
 
 def _compute_portfolio_value() -> float:
