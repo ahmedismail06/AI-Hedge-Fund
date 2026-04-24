@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from backend.broker.ibkr import IBKRConnectionError, connect, get_loop  # noqa: E402
+from backend.broker.ibkr import IBKRConnectionError, connect, get_loop, save_account_snapshot  # noqa: E402
 from backend.broker.schemas import OrderRequest, OrderStatus  # noqa: E402
 from backend.memory.vector_store import _get_client  # noqa: E402
 from backend.notifications.events import notify_event
@@ -123,7 +123,10 @@ def place_order(req: OrderRequest, contract, ib_order) -> OrderStatus:
         "ibkr_order_id": perm_id,
     })
 
-    # 8. Return lightweight status object.
+    # 8. Snapshot account state now that cash is committed to a new order.
+    save_account_snapshot("post_order")
+
+    # 9. Return lightweight status object.
     return OrderStatus(
         order_id=order_db_id,
         ibkr_order_id=perm_id,
@@ -219,6 +222,7 @@ def cancel_order(order_id: str) -> bool:
         return False
 
     logger.info("Order cancelled: order_id=%s", order_id)
+    save_account_snapshot("post_cancel")
     return True
 
 

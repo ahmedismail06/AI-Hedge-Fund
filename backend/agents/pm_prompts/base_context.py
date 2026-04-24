@@ -75,11 +75,8 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
 
         # Compute live exposure using dollar_size against current portfolio value
         # (avoids stale pct_of_portfolio which was baked in at sizing time)
-        try:
-            from backend.broker.ibkr import get_portfolio_value
-            portfolio_value = get_portfolio_value()
-        except Exception:
-            portfolio_value = 25_000.0
+        from backend.broker.ibkr import get_portfolio_value
+        portfolio_value = get_portfolio_value()  # raises RuntimeError if IBKR + snapshot both unavailable
 
         gross = 0.0
         net = 0.0

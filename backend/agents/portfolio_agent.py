@@ -249,8 +249,8 @@ async def run_portfolio_sizing(
     memo_id:
         UUID of the row in the Supabase `memos` table to size.
     portfolio_value:
-        Current total portfolio NAV in USD.  If None or <= 0, reads the
-        PORTFOLIO_VALUE env-var; defaults to $25,000.
+        Current total portfolio NAV in USD.  If None or <= 0, get_portfolio_value()
+        is called (IBKR live → account_snapshot fallback → RuntimeError).
     auto_approve:
         If True, write the position directly as APPROVED (PM has already
         decided EXECUTE).  If False, write as PENDING_APPROVAL (legacy path).

@@ -149,36 +149,98 @@ def get_loop() -> asyncio.AbstractEventLoop:
 _ACCOUNT_TAGS_WANTED = {'NetLiquidation', 'TotalCashValue', 'CashBalance', 'UnrealizedPnL', 'RealizedPnL'}
 
 
+def save_account_snapshot(source: str, summary: Optional[dict] = None) -> None:
+    """
+    Persist a point-in-time IBKR account state to the account_snapshots table.
+
+    Called after every order placed, fill received, or order cancelled so the
+    table always reflects the latest known portfolio NAV. Also called
+    opportunistically whenever get_portfolio_value() succeeds — keeping the
+    snapshot fresh even during idle periods with no trades.
+
+    Never raises — a failed write must not abort order placement or fill handling.
+
+    Args:
+        source:  Label for what triggered the snapshot ('post_order', 'post_fill',
+                 'post_cancel', 'post_partial_fill', 'opportunistic').
+        summary: Pre-fetched get_account_summary() dict.  If omitted the function
+                 fetches one itself to avoid a second IBKR round-trip at call sites
+                 that already have the dict in hand.
+    """
+    try:
+        if summary is None:
+            summary = get_account_summary()
+        if not summary:
+            return
+        nav = summary.get("NetLiquidation")
+        if not nav or nav <= 0:
+            return
+        from backend.memory.vector_store import _get_client  # lazy — avoids circular import
+        _get_client().table("account_snapshots").insert(
+            {
+                "net_liquidation": round(float(nav), 2),
+                "cash": round(float(summary.get("CashBalance") or 0), 2),
+                "total_cash_value": round(float(summary.get("TotalCashValue") or 0), 2),
+                "unrealized_pnl": round(float(summary.get("UnrealizedPnL") or 0), 2),
+                "realized_pnl": round(float(summary.get("RealizedPnL") or 0), 2),
+                "source": source,
+            }
+        ).execute()
+        logger.debug("account_snapshot saved: net_liq=%.2f source=%s", nav, source)
+    except Exception as exc:
+        logger.warning("save_account_snapshot failed (%s): %s", source, exc)
+
+
 def get_portfolio_value() -> float:
     """
-    Return the live portfolio NAV (NetLiquidation) from IBKR.
+    Return the live portfolio NAV (NetLiquidation).
 
     Resolution order:
-      1. IBKR NetLiquidation (if connected and > 0)
-      2. PORTFOLIO_VALUE env-var
-      3. $25,000 (Phase-1 default)
+      1. IBKR NetLiquidation (live, if connected and > 0).  Also writes an
+         opportunistic account_snapshot so the fallback stays fresh.
+      2. Most recent account_snapshots row (if IBKR is unreachable).
+      3. Raises RuntimeError — callers must handle IBKR-down + cold-start.
 
     This is the single source of truth for portfolio_value across all agents
-    and API endpoints.  Never hardcode or read from env directly — call this.
+    and API endpoints.  Never hardcode a NAV or read from env — call this.
     """
     summary = get_account_summary()
     nav = summary.get("NetLiquidation")
     if nav and nav > 0:
         logger.debug("portfolio_value from IBKR NetLiquidation: %.2f", nav)
+        save_account_snapshot("opportunistic", summary=summary)
         return float(nav)
 
-    env_val = os.getenv("PORTFOLIO_VALUE")
-    if env_val:
-        try:
-            v = float(env_val)
-            if v > 0:
-                logger.debug("portfolio_value from PORTFOLIO_VALUE env-var: %.2f", v)
-                return v
-        except (ValueError, TypeError):
-            pass
+    logger.warning("IBKR unreachable — falling back to account_snapshots")
+    try:
+        from backend.memory.vector_store import _get_client  # lazy — avoids circular import
+        result = (
+            _get_client()
+            .table("account_snapshots")
+            .select("net_liquidation,captured_at")
+            .gt("net_liquidation", 0)
+            .order("captured_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            snap_nav = float(result.data[0]["net_liquidation"])
+            if snap_nav > 0:
+                logger.warning(
+                    "portfolio_value from account_snapshot (IBKR offline): %.2f "
+                    "(captured_at=%s)",
+                    snap_nav,
+                    result.data[0].get("captured_at"),
+                )
+                return snap_nav
+    except Exception as exc:
+        logger.error("account_snapshot fallback query failed: %s", exc)
 
-    logger.debug("portfolio_value: falling back to Phase-1 default $25,000")
-    return 25_000.0
+    raise RuntimeError(
+        "No portfolio value available: IBKR is unreachable and no account_snapshot "
+        "has ever been recorded.  Ensure TWS/IB Gateway is running so the first "
+        "snapshot can be captured, or verify Supabase connectivity."
+    )
 
 
 def get_account_summary() -> dict:
@@ -210,14 +272,6 @@ def get_account_summary() -> dict:
 
 
 def get_cash_balance() -> Optional[float]:
-    """
-    Return the live USD cash balance from IBKR (AccountValue tag='CashBalance').
-
-    Returns None when IBKR is unreachable so callers can skip the sync
-    gracefully rather than writing 0 to the database.
-    """
-    summary = get_account_summary()
-    val = summary.get("CashBalance")
-    if val is not None:
-        return float(val)
-    return None
+    """Return the live USD cash balance from IBKR. Returns None when unreachable."""
+    val = get_account_summary().get("CashBalance")
+    return float(val) if val is not None else None
