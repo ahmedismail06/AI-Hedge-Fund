@@ -22,6 +22,8 @@ from backend.models.risk import PortfolioMetrics
 from backend.risk.metrics import compute_nightly_metrics
 from backend.risk.monitor import run_monitor_cycle, write_heartbeat
 
+from backend.db.utils import get_supabase_client
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -36,11 +38,10 @@ class RiskAgentError(Exception):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _get_supabase() -> Client:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
-    if not url or not key:
-        raise RiskAgentError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
-    return create_client(url, key)
+    try:
+        return get_supabase_client()
+    except Exception as exc:
+        raise RiskAgentError(str(exc))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

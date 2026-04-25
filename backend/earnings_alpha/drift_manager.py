@@ -24,9 +24,11 @@ _DRIFT_HOLD_DAYS = 45
 _SURPRISE_THRESHOLD = 0.05  # 5% positive surprise required
 
 
+from backend.db.utils import get_supabase_client
+
+
 def _get_client():
-    import supabase as _sb
-    return _sb.create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    return get_supabase_client()
 
 
 def get_active_drift_hold(ticker: str) -> DriftHoldState:

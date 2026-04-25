@@ -23,20 +23,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Credentials cached at module level — client created fresh per call (avoids EAGAIN on macOS)
-_SUPABASE_URL: Optional[str] = None
-_SUPABASE_KEY: Optional[str] = None
+from backend.db.utils import get_supabase_client
 
 
 def _get_client():
-    """Return a fresh Supabase client. Credentials cached at module level."""
-    global _SUPABASE_URL, _SUPABASE_KEY
-    if _SUPABASE_URL is None:
-        _SUPABASE_URL = os.getenv("SUPABASE_URL")
-        _SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-    if not _SUPABASE_URL or not _SUPABASE_KEY:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
-    return create_client(_SUPABASE_URL, _SUPABASE_KEY)
+    """Return a fresh Supabase client."""
+    return get_supabase_client()
 
 
 def _read_risk_free_rate() -> float:

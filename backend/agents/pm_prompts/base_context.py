@@ -156,7 +156,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
     try:
         resp = (
             supabase_client.table("pm_decisions")
-            .select("decision_id,timestamp,category,ticker,decision,confidence,execution_status,outcome,confidence_breakdown")
+            .select("decision_id,timestamp,category,ticker,decision,confidence,execution_status,outcome")
             .order("timestamp", desc=True)
             .limit(15)
             .execute()

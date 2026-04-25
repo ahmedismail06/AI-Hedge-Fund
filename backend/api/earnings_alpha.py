@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/earnings-alpha", tags=["earnings-alpha"])
 
 
+from backend.db.utils import get_supabase_client
+
+
 def _get_client():
-    import supabase as _sb
-    return _sb.create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    return get_supabase_client()
 
 
 # ── GET /earnings-alpha/{ticker}/latest ───────────────────────────────────────

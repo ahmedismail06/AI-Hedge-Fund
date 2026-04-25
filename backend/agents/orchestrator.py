@@ -944,10 +944,21 @@ def _call_claude(system_prompt: str, user_message: str) -> Dict[str, Any]:
 
         if text_blocks and not tool_uses:
             # Final decision — parse and return JSON
+            text = text_blocks[0].text.strip()
+            if not text:
+                logger.warning("_call_claude: text block is empty (turn %d)", turn)
+                return {}
+
+            # Handle markdown blocks if Claude wrapped the JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
             try:
-                return json.loads(text_blocks[0].text)
+                return json.loads(text)
             except json.JSONDecodeError as exc:
-                logger.error("_call_claude: JSON parse failed — %s", exc)
+                logger.error("_call_claude: JSON parse failed — %s | content: %s", exc, text[:500])
                 return {}
 
         if tool_uses:
@@ -1450,11 +1461,8 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     _open_positions = [p for p in base_ctx.get("positions", []) if p.get("ticker") and p.get("status") == "OPEN"]
     if _open_positions:
         try:
-            import os
-            import supabase as _sb_orch
-            _orch_client = _sb_orch.create_client(
-                os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
-            )
+            from backend.db.utils import get_supabase_client
+            _orch_client = get_supabase_client()
             _tickers = [p["ticker"] for p in _open_positions]
             _fm_resp = (
                 _orch_client.table("financial_models")
