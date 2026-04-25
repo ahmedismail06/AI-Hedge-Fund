@@ -318,12 +318,12 @@ def fetch_fmp(ticker: str) -> dict:
             pass
 
         # Balance sheet + cash flow from Polygon financials.
-        # limit=10 ensures 2 FY periods appear for Beneish (quarterly filings would
+        # limit=16 ensures 2 FY periods appear for Beneish (quarterly filings would
         # fill limit=3 leaving zero or one annual row, breaking the M-score calc).
         try:
             r = requests.get(
                 f"{POLYGON_BASE}/vX/reference/financials",
-                params={"ticker": sym, "limit": 10, "apiKey": polygon_key},
+                params={"ticker": sym, "limit": 16, "apiKey": polygon_key},
                 timeout=15,
             )
             if r.status_code == 200:

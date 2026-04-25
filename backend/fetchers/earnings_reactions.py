@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Days of price history to fetch per ticker (covers ~2 years of quarters + buffer)
 _PRICE_LOOKBACK_DAYS = 730
-# Sanity cap: surprises beyond ±150% almost certainly indicate a stale or wrong-basis
+# Sanity cap: surprises beyond ±100% almost certainly indicate a stale or wrong-basis
 # consensus estimate from yfinance — null them out rather than storing garbage.
-_MAX_PLAUSIBLE_SURPRISE = 1.5
+_MAX_PLAUSIBLE_SURPRISE = 1.0
 # Trading days to skip before earnings close is "settled" (report after close → next day)
 _DAYS_AFTER_SHORT = 1
 _DAYS_AFTER_LONG = 5
@@ -186,11 +186,13 @@ def get_earnings_reactions(
 
         # EPS surprise
         surprise_pct: Optional[float] = None
+        data_quality_issue = False
         if reported is not None and consensus is not None and consensus != 0:
             raw_surprise = (reported - consensus) / abs(consensus)
             if abs(raw_surprise) <= _MAX_PLAUSIBLE_SURPRISE:
                 surprise_pct = round(raw_surprise, 4)
             else:
+                data_quality_issue = True
                 logger.warning(
                     "earnings_reactions: %s implausible surprise %.0f%% on %s — nulling out",
                     ticker, raw_surprise * 100, event_date,
@@ -213,6 +215,7 @@ def get_earnings_reactions(
             "reported_eps": reported,
             "consensus_eps": consensus,
             "surprise_pct": surprise_pct,
+            "data_quality_issue": data_quality_issue,
             "price_reaction_1d": reaction_1d,
             "price_reaction_5d": reaction_5d,
         })
