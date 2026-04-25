@@ -1850,7 +1850,6 @@ def run_pm_cycle(
                     context_snapshot=_snapshot(base_ctx),
                     hard_blocks_checked=hard_blocks,
                     execution_status="PENDING_HUMAN",  # filled below
-                    confidence_breakdown=decision_data.get("confidence_breakdown"),
                 )
 
                 # Always update memo status so this memo is not re-evaluated next cycle
@@ -2135,7 +2134,6 @@ def _build_decision_record(
     context_snapshot: Dict[str, Any],
     hard_blocks_checked: Dict[str, bool],
     execution_status: str,
-    confidence_breakdown: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     record: Dict[str, Any] = {
         "decision_id": decision_id,
@@ -2152,10 +2150,6 @@ def _build_decision_record(
         "execution_status": execution_status,
         "human_override": None,
     }
-    if confidence_breakdown:
-        record["confidence_breakdown"] = {
-            k: round(float(v), 4) for k, v in confidence_breakdown.items()
-        }
     return record
 
 
@@ -2219,7 +2213,6 @@ async def handle_critical_alert(alert_id: str) -> Dict[str, Any]:
             context_snapshot=_snapshot(base_ctx),
             hard_blocks_checked={"daily_loss_ok": True},
             execution_status="SENT_TO_EXECUTION",
-            confidence_breakdown=decision_data.get("confidence_breakdown"),
         )
 
         execution_status = _route_decision(decision_data, record)
@@ -2278,7 +2271,6 @@ async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
             context_snapshot=_snapshot(base_ctx),
             hard_blocks_checked={},
             execution_status="SENT_TO_EXECUTION",
-            confidence_breakdown=decision_data.get("confidence_breakdown"),
         )
 
         execution_status = _route_decision(decision_data, record)
