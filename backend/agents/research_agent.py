@@ -1433,6 +1433,7 @@ def _run_update_mode(ticker: str, macro_context: Optional[str]) -> dict:
 
     merged = _merge_updated_fields(existing_memo, updated_fields)
     merged["ticker"] = ticker
+    merged["date"] = date.today().isoformat()
 
     _print_usage_summary(ticker, usage_log)
 

@@ -57,7 +57,8 @@ CREATE INDEX IF NOT EXISTS pm_decisions_category_idx ON pm_decisions (category);
 
 CREATE TABLE IF NOT EXISTS pm_calibration (
     id SERIAL PRIMARY KEY,
-    decision_id TEXT NOT NULL REFERENCES pm_decisions (decision_id),
+    ticker TEXT,                                 -- denormalised for unlinked rows
+    decision_id TEXT REFERENCES pm_decisions (decision_id),  -- nullable: manual/pre-PM trades have no decision
     confidence_at_entry FLOAT,
     confidence_at_exit FLOAT,
     holding_period_days INTEGER,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS pm_calibration (
 );
 
 CREATE INDEX IF NOT EXISTS pm_calibration_decision_idx ON pm_calibration (decision_id);
+CREATE INDEX IF NOT EXISTS pm_calibration_ticker_idx   ON pm_calibration (ticker);
 
 
 -- ── Research Efficiency Columns (added 2026-04-10) ───────────────────────────

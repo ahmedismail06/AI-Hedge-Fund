@@ -812,6 +812,35 @@ def _route_decision(
             # Memo status handled by _update_memo_after_decision.
             return "DEFERRED"
 
+        elif category == "POSITION_UPDATE" and decision == "HOLD":
+            # Thesis still valid — mark memo reviewed, no trade action
+            logger.info("PM: POSITION_UPDATE HOLD for %s — thesis intact, no trade action", ticker)
+            return "NO_ACTION"
+
+        elif category == "POSITION_UPDATE" and decision in ("TRIM", "CLOSE"):
+            if ticker:
+                update = {
+                    "exit_action": decision,
+                    "exit_trim_pct": _clean_float(decision_data.get("action_details", {}).get("trim_pct")),
+                }
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info("PM: POSITION_UPDATE %s for %s — exit_action written", decision, ticker)
+            return "SENT_TO_EXECUTION"
+
+        elif category == "POSITION_UPDATE" and decision == "ADD":
+            if ticker:
+                action = decision_data.get("action_details", {})
+                update: Dict[str, Any] = {"exit_action": "ADD"}
+                if action.get("add_pct") not in (None, ""):
+                    update["exit_trim_pct"] = _clean_float(action.get("add_pct"))
+                client.table("positions").update(update).eq(
+                    "ticker", ticker
+                ).eq("status", "OPEN").execute()
+                logger.info("PM: POSITION_UPDATE ADD for %s — exit_action=ADD written", ticker)
+            return "SENT_TO_EXECUTION"
+
         elif category == "EXIT_TRIM" and decision in ("TRIM", "CLOSE"):
             if ticker:
                 update = {
@@ -1017,8 +1046,13 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             .limit(5)
             .execute()
         )
+        open_tickers = {p["ticker"] for p in base_ctx.get("positions", []) if p.get("status") == "OPEN"}
         for memo in (resp.data or []):
-            items.append({"category": "NEW_ENTRY", "data": {"memo": memo}, "priority": 2})
+            memo_ticker = memo.get("ticker")
+            if memo_ticker and memo_ticker in open_tickers:
+                items.append({"category": "POSITION_UPDATE", "data": {"memo": memo}, "priority": 2})
+            else:
+                items.append({"category": "NEW_ENTRY", "data": {"memo": memo}, "priority": 2})
     except Exception as exc:
         logger.warning("_scan_actionable_items: memos scan failed — %s", exc)
 
@@ -1466,7 +1500,7 @@ def run_pm_cycle(
                 # Always update memo status so this memo is not re-evaluated next cycle
                 final_decision = decision_data.get("decision", decision)
                 memo_id: Optional[str] = None
-                if category == "NEW_ENTRY" and ticker:
+                if category in ("NEW_ENTRY", "POSITION_UPDATE") and ticker:
                     memo_id = data.get("memo", {}).get("id")
 
                 # Pass memo_id into record_template so _route_decision can use it
@@ -1514,7 +1548,7 @@ def run_pm_cycle(
                         if execution_status == "SENT_TO_EXECUTION":
                             execution_status = "QUEUED_FOR_OPEN"
 
-                    elif category in ("EXIT_TRIM", "PRE_EARNINGS") and final_decision not in (
+                    elif category in ("EXIT_TRIM", "PRE_EARNINGS", "POSITION_UPDATE") and final_decision not in (
                         "HOLD", "NO_ACTION", "MONITOR"
                     ):
                         # Writing exit_action to an OPEN position is a pure DB operation —
@@ -1535,9 +1569,18 @@ def run_pm_cycle(
                 record_template["execution_status"] = execution_status
 
                 # Post-routing memo update (Fix for desynchronization)
-                if category == "NEW_ENTRY" and ticker and execution_status != "BLOCKED":
+                if category in ("NEW_ENTRY", "POSITION_UPDATE") and ticker and execution_status != "BLOCKED":
+                    # Map POSITION_UPDATE decisions to memo-status equivalents
+                    memo_decision = final_decision
+                    if category == "POSITION_UPDATE":
+                        memo_decision = {
+                            "HOLD": "WATCHLIST",    # keep memo active but not re-queued
+                            "ADD": "APPROVED",
+                            "TRIM": "APPROVED",
+                            "CLOSE": "APPROVED",
+                        }.get(final_decision, "WATCHLIST")
                     _update_memo_after_decision(
-                        ticker, final_decision, memo_id=memo_id,
+                        ticker, memo_decision, memo_id=memo_id,
                         defer_val=(decision_data.get("action_details") or {}).get("defer_until"),
                     )
 
@@ -1611,6 +1654,33 @@ def _build_prompt(
     from backend.agents.pm_prompts.rebalance import build_rebalance_prompt
     from backend.agents.pm_prompts.crisis import build_crisis_prompt
     from backend.agents.pm_prompts.pre_earnings import build_pre_earnings_prompt
+
+    if category == "POSITION_UPDATE":
+        # Updated research arrived for a stock we already own.
+        # Use the exit_trim prompt so Claude evaluates HOLD / ADD / TRIM / CLOSE.
+        memo = data.get("memo", {})
+        ticker = memo.get("ticker")
+        position = {}
+        if ticker:
+            try:
+                resp = (
+                    _get_client()
+                    .table("positions")
+                    .select("*")
+                    .eq("ticker", ticker)
+                    .eq("status", "OPEN")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                position = resp.data[0] if resp.data else {}
+            except Exception as exc:
+                logger.warning("_build_prompt: position query failed for %s — %s", ticker, exc)
+        # Inject trigger reason so prompt knows this is a research update, not a stop trigger
+        position = {**position, "_trigger_reason": "research_update", "_updated_memo": memo}
+        position_alerts = [a for a in base_ctx.get("active_alerts", []) if a.get("ticker") == ticker]
+        from backend.agents.pm_prompts.exit_trim import build_exit_trim_prompt
+        return build_exit_trim_prompt(position, position_alerts, base_ctx, memo)
 
     if category == "NEW_ENTRY":
         memo = data.get("memo", {})

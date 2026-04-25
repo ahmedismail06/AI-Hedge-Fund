@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -121,56 +122,57 @@ def _get_last_cycle() -> Optional[Dict[str, Any]]:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/status")
-def get_pm_status():
+async def get_pm_status():
     """Current PM cycle status + portfolio summary + config."""
-    config = _get_pm_config_row()
-    portfolio = _get_portfolio_summary()
-    last_cycle = _get_last_cycle()
+    def _run():
+        config = _get_pm_config_row()
+        portfolio = _get_portfolio_summary()
+        last_cycle = _get_last_cycle()
 
-    # Count today's decisions
-    today_count = 0
-    try:
-        from datetime import date
-        resp = (
-            _get_client()
-            .table("pm_decisions")
-            .select("id", count="exact")
-            .gte("created_at", date.today().isoformat())
-            .execute()
-        )
-        today_count = resp.count or 0
-    except Exception:
-        pass
+        today_count = 0
+        try:
+            from datetime import date
+            resp = (
+                _get_client()
+                .table("pm_decisions")
+                .select("id", count="exact")
+                .gte("created_at", date.today().isoformat())
+                .execute()
+            )
+            today_count = resp.count or 0
+        except Exception:
+            pass
 
-    # Active critical alerts
-    critical_count = 0
-    try:
-        resp = (
-            _get_client()
-            .table("risk_alerts")
-            .select("id", count="exact")
-            .eq("severity", "CRITICAL")
-            .eq("resolved", False)
-            .execute()
-        )
-        critical_count = resp.count or 0
-    except Exception:
-        pass
+        critical_count = 0
+        try:
+            resp = (
+                _get_client()
+                .table("risk_alerts")
+                .select("id", count="exact")
+                .eq("severity", "CRITICAL")
+                .eq("resolved", False)
+                .execute()
+            )
+            critical_count = resp.count or 0
+        except Exception:
+            pass
 
-    return {
-        "mode": config.get("mode", "autonomous"),
-        "cycle_interval_seconds": config.get("cycle_interval_seconds", 300),
-        "daily_loss_halt_triggered": config.get("daily_loss_halt_triggered", False),
-        "halted_until": config.get("halted_until"),
-        "portfolio": portfolio,
-        "last_cycle": last_cycle,
-        "decisions_today": today_count,
-        "active_critical_alerts": critical_count,
-    }
+        return {
+            "mode": config.get("mode", "autonomous"),
+            "cycle_interval_seconds": config.get("cycle_interval_seconds", 300),
+            "daily_loss_halt_triggered": config.get("daily_loss_halt_triggered", False),
+            "halted_until": config.get("halted_until"),
+            "portfolio": portfolio,
+            "last_cycle": last_cycle,
+            "decisions_today": today_count,
+            "active_critical_alerts": critical_count,
+        }
+
+    return await asyncio.to_thread(_run)
 
 
 @router.get("/decisions")
-def get_pm_decisions(
+async def get_pm_decisions(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     category: Optional[str] = Query(default=None),
@@ -178,366 +180,373 @@ def get_pm_decisions(
     execution_status: Optional[str] = Query(default=None),
 ):
     """Paginated PM decision log with optional filters."""
-    try:
-        query = (
-            _get_client()
-            .table("pm_decisions")
-            .select("*")
-            .order("timestamp", desc=True)
-            .range(offset, offset + limit - 1)
-        )
-        if category:
-            query = query.eq("category", category)
-        if ticker:
-            query = query.eq("ticker", ticker.upper())
-        if execution_status:
-            query = query.eq("execution_status", execution_status)
+    def _run():
+        try:
+            query = (
+                _get_client()
+                .table("pm_decisions")
+                .select("*")
+                .order("timestamp", desc=True)
+                .range(offset, offset + limit - 1)
+            )
+            if category:
+                query = query.eq("category", category)
+            if ticker:
+                query = query.eq("ticker", ticker.upper())
+            if execution_status:
+                query = query.eq("execution_status", execution_status)
 
-        resp = query.execute()
-        return resp.data or []
-    except Exception as exc:
-        logger.error("get_pm_decisions: Supabase error — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+            resp = query.execute()
+            return resp.data or []
+        except Exception as exc:
+            logger.error("get_pm_decisions: Supabase error — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return await asyncio.to_thread(_run)
 
 
 @router.get("/decisions/{decision_id}")
-def get_pm_decision(decision_id: str):
+async def get_pm_decision(decision_id: str):
     """Single decision with full reasoning chain."""
-    try:
-        resp = (
-            _get_client()
-            .table("pm_decisions")
-            .select("*")
-            .eq("decision_id", decision_id)
-            .limit(1)
-            .execute()
-        )
-        if not resp.data:
-            raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
-        return resp.data[0]
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("get_pm_decision: Supabase error — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _run():
+        try:
+            resp = (
+                _get_client()
+                .table("pm_decisions")
+                .select("*")
+                .eq("decision_id", decision_id)
+                .limit(1)
+                .execute()
+            )
+            if not resp.data:
+                raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
+            return resp.data[0]
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("get_pm_decision: Supabase error — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return await asyncio.to_thread(_run)
 
 
 @router.post("/override/{decision_id}")
-def override_decision(decision_id: str, body: OverrideRequest):
+async def override_decision(decision_id: str, body: OverrideRequest):
     """
     Human override for a specific PM decision.
     BLOCK: prevents execution of a SENT_TO_EXECUTION decision.
     MODIFY: updates action_details before execution.
     FORCE_EXECUTE: forces execution even if PM decided to DEFER/REJECT.
     """
-    try:
-        resp = (
-            _get_client()
-            .table("pm_decisions")
-            .select("*")
-            .eq("decision_id", decision_id)
-            .limit(1)
-            .execute()
-        )
-        if not resp.data:
-            raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
+    def _run():
+        try:
+            resp = (
+                _get_client()
+                .table("pm_decisions")
+                .select("*")
+                .eq("decision_id", decision_id)
+                .limit(1)
+                .execute()
+            )
+            if not resp.data:
+                raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
 
-        override_record = {
-            "override_type": body.override_type,
-            "reason": body.reason,
-            "original_decision_id": decision_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+            override_record = {
+                "override_type": body.override_type,
+                "reason": body.reason,
+                "original_decision_id": decision_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
 
-        update: Dict[str, Any] = {"human_override": override_record}
+            update: Dict[str, Any] = {"human_override": override_record}
 
-        if body.override_type == "BLOCK":
-            update["execution_status"] = "BLOCKED"
-        elif body.override_type == "FORCE_EXECUTE":
-            update["execution_status"] = "SENT_TO_EXECUTION"
-        elif body.override_type == "MODIFY" and body.modified_action_details:
-            update["action_details"] = body.modified_action_details
-            update["execution_status"] = "SENT_TO_EXECUTION"
-        elif body.override_type == "DEFER":
-            update["execution_status"] = "DEFERRED"
-            # Persist defer details into action_details for the audit trail
-            decision = resp.data[0]
-            existing_ad = dict(decision.get("action_details") or {})
-            existing_ad["defer_until"] = body.defer_until
-            existing_ad["defer_condition"] = body.defer_condition or body.reason
-            update["action_details"] = existing_ad
-            # Update the memo row directly so the scheduler sees the new timer
-            d_ticker = decision.get("ticker")
-            memo_id = decision.get("memo_id")
-            if d_ticker:
-                try:
-                    from backend.agents.orchestrator import _parse_defer_time
-                    new_until = _parse_defer_time(body.defer_until).isoformat()
-                    memo_q = _get_client().table("memos").update(
-                        {"status": "DEFERRED", "deferred_until": new_until}
-                    )
-                    if memo_id:
-                        memo_q = memo_q.eq("id", memo_id)
-                    else:
-                        memo_q = memo_q.eq("ticker", d_ticker).in_(
-                            "status", ["PENDING_PM_REVIEW", "DEFERRED"]
-                        )
-                    memo_q.execute()
-                    logger.info(
-                        "PM override DEFER: memo for %s set to DEFERRED until %s",
-                        d_ticker, new_until,
-                    )
-                    # Cancel any PENDING_APPROVAL position so Portfolio page doesn't
-                    # show it as approvable while the decision is deferred.
+            if body.override_type == "BLOCK":
+                update["execution_status"] = "BLOCKED"
+            elif body.override_type == "FORCE_EXECUTE":
+                update["execution_status"] = "SENT_TO_EXECUTION"
+            elif body.override_type == "MODIFY" and body.modified_action_details:
+                update["action_details"] = body.modified_action_details
+                update["execution_status"] = "SENT_TO_EXECUTION"
+            elif body.override_type == "DEFER":
+                update["execution_status"] = "DEFERRED"
+                decision = resp.data[0]
+                existing_ad = dict(decision.get("action_details") or {})
+                existing_ad["defer_until"] = body.defer_until
+                existing_ad["defer_condition"] = body.defer_condition or body.reason
+                update["action_details"] = existing_ad
+                d_ticker = decision.get("ticker")
+                memo_id = decision.get("memo_id")
+                if d_ticker:
                     try:
-                        _get_client().table("positions").update(
-                            {"status": "REJECTED"}
-                        ).eq("ticker", d_ticker).eq(
-                            "status", "PENDING_APPROVAL"
-                        ).execute()
-                        logger.info(
-                            "PM override DEFER: rejected PENDING_APPROVAL position for %s",
-                            d_ticker,
+                        from backend.agents.orchestrator import _parse_defer_time
+                        new_until = _parse_defer_time(body.defer_until).isoformat()
+                        memo_q = _get_client().table("memos").update(
+                            {"status": "DEFERRED", "deferred_until": new_until}
                         )
+                        if memo_id:
+                            memo_q = memo_q.eq("id", memo_id)
+                        else:
+                            memo_q = memo_q.eq("ticker", d_ticker).in_(
+                                "status", ["PENDING_PM_REVIEW", "DEFERRED"]
+                            )
+                        memo_q.execute()
+                        logger.info(
+                            "PM override DEFER: memo for %s set to DEFERRED until %s",
+                            d_ticker, new_until,
+                        )
+                        try:
+                            _get_client().table("positions").update(
+                                {"status": "REJECTED"}
+                            ).eq("ticker", d_ticker).eq(
+                                "status", "PENDING_APPROVAL"
+                            ).execute()
+                            logger.info(
+                                "PM override DEFER: rejected PENDING_APPROVAL position for %s",
+                                d_ticker,
+                            )
+                        except Exception as pos_exc:
+                            logger.warning(
+                                "PM override DEFER: position rejection failed for %s — %s",
+                                d_ticker, pos_exc,
+                            )
+                    except Exception as defer_exc:
+                        logger.warning(
+                            "PM override DEFER: memo update failed for %s — %s", d_ticker, defer_exc
+                        )
+
+            _get_client().table("pm_decisions").update(update).eq(
+                "decision_id", decision_id
+            ).execute()
+
+            decision = resp.data[0]
+            if body.override_type in ("FORCE_EXECUTE", "MODIFY") and decision.get("category") == "NEW_ENTRY":
+                d_ticker = decision.get("ticker")
+                if d_ticker:
+                    try:
+                        pos_resp = (
+                            _get_client()
+                            .table("positions")
+                            .select("id")
+                            .eq("ticker", d_ticker)
+                            .eq("status", "PENDING_APPROVAL")
+                            .execute()
+                        )
+                        if pos_resp.data:
+                            _get_client().table("positions").update({"status": "APPROVED"}).eq(
+                                "id", pos_resp.data[0]["id"]
+                            ).execute()
+                            logger.info(
+                                "PM override FORCE_EXECUTE: position for %s set to APPROVED", d_ticker
+                            )
                     except Exception as pos_exc:
                         logger.warning(
-                            "PM override DEFER: position rejection failed for %s — %s",
-                            d_ticker, pos_exc,
+                            "PM override: failed to approve position for %s — %s", d_ticker, pos_exc
                         )
-                except Exception as defer_exc:
-                    logger.warning(
-                        "PM override DEFER: memo update failed for %s — %s", d_ticker, defer_exc
-                    )
 
-        _get_client().table("pm_decisions").update(update).eq(
-            "decision_id", decision_id
-        ).execute()
+            logger.info(
+                "PM override: %s on decision %s — reason: %s",
+                body.override_type,
+                decision_id,
+                body.reason,
+            )
+            return {"decision_id": decision_id, "override_applied": body.override_type}
 
-        # For FORCE_EXECUTE on NEW_ENTRY decisions, also flip the positions row so
-        # the execution agent picks it up (supervised-mode human approval path).
-        decision = resp.data[0]
-        if body.override_type in ("FORCE_EXECUTE", "MODIFY") and decision.get("category") == "NEW_ENTRY":
-            d_ticker = decision.get("ticker")
-            if d_ticker:
-                try:
-                    pos_resp = (
-                        _get_client()
-                        .table("positions")
-                        .select("id")
-                        .eq("ticker", d_ticker)
-                        .eq("status", "PENDING_APPROVAL")
-                        .execute()
-                    )
-                    if pos_resp.data:
-                        _get_client().table("positions").update({"status": "APPROVED"}).eq(
-                            "id", pos_resp.data[0]["id"]
-                        ).execute()
-                        logger.info(
-                            "PM override FORCE_EXECUTE: position for %s set to APPROVED", d_ticker
-                        )
-                except Exception as pos_exc:
-                    logger.warning(
-                        "PM override: failed to approve position for %s — %s", d_ticker, pos_exc
-                    )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("override_decision: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
-        logger.info(
-            "PM override: %s on decision %s — reason: %s",
-            body.override_type,
-            decision_id,
-            body.reason,
-        )
-        return {"decision_id": decision_id, "override_applied": body.override_type}
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("override_decision: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    return await asyncio.to_thread(_run)
 
 
 @router.post("/override/close/{ticker}")
-def force_close_position(ticker: str, reason: str = "Human override — forced close"):
+async def force_close_position(ticker: str, reason: str = "Human override — forced close"):
     """Force immediate close of a position regardless of PM decision state."""
-    ticker = ticker.upper()
-    try:
-        # Find the OPEN position
-        resp = (
-            _get_client()
-            .table("positions")
-            .select("id,ticker,share_count,current_price")
-            .eq("ticker", ticker)
-            .eq("status", "OPEN")
-            .limit(1)
-            .execute()
-        )
-        if not resp.data:
-            raise HTTPException(
-                status_code=404, detail=f"No OPEN position found for {ticker}"
+    def _run():
+        t = ticker.upper()
+        try:
+            resp = (
+                _get_client()
+                .table("positions")
+                .select("id,ticker,share_count,current_price")
+                .eq("ticker", t)
+                .eq("status", "OPEN")
+                .limit(1)
+                .execute()
             )
+            if not resp.data:
+                raise HTTPException(
+                    status_code=404, detail=f"No OPEN position found for {t}"
+                )
 
-        position = resp.data[0]
+            position = resp.data[0]
 
-        # Mark for execution as a CLOSE
-        _get_client().table("positions").update({
-            "exit_action": "CLOSE",
-            "status": "APPROVED",
-        }).eq("id", position["id"]).execute()
+            _get_client().table("positions").update({
+                "exit_action": "CLOSE",
+                "status": "APPROVED",
+            }).eq("id", position["id"]).execute()
 
-        # Log this as a PM decision override
-        from backend.agents.orchestrator import (
-            _next_decision_id,
-            _build_decision_record,
-            _log_pm_decision,
-            _get_pm_config,
-        )
-        from backend.agents.pm_prompts.base_context import build_base_context
+            from backend.agents.orchestrator import (
+                _next_decision_id,
+                _build_decision_record,
+                _log_pm_decision,
+            )
+            from backend.agents.pm_prompts.base_context import build_base_context
+            from backend.agents.orchestrator import _snapshot
 
-        base_ctx = build_base_context(_get_client())
-        from backend.agents.orchestrator import _snapshot
+            base_ctx = build_base_context(_get_client())
+            decision_id = _next_decision_id()
+            record = _build_decision_record(
+                decision_id=decision_id,
+                category="EXIT_TRIM",
+                ticker=t,
+                decision="CLOSE",
+                action_details={"close_reason": reason, "human_initiated": True},
+                reasoning=f"Human-initiated forced close: {reason}",
+                risk_assessment="Human override — standard risk assessment bypassed.",
+                confidence=1.0,
+                context_snapshot=_snapshot(base_ctx),
+                hard_blocks_checked={},
+                execution_status="SENT_TO_EXECUTION",
+            )
+            record["human_override"] = {
+                "override_type": "FORCE_EXECUTE",
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            _log_pm_decision(record)
 
-        decision_id = _next_decision_id()
-        record = _build_decision_record(
-            decision_id=decision_id,
-            category="EXIT_TRIM",
-            ticker=ticker,
-            decision="CLOSE",
-            action_details={"close_reason": reason, "human_initiated": True},
-            reasoning=f"Human-initiated forced close: {reason}",
-            risk_assessment="Human override — standard risk assessment bypassed.",
-            confidence=1.0,
-            context_snapshot=_snapshot(base_ctx),
-            hard_blocks_checked={},
-            execution_status="SENT_TO_EXECUTION",
-        )
-        record["human_override"] = {
-            "override_type": "FORCE_EXECUTE",
-            "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        _log_pm_decision(record)
+            logger.info("PM: human forced close for %s — %s", t, reason)
+            return {"ticker": t, "action": "CLOSE", "decision_id": decision_id}
 
-        logger.info("PM: human forced close for %s — %s", ticker, reason)
-        return {"ticker": ticker, "action": "CLOSE", "decision_id": decision_id}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("force_close_position: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("force_close_position: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    return await asyncio.to_thread(_run)
 
 
 @router.post("/override/halt")
-def halt_pm(reason: str = "Human override — halt new entries"):
+async def halt_pm(reason: str = "Human override — halt new entries"):
     """Halt all new position entries. PM continues to monitor and evaluate exits."""
-    try:
-        _get_client().table("pm_config").update({
-            "daily_loss_halt_triggered": True,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", 1).execute()
+    def _run():
+        try:
+            _get_client().table("pm_config").update({
+                "daily_loss_halt_triggered": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", 1).execute()
+            logger.warning("PM: halted by human — %s", reason)
+            return {"status": "halted", "reason": reason}
+        except Exception as exc:
+            logger.error("halt_pm: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
-        logger.warning("PM: halted by human — %s", reason)
-        return {"status": "halted", "reason": reason}
-    except Exception as exc:
-        logger.error("halt_pm: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    return await asyncio.to_thread(_run)
 
 
 @router.post("/override/resume")
-def resume_pm(reason: str = "Human override — resume normal operation"):
+async def resume_pm(reason: str = "Human override — resume normal operation"):
     """Resume normal PM operation after a halt."""
-    try:
-        _get_client().table("pm_config").update({
-            "daily_loss_halt_triggered": False,
-            "halted_until": None,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", 1).execute()
+    def _run():
+        try:
+            _get_client().table("pm_config").update({
+                "daily_loss_halt_triggered": False,
+                "halted_until": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", 1).execute()
+            logger.info("PM: resumed by human — %s", reason)
+            return {"status": "resumed", "reason": reason}
+        except Exception as exc:
+            logger.error("resume_pm: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
-        logger.info("PM: resumed by human — %s", reason)
-        return {"status": "resumed", "reason": reason}
-    except Exception as exc:
-        logger.error("resume_pm: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    return await asyncio.to_thread(_run)
 
 
 @router.get("/calibration")
-def get_calibration():
+async def get_calibration():
     """
     Confidence calibration report: PM confidence scores vs actual outcomes.
     Joins pm_decisions with pm_calibration where outcomes are available.
     """
-    try:
-        resp = (
-            _get_client()
-            .table("pm_calibration")
-            .select(
-                "decision_id,confidence_at_entry,confidence_at_exit,"
-                "holding_period_days,return_pct,was_correct,created_at"
+    def _run():
+        try:
+            resp = (
+                _get_client()
+                .table("pm_calibration")
+                .select(
+                    "decision_id,confidence_at_entry,confidence_at_exit,"
+                    "holding_period_days,return_pct,was_correct,created_at"
+                )
+                .order("created_at", desc=True)
+                .limit(200)
+                .execute()
             )
-            .order("created_at", desc=True)
-            .limit(200)
-            .execute()
-        )
-        rows = resp.data or []
+            rows = resp.data or []
 
-        if not rows:
-            return {"message": "No calibration data yet — tracks after positions close", "rows": []}
+            if not rows:
+                return {"message": "No calibration data yet — tracks after positions close", "rows": []}
 
-        # Summary stats
-        correct = [r for r in rows if r.get("was_correct") is True]
-        high_confidence = [r for r in rows if (r.get("confidence_at_entry") or 0) >= 0.7]
-        high_conf_correct = [r for r in high_confidence if r.get("was_correct") is True]
+            correct = [r for r in rows if r.get("was_correct") is True]
+            high_confidence = [r for r in rows if (r.get("confidence_at_entry") or 0) >= 0.7]
+            high_conf_correct = [r for r in high_confidence if r.get("was_correct") is True]
 
-        summary = {
-            "total_decisions": len(rows),
-            "correct_pct": round(len(correct) / len(rows), 4) if rows else None,
-            "high_confidence_correct_pct": (
-                round(len(high_conf_correct) / len(high_confidence), 4)
-                if high_confidence else None
-            ),
-            "avg_return_pct": (
-                round(
-                    sum(r.get("return_pct") or 0 for r in rows) / len(rows), 4
-                ) if rows else None
-            ),
-            "avg_holding_days": (
-                round(
-                    sum(r.get("holding_period_days") or 0 for r in rows) / len(rows), 1
-                ) if rows else None
-            ),
-        }
+            summary = {
+                "total_decisions": len(rows),
+                "correct_pct": round(len(correct) / len(rows), 4) if rows else None,
+                "high_confidence_correct_pct": (
+                    round(len(high_conf_correct) / len(high_confidence), 4)
+                    if high_confidence else None
+                ),
+                "avg_return_pct": (
+                    round(sum(r.get("return_pct") or 0 for r in rows) / len(rows), 4)
+                    if rows else None
+                ),
+                "avg_holding_days": (
+                    round(sum(r.get("holding_period_days") or 0 for r in rows) / len(rows), 1)
+                    if rows else None
+                ),
+            }
 
-        return {"summary": summary, "rows": rows}
+            return {"summary": summary, "rows": rows}
 
-    except Exception as exc:
-        logger.error("get_calibration: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        except Exception as exc:
+            logger.error("get_calibration: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return await asyncio.to_thread(_run)
 
 
 @router.post("/cycle/run")
-def trigger_pm_cycle(
+async def trigger_pm_cycle(
     portfolio_value: Optional[float] = Query(default=None, ge=0),
 ):
     """Manually trigger one PM decision cycle. portfolio_value resolved from IBKR if not provided."""
-    from backend.agents.orchestrator import run_pm_cycle
-    if portfolio_value is None or portfolio_value <= 0:
-        from backend.broker.ibkr import get_portfolio_value as _get_pv
-        portfolio_value = _get_pv()
-    try:
-        result = run_pm_cycle(cycle_type="HUMAN_OVERRIDE", portfolio_value=portfolio_value)
-        return result
-    except Exception as exc:
-        logger.error("trigger_pm_cycle: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _run(pv):
+        from backend.agents.orchestrator import run_pm_cycle
+        if pv is None or pv <= 0:
+            from backend.broker.ibkr import get_portfolio_value as _get_pv
+            pv = _get_pv()
+        try:
+            return run_pm_cycle(cycle_type="HUMAN_OVERRIDE", portfolio_value=pv)
+        except Exception as exc:
+            logger.error("trigger_pm_cycle: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return await asyncio.to_thread(_run, portfolio_value)
 
 
 @router.get("/config")
-def get_pm_config():
+async def get_pm_config():
     """Return current PM configuration."""
-    return _get_pm_config_row()
+    return await asyncio.to_thread(_get_pm_config_row)
 
 
 @router.post("/config")
-def update_pm_config(body: ConfigUpdateRequest):
+async def update_pm_config(body: ConfigUpdateRequest):
     """Update PM configuration (mode or cycle interval)."""
     update: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
 
@@ -554,15 +563,18 @@ def update_pm_config(body: ConfigUpdateRequest):
     if len(update) == 1:
         raise HTTPException(status_code=400, detail="No valid fields provided to update")
 
-    try:
-        resp = (
-            _get_client()
-            .table("pm_config")
-            .update(update)
-            .eq("id", 1)
-            .execute()
-        )
-        return resp.data[0] if resp.data else _get_pm_config_row()
-    except Exception as exc:
-        logger.error("update_pm_config: failed — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _run():
+        try:
+            resp = (
+                _get_client()
+                .table("pm_config")
+                .update(update)
+                .eq("id", 1)
+                .execute()
+            )
+            return resp.data[0] if resp.data else _get_pm_config_row()
+        except Exception as exc:
+            logger.error("update_pm_config: failed — %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return await asyncio.to_thread(_run)
