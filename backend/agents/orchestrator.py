@@ -1449,7 +1449,7 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 _get_client()
                 .table("pm_decisions")
                 .select("action_details")
-                .eq("category", "CRISIS")
+                .in_("category", ["CRISIS", "EXIT_TRIM"])
                 .order("timestamp", desc=True)
                 .limit(20)
                 .execute()
@@ -1461,16 +1461,50 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         except Exception:
             pass
 
+        open_tickers_set = {p["ticker"] for p in base_ctx.get("positions", []) if p.get("status") == "OPEN"}
         for alert in alerts:
             if alert.get("id") not in processed_ids:
-                priority = 0 if alert.get("severity") == "CRITICAL" else 1
-                items.append({"category": "CRISIS", "data": {"alert": alert}, "priority": priority})
+                severity = alert.get("severity", "")
+                alert_ticker = alert.get("ticker")
+                if severity == "WARN" and alert_ticker and alert_ticker in open_tickers_set:
+                    # WARN on a held position → EXIT_TRIM review (not a full crisis)
+                    already_queued = any(
+                        i.get("category") == "EXIT_TRIM"
+                        and i.get("data", {}).get("position", {}).get("ticker") == alert_ticker
+                        for i in items
+                    )
+                    if not already_queued:
+                        position = next(
+                            (p for p in base_ctx.get("positions", []) if p.get("ticker") == alert_ticker),
+                            {},
+                        )
+                        items.append({
+                            "category": "EXIT_TRIM",
+                            "data": {"position": position, "alert": alert, "trigger": "risk_alert_warn"},
+                            "priority": 1,
+                        })
+                else:
+                    priority = 0 if severity == "CRITICAL" else 1
+                    items.append({"category": "CRISIS", "data": {"alert": alert}, "priority": priority})
     except Exception as exc:
         logger.warning("_scan_actionable_items: alerts scan failed — %s", exc)
 
     # 3. Positions approaching stops (within 3%)
+    # Deduplicate against any item the alerts scanner already raised for this ticker —
+    # WARN alerts produce EXIT_TRIM items (ticker under data.position.ticker) while
+    # BREACH/CRITICAL alerts produce CRISIS items (ticker under data.alert.ticker).
+    # Both must suppress the proximity scan to avoid Claude evaluating the same ticker twice.
+    _alerted_tickers: set = set()
+    for _i in items:
+        _d = _i.get("data", {})
+        _t = _d.get("position", {}).get("ticker") or _d.get("alert", {}).get("ticker")
+        if _t and _i.get("category") in ("EXIT_TRIM", "CRISIS"):
+            _alerted_tickers.add(_t)
     today_str = date.today().isoformat()
     for p in base_ctx.get("positions", []):
+        ticker_p = p.get("ticker")
+        if ticker_p and ticker_p in _alerted_tickers:
+            continue  # already queued from alert scanner (WARN→EXIT_TRIM or BREACH/CRITICAL→CRISIS) — skip duplicate
         current = float(p.get("current_price") or 0)
         stop1 = float(p.get("stop_tier1") or 0)
         if current > 0 and stop1 > 0:
@@ -1976,6 +2010,18 @@ def run_pm_cycle(
 
                 # Log decision FIRST, then it's already persisted regardless of routing outcome
                 _log_pm_decision(record_template)
+
+                # Close the loop: mark the source alert resolved so it cannot be re-queued
+                source_alert_id = data.get("alert", {}).get("id") if category in ("CRISIS", "EXIT_TRIM") else None
+                if source_alert_id:
+                    try:
+                        _get_client().table("risk_alerts").update({
+                            "resolved": True,
+                            "resolved_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", source_alert_id).execute()
+                        logger.debug("PM: resolved alert %s after %s decision", source_alert_id, category)
+                    except Exception as _alert_exc:
+                        logger.warning("PM: failed to resolve alert %s — %s", source_alert_id, _alert_exc)
 
                 # Slack notification for every PM decision
                 notify_event("PM_DECISION", {

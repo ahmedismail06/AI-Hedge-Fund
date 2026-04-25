@@ -165,6 +165,7 @@ def build_exit_order(
     position_row: dict,
     exit_type: Literal["EXIT_CLOSE", "EXIT_TRIM"],
     trim_pct: Optional[float] = None,
+    outside_rth: bool = False,
 ) -> tuple:
     """
     Build a (OrderRequest, Contract, LimitOrder) sell triple from an OPEN positions row.
@@ -173,8 +174,11 @@ def build_exit_order(
         position_row: OPEN positions row with at minimum: id, ticker, direction,
                       share_count, current_price (or entry_price as fallback).
         exit_type:    EXIT_CLOSE — sell all shares; EXIT_TRIM — sell trim_pct% of shares.
-        trim_pct:     Required when exit_type=EXIT_TRIM. Percentage of position to sell
-                      (e.g. 50.0 = sell half). Sourced from positions.exit_trim_pct.
+        trim_pct:     Required when exit_type=EXIT_TRIM. Accepts either a whole-number
+                      percentage (35.0 = 35%) or a decimal fraction (0.35 = 35%) —
+                      both are normalized internally. Sourced from positions.exit_trim_pct.
+        outside_rth:  If True, sets outsideRth=True on the IBKR order so it routes
+                      during pre-market / extended-hours sessions.
 
     Returns:
         Tuple of (OrderRequest, ib_insync.Stock, ib_insync.LimitOrder).
@@ -200,7 +204,10 @@ def build_exit_order(
     if exit_type == "EXIT_TRIM":
         if not trim_pct or trim_pct <= 0:
             raise OrderBuildError(f"EXIT_TRIM requires trim_pct > 0, got {trim_pct!r}")
-        sell_shares = max(1, int(total_shares * trim_pct / 100))
+        # Normalize: accept either decimal fraction (0.35) or whole-number pct (35.0).
+        # Claude may return either form; both must produce "sell 35% of the position."
+        pct_normalized = trim_pct * 100.0 if trim_pct <= 1.0 else trim_pct
+        sell_shares = max(1, int(total_shares * pct_normalized / 100))
     else:
         sell_shares = total_shares
 
@@ -235,5 +242,7 @@ def build_exit_order(
     limit_price_for_order = sell_limit if order_type == "LIMIT" else vwap_limit
     order = LimitOrder("SELL", sell_shares, limit_price_for_order)
     order.tif = "DAY"
+    if outside_rth:
+        order.outsideRth = True
 
     return (req, contract, order)
