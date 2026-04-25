@@ -12,6 +12,9 @@ earnings events for a ticker with:
 
 Data sources:
   - Earnings history (dates, reported EPS, consensus EPS): yfinance earnings_history
+    Both fields come from the same adjusted-EPS basis (press-release figures), so
+    reported and consensus are directly comparable. Implausible surprises (>±150%)
+    are nulled out to protect downstream signal computation.
   - Price data: Polygon /v2/aggs daily OHLCV (adjusted)
 """
 
@@ -30,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Days of price history to fetch per ticker (covers ~2 years of quarters + buffer)
 _PRICE_LOOKBACK_DAYS = 730
+# Sanity cap: surprises beyond ±150% almost certainly indicate a stale or wrong-basis
+# consensus estimate from yfinance — null them out rather than storing garbage.
+_MAX_PLAUSIBLE_SURPRISE = 1.5
 # Trading days to skip before earnings close is "settled" (report after close → next day)
 _DAYS_AFTER_SHORT = 1
 _DAYS_AFTER_LONG = 5
@@ -119,31 +125,34 @@ def get_earnings_reactions(
         return []
 
     # ── Pull earnings history from yfinance ──────────────────────────────────
+    # yfinance earnings_history returns reported + estimate on a consistent
+    # adjusted basis. Implausible surprises (>±150%) are nulled later.
     raw_events: List[Dict[str, Any]] = []
     try:
         t = yf.Ticker(ticker)
-        eh = t.earnings_history
-        if eh is not None and not eh.empty:
-            for _, row in eh.iterrows():
-                idx = row.name  # Timestamp index
+        # earnings_history is a DataFrame indexed by date
+        df = t.earnings_history
+        if df is not None and not df.empty:
+            for dt_idx, row in df.iterrows():
+                # dt_idx is typically a Timestamp
+                event_date = dt_idx.date() if hasattr(dt_idx, "date") else dt_idx
+                reported = row.get("eps_actual")
+                consensus = row.get("eps_estimate")
+                
                 try:
-                    event_date = idx.date() if hasattr(idx, "date") else date.fromisoformat(str(idx)[:10])
-                except (AttributeError, ValueError):
-                    continue
-                reported = row.get("epsActual") if hasattr(row, "get") else row["epsActual"] if "epsActual" in row else None
-                consensus = row.get("epsEstimate") if hasattr(row, "get") else row["epsEstimate"] if "epsEstimate" in row else None
-                try:
-                    reported = float(reported) if reported is not None else None
-                    consensus = float(consensus) if consensus is not None else None
+                    reported_val = float(reported) if reported is not None and reported == reported else None
+                    consensus_val = float(consensus) if consensus is not None and consensus == consensus else None
                 except (TypeError, ValueError):
-                    reported = consensus = None
-                raw_events.append({
-                    "date": event_date,
-                    "reported_eps": reported,
-                    "consensus_eps": consensus,
-                })
+                    reported_val = consensus_val = None
+                
+                if reported_val is not None:
+                    raw_events.append({
+                        "date": event_date,
+                        "reported_eps": reported_val,
+                        "consensus_eps": consensus_val,
+                    })
     except Exception as exc:
-        logger.warning("earnings_reactions: yfinance earnings_history failed for %s — %s", ticker, exc)
+        logger.warning("earnings_reactions: yfinance fetch failed for %s — %s", ticker, exc)
 
     if not raw_events:
         return []
@@ -178,7 +187,14 @@ def get_earnings_reactions(
         # EPS surprise
         surprise_pct: Optional[float] = None
         if reported is not None and consensus is not None and consensus != 0:
-            surprise_pct = round((reported - consensus) / abs(consensus), 4)
+            raw_surprise = (reported - consensus) / abs(consensus)
+            if abs(raw_surprise) <= _MAX_PLAUSIBLE_SURPRISE:
+                surprise_pct = round(raw_surprise, 4)
+            else:
+                logger.warning(
+                    "earnings_reactions: %s implausible surprise %.0f%% on %s — nulling out",
+                    ticker, raw_surprise * 100, event_date,
+                )
 
         # Price reactions
         prev_close = _prev_trading_close(closes, event_date)
