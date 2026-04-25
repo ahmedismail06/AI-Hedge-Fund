@@ -16,6 +16,8 @@ from supabase import create_client, Client
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
+from backend.db.utils import get_supabase_client
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -24,20 +26,9 @@ _embed_model: Optional["SentenceTransformer"] = None
 
 _EMBED_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
-# Credentials cached at module level — avoids repeated os.getenv calls
-# but never caches the client itself (stale httpx connections on macOS cause EAGAIN Errno 35)
-_SUPABASE_URL: Optional[str] = None
-_SUPABASE_KEY: Optional[str] = None
-
 
 def _get_client() -> Client:
-    global _SUPABASE_URL, _SUPABASE_KEY
-    if _SUPABASE_URL is None:
-        _SUPABASE_URL = os.getenv("SUPABASE_URL")
-        _SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-    if not _SUPABASE_URL or not _SUPABASE_KEY:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
-    return create_client(_SUPABASE_URL, _SUPABASE_KEY)
+    return get_supabase_client()
 
 
 def store_memo(ticker: str, memo_dict: dict) -> str:

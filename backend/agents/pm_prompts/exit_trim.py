@@ -161,11 +161,8 @@ def build_exit_trim_prompt(
     dcf_context: dict = {}
     if ticker:
         try:
-            import os
-            import supabase as _sb
-            _client = _sb.create_client(
-                os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
-            )
+            from backend.db.utils import get_supabase_client
+            _client = get_supabase_client()
             fm_resp = (
                 _client.table("financial_models")
                 .select("dcf_bull_target,dcf_base_target,dcf_bear_target,wacc,quality_grade")
