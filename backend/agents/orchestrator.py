@@ -1730,21 +1730,26 @@ def run_pm_cycle(
         pending_memo_count = _count_pending_memos()
         current_fp = _build_cycle_fingerprint(base_ctx, pending_memo_count)
 
-        # Change 2: skip if state is identical to last cycle within 30 minutes
+        # Change 2: skip if state is identical to last cycle within 30 minutes (market) or 12 hours (off-market)
         last_fp = _last_cycle_state.get("fingerprint")
         last_ts = _last_cycle_state.get("timestamp")
+        
+        # Adaptive TTL: 30m during market hours, 12h off-market
+        current_ttl = _FINGERPRINT_TTL_SECONDS if _is_market_hours() else 43200
+        
         if (
             last_fp is not None
             and last_ts is not None
             and _fingerprints_match(current_fp, last_fp)
-            and (datetime.now(timezone.utc) - last_ts).total_seconds() < _FINGERPRINT_TTL_SECONDS
+            and (datetime.now(timezone.utc) - last_ts).total_seconds() < current_ttl
         ):
             logger.debug(
-                "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within 30 min",
+                "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within %d sec",
                 current_fp["position_count"],
                 current_fp["pending_memo_count"],
                 current_fp["active_alert_count"],
                 current_fp["regime"],
+                current_ttl
             )
             return {
                 "cycle_id": cycle_id,
