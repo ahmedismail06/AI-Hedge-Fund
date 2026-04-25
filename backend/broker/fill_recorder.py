@@ -323,15 +323,18 @@ def _update_order_aggregate(
             update_data["status"],
         )
 
-        # Close the position loop once the order is fully filled.
+        # Route fill to entry opener or exit handler based on order_side.
         if is_filled and avg_price is not None:
-            _close_position_loop(order_row["position_id"], avg_price)
+            if order_row.get("order_side") == "SELL":
+                _handle_exit_fill(order_row["position_id"], avg_price, total_qty, order_row, client)
+            else:
+                _close_position_loop(order_row["position_id"], avg_price)
             _sync_cash_and_pct(client)
             notify_event("ORDER_FILLED", {
                 "ticker": order_row.get("ticker", "—"),
                 "fill_qty": total_qty,
                 "fill_price": round(avg_price, 4),
-                "fill_type": "FULL",
+                "fill_type": "FULL" if order_row.get("order_side") != "SELL" else order_row.get("exit_type", "EXIT"),
                 "slippage_bps": round(
                     (avg_price - float(order_row.get("limit_price") or avg_price))
                     / float(order_row.get("limit_price") or avg_price) * 10000, 2
@@ -381,6 +384,136 @@ def _close_position_loop(position_id: str, avg_fill_price: float) -> None:
             position_id,
             exc,
         )
+
+
+def _handle_exit_fill(
+    position_id: str,
+    exit_price: float,
+    filled_qty: float,
+    order_row: dict,
+    client,
+) -> None:
+    """
+    Handle a fully-filled SELL order — either close the position or reduce its size.
+
+    EXIT_CLOSE: sets status=CLOSED, records final P&L, writes pm_calibration.
+    EXIT_TRIM:  reduces share_count and dollar_size; position remains OPEN.
+
+    Never raises — errors are logged to stderr.
+    """
+    try:
+        pos_result = client.table("positions").select("*").eq("id", position_id).execute()
+        if not pos_result.data:
+            logger.warning("_handle_exit_fill: position %s not found", position_id)
+            return
+
+        pos = pos_result.data[0]
+        entry_price = float(pos.get("entry_price") or 0)
+        direction = pos.get("direction", "LONG")
+        direction_mult = 1.0 if direction == "LONG" else -1.0
+        exit_type = order_row.get("exit_type", "EXIT_CLOSE")
+
+        pnl_per_share = (exit_price - entry_price) * direction_mult
+        realized_pnl = round(filled_qty * pnl_per_share, 2)
+        pnl_pct = round(pnl_per_share / entry_price * 100, 4) if entry_price > 0 else 0.0
+
+        if exit_type == "EXIT_CLOSE":
+            client.table("positions").update(
+                {
+                    "status": "CLOSED",
+                    "current_price": round(exit_price, 4),
+                    "pnl": realized_pnl,
+                    "pnl_pct": pnl_pct,
+                    "closed_at": datetime.utcnow().isoformat(),
+                }
+            ).eq("id", position_id).execute()
+            logger.info(
+                "Position %s CLOSED at $%.4f — P&L: $%.2f (%.2f%%)",
+                position_id, exit_price, realized_pnl, pnl_pct,
+            )
+            _write_pm_calibration(pos, exit_price, pnl_pct, client)
+
+        else:  # EXIT_TRIM
+            remaining_shares = max(0.0, float(pos.get("share_count") or 0) - filled_qty)
+            new_dollar_size = round(remaining_shares * exit_price, 2)
+            client.table("positions").update(
+                {
+                    "share_count": remaining_shares,
+                    "dollar_size": new_dollar_size,
+                    "current_price": round(exit_price, 4),
+                    "pnl": round((pos.get("pnl") or 0) + realized_pnl, 2),
+                }
+            ).eq("id", position_id).execute()
+            logger.info(
+                "Position %s TRIMMED: sold %.0f shares at $%.4f — %.0f shares remain",
+                position_id, filled_qty, exit_price, remaining_shares,
+            )
+
+    except Exception as exc:
+        logger.error("_handle_exit_fill failed for position %s: %s", position_id, exc)
+
+
+def _write_pm_calibration(pos: dict, exit_price: float, pnl_pct: float, client) -> None:
+    """
+    Insert one row into pm_calibration for every closed position.
+
+    Attempts to link to the originating NEW_ENTRY pm_decisions row. If none
+    exists (manual entry, pre-PM trade, or supervised approval without a
+    decision row), writes the row with decision_id=None so the outcome is
+    still captured for overall win-rate tracking.
+
+    Never raises — failures are logged and swallowed.
+    """
+    try:
+        ticker = pos.get("ticker")
+
+        decision_id = None
+        confidence_at_entry = None
+
+        dec_result = (
+            client.table("pm_decisions")
+            .select("decision_id,confidence")
+            .eq("ticker", ticker)
+            .eq("category", "NEW_ENTRY")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if dec_result.data:
+            dec = dec_result.data[0]
+            decision_id = dec["decision_id"]
+            confidence_at_entry = dec.get("confidence")
+        else:
+            logger.debug("pm_calibration: no NEW_ENTRY decision found for %s — writing unlinked row", ticker)
+
+        opened_at = pos.get("opened_at")
+        holding_days = None
+        if opened_at:
+            try:
+                opened_dt = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                holding_days = (datetime.utcnow() - opened_dt.replace(tzinfo=None)).days
+            except Exception:
+                pass
+
+        client.table("pm_calibration").insert(
+            {
+                "ticker": ticker,
+                "decision_id": decision_id,
+                "confidence_at_entry": confidence_at_entry,
+                "confidence_at_exit": None,
+                "holding_period_days": holding_days,
+                "return_pct": round(pnl_pct, 4),
+                "was_correct": pnl_pct > 0,
+            }
+        ).execute()
+
+        logger.info(
+            "pm_calibration written — ticker=%s decision=%s return=%.2f%% correct=%s",
+            ticker, decision_id, pnl_pct, pnl_pct > 0,
+        )
+
+    except Exception as exc:
+        logger.error("_write_pm_calibration failed for %s: %s", pos.get("ticker"), exc)
 
 
 def _sync_cash_and_pct(client) -> None:

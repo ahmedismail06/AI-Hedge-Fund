@@ -283,6 +283,10 @@ create table if not exists orders (
     cancelled_at        timestamptz,
     timeout_at          timestamptz,
     error_message       text,
+    -- order_side: BUY for new entries, SELL for exit / trim orders
+    order_side          text not null default 'BUY' check (order_side in ('BUY', 'SELL')),
+    -- exit_type: null for entry orders; EXIT_CLOSE or EXIT_TRIM for sell orders
+    exit_type           text check (exit_type in ('EXIT_CLOSE', 'EXIT_TRIM')),
     created_at          timestamptz not null default now()
 );
 

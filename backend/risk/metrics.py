@@ -66,10 +66,16 @@ def compute_nightly_metrics(supabase_client) -> Optional[PortfolioMetrics]:
 
     # ── 4. Compute exposure metrics ───────────────────────────────────────────
     from backend.broker.ibkr import get_portfolio_value as _get_portfolio_value
-    _pv = _get_portfolio_value()
-    exposure = get_current_exposure(open_positions, portfolio_value=_pv) if open_positions else {}
-    gross_exp = exposure.get("gross_exposure_pct")
-    net_exp = exposure.get("net_exposure_pct")
+    gross_exp = None
+    net_exp = None
+    try:
+        _pv = _get_portfolio_value()
+        if open_positions and _pv and _pv > 0:
+            exposure = get_current_exposure(open_positions, portfolio_value=_pv)
+            gross_exp = exposure.get("gross_exposure_pct")
+            net_exp = exposure.get("net_exposure_pct")
+    except Exception as _pv_exc:
+        logger.warning("get_portfolio_value failed — exposure will be None: %s", _pv_exc)
 
     if len(returns) < _MIN_POSITIONS:
         logger.warning(

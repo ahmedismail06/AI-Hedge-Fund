@@ -134,6 +134,101 @@ def run_fill_recon() -> int:
         return 0
 
 
+# ── Exit cycle ───────────────────────────────────────────────────────────────
+
+
+def _run_exit_cycle(client) -> dict:
+    """
+    Poll OPEN positions with exit_action set and place sell orders.
+
+    Called before new-entry polling so capital is freed before new positions
+    are sized. Each position's exit_action is cleared immediately after the
+    order is submitted to prevent duplicate orders on the next cycle. If order
+    placement fails, exit_action is restored so the next cycle can retry.
+
+    Returns:
+        dict with 'exits_placed', 'exits_error', and 'exit_order_ids'.
+    """
+    result: dict = {"exits_placed": 0, "exits_error": 0, "exit_order_ids": []}
+
+    try:
+        exit_result = (
+            client.table("positions")
+            .select("*")
+            .in_("exit_action", ["CLOSE", "TRIM"])
+            .eq("status", "OPEN")
+            .execute()
+        )
+        positions_to_exit = exit_result.data or []
+    except Exception as exc:
+        logger.error("_run_exit_cycle: DB query failed: %s", exc)
+        return result
+
+    for pos in positions_to_exit:
+        exit_action = pos.get("exit_action")
+        trim_pct = float(pos.get("exit_trim_pct") or 0)
+        exit_type = "EXIT_CLOSE" if exit_action == "CLOSE" else "EXIT_TRIM"
+
+        # Skip if an active sell order already exists for this position.
+        try:
+            existing = (
+                client.table("orders")
+                .select("id")
+                .eq("position_id", pos["id"])
+                .eq("order_side", "SELL")
+                .in_("status", ["SUBMITTED", "PARTIAL"])
+                .execute()
+            )
+            if existing.data:
+                logger.debug("Position %s already has an active exit order — skipping", pos["id"])
+                continue
+        except Exception as exc:
+            logger.warning("_run_exit_cycle: order check failed for %s: %s", pos.get("ticker"), exc)
+            continue
+
+        # Clear exit_action now — restored below if order placement fails.
+        try:
+            client.table("positions").update({"exit_action": None}).eq("id", pos["id"]).execute()
+        except Exception as exc:
+            logger.warning("Could not clear exit_action for %s: %s", pos.get("ticker"), exc)
+
+        try:
+            req, contract, ib_order = _order_builder.build_exit_order(pos, exit_type, trim_pct)
+            order_status = _order_manager.place_order(req, contract, ib_order)
+            result["exit_order_ids"].append(order_status.order_id)
+            result["exits_placed"] += 1
+            logger.info(
+                "Exit order placed: %s %s | exit_type=%s qty=%d order_id=%s",
+                pos.get("ticker"), pos["id"], exit_type, req.requested_qty, order_status.order_id,
+            )
+            notify_event("EXIT_ORDER_PLACED", {
+                "ticker": pos.get("ticker", "—"),
+                "exit_type": exit_type,
+                "qty": req.requested_qty,
+                "limit_price": req.limit_price,
+            })
+
+        except IBKRConnectionError as exc:
+            # Restore exit_action so it survives restart.
+            try:
+                client.table("positions").update({"exit_action": exit_action}).eq("id", pos["id"]).execute()
+            except Exception:
+                pass
+            logger.error("IBKR down during exit for %s: %s", pos.get("ticker"), exc)
+            result["exits_error"] += 1
+            break  # IBKR is gone; don't try more exits this cycle
+
+        except Exception as exc:
+            try:
+                client.table("positions").update({"exit_action": exit_action}).eq("id", pos["id"]).execute()
+            except Exception:
+                pass
+            logger.error("Exit order failed for %s: %s", pos.get("ticker"), exc)
+            result["exits_error"] += 1
+
+    return result
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 

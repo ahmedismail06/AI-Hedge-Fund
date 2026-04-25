@@ -282,10 +282,16 @@ def _queue_top_n_for_research(
     
     for ticker, row in best.items():
         try:
+            # Skip tickers with a DEFERRED memo — the AI PM is waiting on them
+            deferred_result = client.table("memos").select("id").eq("ticker", ticker).eq("status", "DEFERRED").limit(1).execute()
+            if deferred_result.data:
+                logger.debug("_queue_top_n_for_research: skipping %s — memo is DEFERRED", ticker)
+                continue
+
             # Check for recent memo
             memo_result = client.table("memos").select("id").eq("ticker", ticker).gte("date", cutoff).limit(1).execute()
             has_recent_memo = bool(memo_result.data)
-            
+
             # Include if: no recent memo OR has material event
             if not has_recent_memo or row.get("material_event", False):
                 filtered_best[ticker] = row

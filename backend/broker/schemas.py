@@ -37,6 +37,14 @@ class OrderRequest(BaseModel):
     timeout_minutes: int = Field(
         description="Order timeout: 10 (LIMIT), 30 (VWAP_30), 390 (VWAP_DAY)."
     )
+    order_side: Literal["BUY", "SELL"] = Field(
+        default="BUY",
+        description="BUY for new entries, SELL for exit/trim orders.",
+    )
+    exit_type: Optional[Literal["EXIT_CLOSE", "EXIT_TRIM"]] = Field(
+        default=None,
+        description="Null for entry orders. EXIT_CLOSE = full position close, EXIT_TRIM = partial sell.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +118,8 @@ class ExecutionSummary(BaseModel):
 
     cycle_at: str = Field(description="ISO UTC timestamp of cycle start.")
     approved_found: int = Field(default=0, description="Number of APPROVED positions found at cycle start.")
+    exits_placed: int = Field(default=0, description="Number of exit/trim sell orders submitted this cycle.")
+    exits_error: int = Field(default=0, description="Number of exit orders that failed to place.")
     orders_placed: int = Field(default=0, description="Number of orders successfully submitted to IBKR.")
     orders_filled: int = Field(default=0, description="Number of orders that reached FILLED status this cycle.")
     orders_partial: int = Field(default=0, description="Number of orders left in PARTIAL state at cycle end.")

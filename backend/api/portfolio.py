@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -69,49 +70,53 @@ async def size_position(body: SizeRequest):
 
 
 @router.get("/positions")
-def get_open_positions():
+async def get_open_positions():
     """Return all OPEN positions from the positions table."""
-    try:
-        client = _get_client()
-        result = (
-            client.table("positions")
-            .select("*")
-            .eq("status", "OPEN")
-            .order("created_at", desc=True)
-            .execute()
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+    def _run():
+        try:
+            client = _get_client()
+            result = (
+                client.table("positions")
+                .select("*")
+                .eq("status", "OPEN")
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        return result.data or []
 
-    return result.data or []
+    return await asyncio.to_thread(_run)
 
 
 # ── GET /portfolio/pending ────────────────────────────────────────────────────
 
 
 @router.get("/pending")
-def get_pending_positions():
+async def get_pending_positions():
     """Return all PENDING_APPROVAL sizing recommendations awaiting human review."""
-    try:
-        client = _get_client()
-        result = (
-            client.table("positions")
-            .select("*")
-            .eq("status", "PENDING_APPROVAL")
-            .order("created_at", desc=True)
-            .execute()
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+    def _run():
+        try:
+            client = _get_client()
+            result = (
+                client.table("positions")
+                .select("*")
+                .eq("status", "PENDING_APPROVAL")
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        return result.data or []
 
-    return result.data or []
+    return await asyncio.to_thread(_run)
 
 
 # ── GET /portfolio/exposure ───────────────────────────────────────────────────
 
 
 @router.get("/exposure")
-def get_exposure(portfolio_value: Optional[float] = Query(None, gt=0)):
+async def get_exposure(portfolio_value: Optional[float] = Query(None, gt=0)):
     """
     Return current gross/net/sector exposure summary.
 
@@ -119,183 +124,191 @@ def get_exposure(portfolio_value: Optional[float] = Query(None, gt=0)):
     live exposure fractions and compares them against regime-gated caps.
     portfolio_value is resolved from IBKR NetLiquidation if not provided.
     """
-    if portfolio_value is None or portfolio_value <= 0:
-        from backend.broker.ibkr import get_portfolio_value as _get_pv
-        portfolio_value = _get_pv()
+    def _run(pv):
+        if pv is None or pv <= 0:
+            from backend.broker.ibkr import get_portfolio_value as _get_pv
+            pv = _get_pv()
 
-    try:
-        client = _get_client()
+        try:
+            client = _get_client()
 
-        # Fetch OPEN positions
-        pos_result = (
-            client.table("positions")
-            .select("*")
-            .eq("status", "OPEN")
-            .execute()
-        )
-        open_positions = pos_result.data or []
+            pos_result = (
+                client.table("positions")
+                .select("*")
+                .eq("status", "OPEN")
+                .execute()
+            )
+            open_positions = pos_result.data or []
 
-        # Fetch current regime
-        regime_result = (
-            client.table("macro_briefings")
-            .select("regime")
-            .order("date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        regime = "Risk-On"
-        if regime_result.data:
-            regime = regime_result.data[0].get("regime", "Risk-On")
+            regime_result = (
+                client.table("macro_briefings")
+                .select("regime")
+                .order("date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            regime = "Risk-On"
+            if regime_result.data:
+                regime = regime_result.data[0].get("regime", "Risk-On")
 
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
 
-    exposure = get_current_exposure(open_positions, portfolio_value, regime)
-    caps = REGIME_CAPS.get(regime, REGIME_CAPS["Risk-On"])
+        exposure = get_current_exposure(open_positions, pv, regime)
+        caps = REGIME_CAPS.get(regime, REGIME_CAPS["Risk-On"])
 
-    return {
-        "regime": regime,
-        "gross_exposure_pct": round(exposure["gross_exposure_pct"] * 100, 2),
-        "net_exposure_pct": round(exposure["net_exposure_pct"] * 100, 2),
-        "position_count": exposure["position_count"],
-        "sector_concentration": {
-            sector: round(pct * 100, 2)
-            for sector, pct in exposure["sector_concentration"].items()
-        },
-        "caps": {
-            "max_gross": round(caps["max_gross"] * 100, 1),
-            "max_net_long": round(caps["max_net_long"] * 100, 1),
-            "max_net_short": round(caps["max_net_short"] * 100, 1),
-        },
-    }
+        return {
+            "regime": regime,
+            "gross_exposure_pct": round(exposure["gross_exposure_pct"] * 100, 2),
+            "net_exposure_pct": round(exposure["net_exposure_pct"] * 100, 2),
+            "position_count": exposure["position_count"],
+            "sector_concentration": {
+                sector: round(pct * 100, 2)
+                for sector, pct in exposure["sector_concentration"].items()
+            },
+            "caps": {
+                "max_gross": round(caps["max_gross"] * 100, 1),
+                "max_net_long": round(caps["max_net_long"] * 100, 1),
+                "max_net_short": round(caps["max_net_short"] * 100, 1),
+            },
+        }
+
+    return await asyncio.to_thread(_run, portfolio_value)
 
 
 # ── POST /portfolio/approve/{position_id} ─────────────────────────────────────
 
 
 @router.post("/approve/{position_id}")
-def approve_position(position_id: str):
+async def approve_position(position_id: str):
     """
     Approve a PENDING_APPROVAL sizing recommendation.
 
     Sets status = 'APPROVED'. In supervised mode the execution agent will
     pick up APPROVED records and route them to IBKR.
     """
-    try:
-        client = _get_client()
-
-        # ── CRITICAL alert gate ───────────────────────────────────────────────
+    def _run():
         try:
-            critical_resp = (
-                client.table("risk_alerts")
-                .select("id,trigger")
-                .eq("severity", "CRITICAL")
-                .eq("resolved", False)
+            client = _get_client()
+
+            # ── CRITICAL alert gate ───────────────────────────────────────────────
+            try:
+                critical_resp = (
+                    client.table("risk_alerts")
+                    .select("id,trigger")
+                    .eq("severity", "CRITICAL")
+                    .eq("resolved", False)
+                    .execute()
+                )
+                if critical_resp.data:
+                    triggers = [a.get("trigger", "unknown") for a in critical_resp.data]
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Approval blocked: {len(critical_resp.data)} unresolved CRITICAL "
+                            f"alert(s). Resolve all CRITICAL alerts before approving trades. "
+                            f"Triggers: {'; '.join(triggers)}"
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("CRITICAL alert check failed (non-blocking): %s", exc)
+
+            result = (
+                client.table("positions")
+                .update({"status": "APPROVED"})
+                .eq("id", position_id)
+                .eq("status", "PENDING_APPROVAL")
                 .execute()
             )
-            if critical_resp.data:
-                triggers = [a.get("trigger", "unknown") for a in critical_resp.data]
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Approval blocked: {len(critical_resp.data)} unresolved CRITICAL "
-                        f"alert(s). Resolve all CRITICAL alerts before approving trades. "
-                        f"Triggers: {'; '.join(triggers)}"
-                    ),
-                )
-        except HTTPException:
-            raise
         except Exception as exc:
-            logger.warning("CRITICAL alert check failed (non-blocking): %s", exc)
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
 
-        result = (
-            client.table("positions")
-            .update({"status": "APPROVED"})
-            .eq("id", position_id)
-            .eq("status", "PENDING_APPROVAL")
-            .execute()
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Position {position_id!r} not found or not in PENDING_APPROVAL state",
+            )
 
-    if not result.data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Position {position_id!r} not found or not in PENDING_APPROVAL state",
-        )
+        logger.info("Position %s approved", position_id)
+        pos = result.data[0] if result.data else {}
+        notify_event("POSITION_APPROVED", {
+            "ticker": pos.get("ticker", "—"),
+            "size_label": pos.get("size_label", "—"),
+            "dollar_size": pos.get("dollar_size", 0),
+            "share_count": pos.get("share_count", "—"),
+            "entry_price": pos.get("entry_price", "—"),
+        })
+        return {"status": "approved", "position_id": position_id}
 
-    logger.info("Position %s approved", position_id)
-    pos = result.data[0] if result.data else {}
-    notify_event("POSITION_APPROVED", {
-        "ticker": pos.get("ticker", "—"),
-        "size_label": pos.get("size_label", "—"),
-        "dollar_size": pos.get("dollar_size", 0),
-        "share_count": pos.get("share_count", "—"),
-        "entry_price": pos.get("entry_price", "—"),
-    })
-    return {"status": "approved", "position_id": position_id}
+    return await asyncio.to_thread(_run)
 
 
 # ── POST /portfolio/reject/{position_id} ──────────────────────────────────────
 
 
 @router.post("/reject/{position_id}")
-def reject_position(position_id: str):
+async def reject_position(position_id: str):
     """
     Reject a PENDING_APPROVAL sizing recommendation.
 
     Sets status = 'REJECTED'. The record is preserved for audit / analysis.
     """
-    try:
-        client = _get_client()
-        result = (
-            client.table("positions")
-            .update({"status": "REJECTED"})
-            .eq("id", position_id)
-            .eq("status", "PENDING_APPROVAL")
-            .execute()
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+    def _run():
+        try:
+            client = _get_client()
+            result = (
+                client.table("positions")
+                .update({"status": "REJECTED"})
+                .eq("id", position_id)
+                .eq("status", "PENDING_APPROVAL")
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
 
-    if not result.data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Position {position_id!r} not found or not in PENDING_APPROVAL state",
-        )
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Position {position_id!r} not found or not in PENDING_APPROVAL state",
+            )
 
-    logger.info("Position %s rejected", position_id)
-    pos = result.data[0] if result.data else {}
-    notify_event("POSITION_REJECTED", {
-        "ticker": pos.get("ticker", "—"),
-        "position_id": position_id,
-    })
-    return {"status": "rejected", "position_id": position_id}
+        logger.info("Position %s rejected", position_id)
+        pos = result.data[0] if result.data else {}
+        notify_event("POSITION_REJECTED", {
+            "ticker": pos.get("ticker", "—"),
+            "position_id": position_id,
+        })
+        return {"status": "rejected", "position_id": position_id}
+
+    return await asyncio.to_thread(_run)
 
 
 # ── GET /portfolio/history ────────────────────────────────────────────────────
 
 
 @router.get("/history")
-def get_position_history(days: int = Query(30, ge=1, le=365)):
+async def get_position_history(days: int = Query(30, ge=1, le=365)):
     """
     Return CLOSED and REJECTED positions from the last *days* days.
 
     Useful for reviewing past sizing decisions and P&L attribution.
     """
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    def _run():
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        try:
+            client = _get_client()
+            result = (
+                client.table("positions")
+                .select("*")
+                .in_("status", ["CLOSED", "REJECTED"])
+                .gte("created_at", cutoff)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        return result.data or []
 
-    try:
-        client = _get_client()
-        result = (
-            client.table("positions")
-            .select("*")
-            .in_("status", ["CLOSED", "REJECTED"])
-            .gte("created_at", cutoff)
-            .order("created_at", desc=True)
-            .execute()
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
-
-    return result.data or []
+    return await asyncio.to_thread(_run)

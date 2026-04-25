@@ -6,7 +6,7 @@ triple ready for submission via order_manager.place_order().
 """
 
 import logging
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from dotenv import load_dotenv
 
@@ -66,15 +66,17 @@ def _select_order_type(share_count: int, adv: float) -> tuple:
 
 
 def _round_up_to_tick(price: float, tick: float = 0.01) -> float:
-    """
-    Round price UP to the next valid tick.
-
-    IBKR rejects prices that don't conform to the contract's min tick.
-    Defaulting to $0.01 works for most US equities.
-    """
+    """Round price UP to the next valid tick (used for buy limit orders)."""
     p = Decimal(str(price))
     t = Decimal(str(tick))
     return float((p / t).to_integral_value(rounding=ROUND_CEILING) * t)
+
+
+def _round_down_to_tick(price: float, tick: float = 0.01) -> float:
+    """Round price DOWN to the nearest valid tick (used for sell limit orders)."""
+    p = Decimal(str(price))
+    t = Decimal(str(tick))
+    return float((p / t).to_integral_value(rounding=ROUND_FLOOR) * t)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -155,4 +157,82 @@ def build_order(position_row: dict) -> tuple:
     order.tif = "DAY"
 
     # 7. Return triple
+    return (req, contract, order)
+
+
+def build_exit_order(
+    position_row: dict,
+    exit_type: Literal["EXIT_CLOSE", "EXIT_TRIM"],
+    trim_pct: Optional[float] = None,
+) -> tuple:
+    """
+    Build a (OrderRequest, Contract, LimitOrder) sell triple from an OPEN positions row.
+
+    Args:
+        position_row: OPEN positions row with at minimum: id, ticker, direction,
+                      share_count, current_price (or entry_price as fallback).
+        exit_type:    EXIT_CLOSE — sell all shares; EXIT_TRIM — sell trim_pct% of shares.
+        trim_pct:     Required when exit_type=EXIT_TRIM. Percentage of position to sell
+                      (e.g. 50.0 = sell half). Sourced from positions.exit_trim_pct.
+
+    Returns:
+        Tuple of (OrderRequest, ib_insync.Stock, ib_insync.LimitOrder).
+
+    Raises:
+        OrderBuildError: if required fields are missing or share count computes to zero.
+    """
+    required = ("id", "ticker", "share_count")
+    for field in required:
+        if position_row.get(field) is None:
+            raise OrderBuildError(f"position_row missing required field: '{field}'")
+
+    ticker: str = str(position_row["ticker"])
+    direction: str = str(position_row.get("direction", "LONG"))
+    total_shares: int = int(float(position_row["share_count"]))
+
+    # Use current_price if available, fall back to entry_price.
+    ref_price_raw = position_row.get("current_price") or position_row.get("entry_price")
+    if ref_price_raw is None:
+        raise OrderBuildError(f"position_row missing current_price and entry_price for {ticker}")
+    ref_price: float = float(ref_price_raw)
+
+    if exit_type == "EXIT_TRIM":
+        if not trim_pct or trim_pct <= 0:
+            raise OrderBuildError(f"EXIT_TRIM requires trim_pct > 0, got {trim_pct!r}")
+        sell_shares = max(1, int(total_shares * trim_pct / 100))
+    else:
+        sell_shares = total_shares
+
+    if sell_shares <= 0:
+        raise OrderBuildError(f"Computed sell_shares=0 for {ticker} (total_shares={total_shares})")
+
+    adv = _fetch_adv(ticker)
+    order_type, timeout_minutes = _select_order_type(sell_shares, adv)
+
+    logger.info(
+        "Exit order for %s: %s (%d shares, ADV=%.0f, exit_type=%s)",
+        ticker, order_type, sell_shares, adv, exit_type,
+    )
+
+    sell_limit = _round_down_to_tick(ref_price * 0.999) if order_type == "LIMIT" else None
+    vwap_limit = _round_down_to_tick(ref_price * 0.995)
+
+    req = OrderRequest(
+        position_id=str(position_row["id"]),
+        ticker=ticker,
+        direction=direction,
+        order_side="SELL",
+        order_type=order_type,
+        requested_qty=sell_shares,
+        limit_price=sell_limit,
+        intended_price=ref_price,
+        timeout_minutes=timeout_minutes,
+        exit_type=exit_type,
+    )
+
+    contract = Stock(ticker, "SMART", "USD")
+    limit_price_for_order = sell_limit if order_type == "LIMIT" else vwap_limit
+    order = LimitOrder("SELL", sell_shares, limit_price_for_order)
+    order.tif = "DAY"
+
     return (req, contract, order)

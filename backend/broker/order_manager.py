@@ -92,6 +92,8 @@ def place_order(req: OrderRequest, contract, ib_order) -> OrderStatus:
         "total_filled_qty": 0,
         "submitted_at": now_iso,
         "timeout_at": timeout_at.isoformat(),
+        "order_side": req.order_side,
+        "exit_type": req.exit_type,
     }
 
     try:
