@@ -1171,8 +1171,33 @@ def _route_decision(
             return "DEFERRED"
 
         elif category == "POSITION_UPDATE" and decision == "HOLD":
-            # Thesis still valid — mark memo reviewed, no trade action
-            logger.info("PM: POSITION_UPDATE HOLD for %s — thesis intact, no trade action", ticker)
+            # Thesis still valid — clear any pending exit action and mark memo reviewed
+            if ticker:
+                client.table("positions").update({
+                    "exit_action": None,
+                    "exit_trim_pct": None
+                }).eq("ticker", ticker).eq("status", "OPEN").execute()
+            logger.info("PM: POSITION_UPDATE HOLD for %s — thesis intact, cleared pending actions", ticker)
+            return "NO_ACTION"
+
+        elif category == "EXIT_TRIM" and decision == "HOLD":
+            # PM decided to stay in the position despite stop proximity or overextension
+            if ticker:
+                client.table("positions").update({
+                    "exit_action": None,
+                    "exit_trim_pct": None
+                }).eq("ticker", ticker).eq("status", "OPEN").execute()
+                logger.info("PM: EXIT_TRIM HOLD for %s — cleared pending exit_action", ticker)
+            return "NO_ACTION"
+
+        elif category == "PRE_EARNINGS" and decision == "HOLD":
+            # No action ahead of earnings — clear any previous trim/exit intent
+            if ticker:
+                client.table("positions").update({
+                    "exit_action": None,
+                    "exit_trim_pct": None
+                }).eq("ticker", ticker).eq("status", "OPEN").execute()
+                logger.info("PM: PRE_EARNINGS HOLD for %s — cleared pending actions", ticker)
             return "NO_ACTION"
 
         elif category == "POSITION_UPDATE" and decision in ("TRIM", "CLOSE"):
@@ -1904,11 +1929,9 @@ def run_pm_cycle(
                         if execution_status == "SENT_TO_EXECUTION":
                             execution_status = "QUEUED_FOR_OPEN"
 
-                    elif category in ("EXIT_TRIM", "PRE_EARNINGS", "POSITION_UPDATE") and final_decision not in (
-                        "HOLD", "NO_ACTION", "MONITOR"
-                    ):
-                        # Writing exit_action to an OPEN position is a pure DB operation —
-                        # no market-hours dependency.  Execution agent is already gated.
+                    elif category in ("EXIT_TRIM", "PRE_EARNINGS", "POSITION_UPDATE"):
+                        # Writing or CLEARING exit_action is a pure DB operation —
+                        # no market-hours dependency.
                         execution_status = _route_decision(
                             decision_data, record_template,
                             auto_approve=(mode == "autonomous"),
