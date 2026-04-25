@@ -38,6 +38,7 @@ load_dotenv()
 
 POLYGON_BASE = "https://api.polygon.io"
 FMP_BASE = "https://financialmodelingprep.com/stable"
+FMP_BASE_V3 = "https://financialmodelingprep.com/api/v3"
 logger = logging.getLogger(__name__)
 
 # ── FMP Quality Data Batch Fetch ──────────────────────────────────────────────
@@ -233,33 +234,6 @@ def fetch_fmp(ticker: str) -> dict:
             result["market_cap"] = float(mktcap_yf)
             result["market_cap_source"] = "yfinance"
 
-        # Consensus EPS estimates
-        try:
-            ee = t.earnings_estimate
-            if ee is not None and not ee.empty:
-                # rows indexed by period: 0q, +1q, 0y, +1y
-                if "0y" in ee.index:
-                    result["consensus_eps_current_year"] = ee.loc["0y", "avg"] if "avg" in ee.columns else None
-                if "+1y" in ee.index:
-                    result["consensus_eps_next_year"] = ee.loc["+1y", "avg"] if "avg" in ee.columns else None
-        except Exception:
-            pass
-
-        # Consensus revenue estimates
-        try:
-            re_ = t.revenue_estimate
-            if re_ is not None and not re_.empty:
-                if "0y" in re_.index:
-                    val = re_.loc["0y", "avg"] if "avg" in re_.columns else None
-                    if val is not None:
-                        result["consensus_revenue_current_year"] = round(val / 1_000_000, 1)
-                if "+1y" in re_.index:
-                    val = re_.loc["+1y", "avg"] if "avg" in re_.columns else None
-                    if val is not None:
-                        result["consensus_revenue_next_year"] = round(val / 1_000_000, 1)
-        except Exception:
-            pass
-
         # Next earnings date
         try:
             cal = t.calendar or {}
@@ -290,6 +264,38 @@ def fetch_fmp(ticker: str) -> dict:
     except Exception as exc:
         result["error"] = f"yfinance error: {exc}"
 
+    fmp_key = os.getenv("FMP_API_KEY")
+    if fmp_key:
+        try:
+            r = requests.get(
+                f"{FMP_BASE}/analyst-estimates",
+                params={"symbol": sym, "period": "annual", "limit": 2, "apikey": fmp_key},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                estimates = r.json() or []
+                current_year = date.today().year
+                for est in estimates:
+                    est_date = est.get("date", "")
+                    try:
+                        est_year = int(est_date[:4])
+                    except (ValueError, TypeError):
+                        continue
+                    eps_avg = est.get("epsAvg")
+                    rev_avg = est.get("revenueAvg")
+                    if est_year == current_year and result["consensus_eps_current_year"] is None:
+                        if eps_avg is not None:
+                            result["consensus_eps_current_year"] = float(eps_avg)
+                        if rev_avg is not None:
+                            result["consensus_revenue_current_year"] = round(float(rev_avg) / 1_000_000, 1)
+                    elif est_year == current_year + 1 and result["consensus_eps_next_year"] is None:
+                        if eps_avg is not None:
+                            result["consensus_eps_next_year"] = float(eps_avg)
+                        if rev_avg is not None:
+                            result["consensus_revenue_next_year"] = round(float(rev_avg) / 1_000_000, 1)
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP analyst-estimates failed — %s", sym, exc)
+
     # ── Polygon balance sheet ─────────────────────────────────────────────────
     polygon_key = os.getenv("POLYGON_API_KEY")
     if polygon_key:
@@ -311,11 +317,13 @@ def fetch_fmp(ticker: str) -> dict:
         except Exception:
             pass
 
-        # Balance sheet + cash flow from Polygon financials
+        # Balance sheet + cash flow from Polygon financials.
+        # limit=10 ensures 2 FY periods appear for Beneish (quarterly filings would
+        # fill limit=3 leaving zero or one annual row, breaking the M-score calc).
         try:
             r = requests.get(
                 f"{POLYGON_BASE}/vX/reference/financials",
-                params={"ticker": sym, "limit": 3, "apiKey": polygon_key},
+                params={"ticker": sym, "limit": 10, "apiKey": polygon_key},
                 timeout=15,
             )
             if r.status_code == 200:
