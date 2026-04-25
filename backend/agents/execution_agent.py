@@ -50,6 +50,19 @@ def _is_market_open() -> bool:
     return time(9, 30) <= t < time(15, 55)
 
 
+def _is_pre_market() -> bool:
+    """True during pre-market window (Mon–Fri, 07:00–09:29 ET).
+
+    Used to allow exit-only cycles with outsideRth=True so crisis / pre-earnings
+    CLOSE orders reach the exchange before the 9:30 AM open and get queue priority.
+    """
+    now_et = datetime.now(_ET)
+    if now_et.weekday() not in {0, 1, 2, 3, 4}:
+        return False
+    t = now_et.time()
+    return time(7, 0) <= t < time(9, 30)
+
+
 def _has_critical_alerts() -> bool:
     """Return True if any unresolved CRITICAL risk alerts exist in Supabase."""
     try:
@@ -137,14 +150,17 @@ def run_fill_recon() -> int:
 # ── Exit cycle ───────────────────────────────────────────────────────────────
 
 
-def _run_exit_cycle(client) -> dict:
+def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
     """
     Poll OPEN positions with exit_action set and place sell orders.
 
     Called before new-entry polling so capital is freed before new positions
-    are sized. Each position's exit_action is cleared immediately after the
-    order is submitted to prevent duplicate orders on the next cycle. If order
-    placement fails, exit_action is restored so the next cycle can retry.
+    are sized. exit_action is cleared only after place_order succeeds — if build
+    or placement fails the intent stays in the DB so the next cycle can retry.
+
+    Args:
+        outside_rth: If True, passes outsideRth=True on every order so they
+                     route during pre-market / extended hours sessions.
 
     Returns:
         dict with 'exits_placed', 'exits_error', and 'exit_order_ids'.
@@ -186,15 +202,21 @@ def _run_exit_cycle(client) -> dict:
             logger.warning("_run_exit_cycle: order check failed for %s: %s", pos.get("ticker"), exc)
             continue
 
-        # Clear exit_action now — restored below if order placement fails.
+        # Build and place first — only clear exit_action after order is confirmed
+        # submitted. This ensures exit_action is never lost to a silent DB-restore
+        # failure if build or placement throws.
         try:
-            client.table("positions").update({"exit_action": None}).eq("id", pos["id"]).execute()
-        except Exception as exc:
-            logger.warning("Could not clear exit_action for %s: %s", pos.get("ticker"), exc)
-
-        try:
-            req, contract, ib_order = _order_builder.build_exit_order(pos, exit_type, trim_pct)
+            req, contract, ib_order = _order_builder.build_exit_order(
+                pos, exit_type, trim_pct, outside_rth=outside_rth
+            )
             order_status = _order_manager.place_order(req, contract, ib_order)
+
+            # Order is in IBKR — now safe to clear exit_action.
+            try:
+                client.table("positions").update({"exit_action": None}).eq("id", pos["id"]).execute()
+            except Exception as exc:
+                logger.warning("Could not clear exit_action for %s after successful placement: %s", pos.get("ticker"), exc)
+
             result["exit_order_ids"].append(order_status.order_id)
             result["exits_placed"] += 1
             logger.info(
@@ -209,20 +231,11 @@ def _run_exit_cycle(client) -> dict:
             })
 
         except IBKRConnectionError as exc:
-            # Restore exit_action so it survives restart.
-            try:
-                client.table("positions").update({"exit_action": exit_action}).eq("id", pos["id"]).execute()
-            except Exception:
-                pass
             logger.error("IBKR down during exit for %s: %s", pos.get("ticker"), exc)
             result["exits_error"] += 1
             break  # IBKR is gone; don't try more exits this cycle
 
         except Exception as exc:
-            try:
-                client.table("positions").update({"exit_action": exit_action}).eq("id", pos["id"]).execute()
-            except Exception:
-                pass
             logger.error("Exit order failed for %s: %s", pos.get("ticker"), exc)
             result["exits_error"] += 1
 
@@ -246,7 +259,10 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
     summary = ExecutionSummary(cycle_at=cycle_start)
 
     # ── A: Market hours guard ─────────────────────────────────────────────────
-    if not force and not _is_market_open():
+    # Pre-market (07:00–09:29 ET): exits only, with outsideRth=True so orders
+    # queue on the exchange before the 09:30 open. No new entries allowed.
+    pre_market_mode = not force and _is_pre_market()
+    if not force and not _is_market_open() and not pre_market_mode:
         logger.debug("Execution cycle skipped — market closed")
         summary.skipped_market_closed = True
         return summary
@@ -260,6 +276,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
     client = _get_client()
     this_cycle_order_ids: List[str] = []
+    exit_order_ids: List[str] = []
 
     try:
         # ── C: Reconciliation ─────────────────────────────────────────────────
@@ -287,16 +304,37 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
             order_row = order_result.data[0]
             order_status = order_row.get("status")
             total_filled = float(order_row.get("total_filled_qty") or 0)
+            is_sell = order_row.get("order_side") == "SELL"
 
-            if order_status == "PARTIAL_FILLED" and total_filled > 0:
-                # Partial fill — open position at actual filled quantity + avg fill price
+            if is_sell:
+                if order_status == "PARTIAL_FILLED" and total_filled > 0:
+                    # Fill callbacks already reduced share_count; just log.
+                    logger.info(
+                        "Exit order for position %s timed out with partial fill "
+                        "(%.0f shares sold) — position share_count already updated by fill handler",
+                        pos_id, total_filled,
+                    )
+                else:
+                    # Zero-fill exit timeout — restore exit_action so next cycle retries.
+                    exit_type = order_row.get("exit_type") or ""
+                    restore_action = "CLOSE" if exit_type == "EXIT_CLOSE" else "TRIM"
+                    client.table("positions").update(
+                        {"exit_action": restore_action}
+                    ).eq("id", pos_id).execute()
+                    logger.warning(
+                        "Exit order for position %s timed out with zero fills — "
+                        "exit_action restored to %s for retry next cycle",
+                        pos_id, restore_action,
+                    )
+            elif order_status == "PARTIAL_FILLED" and total_filled > 0:
+                # Entry partial fill — open position at actual filled quantity + avg fill price
                 _fill_recorder.record_partial_fill_open(order_row["id"])
                 logger.info(
                     "Position %s opened at partial fill (%.0f shares, status=PARTIAL_FILLED)",
                     pos_id, total_filled,
                 )
             else:
-                # Zero fill (TIMEOUT) — revert to APPROVED so next cycle can retry
+                # Entry zero fill (TIMEOUT) — revert to APPROVED so next cycle can retry
                 client.table("positions").update({"status": "APPROVED"}).eq("id", pos_id).execute()
                 logger.info(
                     "Position %s reverted to APPROVED after zero-fill timeout (status=%s)",
@@ -305,7 +343,20 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
             summary.orders_timeout += 1
 
-        # ── D: Fetch APPROVED positions ───────────────────────────────────────
+        # ── E: Exit cycle — sell OPEN positions flagged by PM Agent ──────────
+        # Run before new-entry processing so capital is freed before new orders are sized.
+        # In pre-market mode, pass outside_rth=True so IBKR routes the orders immediately.
+        exit_result = _run_exit_cycle(client, outside_rth=pre_market_mode)
+        summary.exits_placed = exit_result["exits_placed"]
+        summary.exits_error = exit_result["exits_error"]
+        exit_order_ids = exit_result["exit_order_ids"]
+
+        # In pre-market, skip new entries — only exits are allowed.
+        if pre_market_mode:
+            logger.info("Pre-market mode: %d exit order(s) placed, skipping new entries", len(exit_order_ids))
+            return summary
+
+        # ── F: Fetch APPROVED positions ───────────────────────────────────────
         approved_result = (
             client.table("positions")
             .select("*")
@@ -317,8 +368,10 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         summary.approved_found = len(approved)
 
         if not approved:
-            logger.debug("No APPROVED positions — cycle complete")
-            return summary
+            if not exit_order_ids:
+                logger.debug("No APPROVED positions and no exit orders — cycle complete")
+                return summary
+            logger.debug("No APPROVED positions — proceeding to fill handler for %d exit order(s)", len(exit_order_ids))
 
         # ── E + F: Check for existing active orders, then build + place ───────
         for pos in approved:
@@ -371,7 +424,8 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 continue
 
         # ── G: Register fill handler and wait 60s for fill events ─────────────
-        if this_cycle_order_ids:
+        all_cycle_order_ids = this_cycle_order_ids + exit_order_ids
+        if all_cycle_order_ids:
             try:
                 ib = _ibkr._get_ib()
                 loop = _ibkr.get_loop()
@@ -417,16 +471,18 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         # get_portfolio_value(), risk monitor, and account summary endpoints.
         # Only disconnect if orders were actually placed (fill handler registered)
         # so the session can be cleanly re-established on the next cycle.
-        if this_cycle_order_ids:
+        if this_cycle_order_ids or exit_order_ids:
             _ibkr.disconnect()
 
     logger.info(
-        "Execution cycle complete — approved=%d placed=%d filled=%d partial=%d timeout=%d error=%d",
-        summary.approved_found, summary.orders_placed, summary.orders_filled,
+        "Execution cycle complete — approved=%d exits_placed=%d placed=%d filled=%d partial=%d timeout=%d error=%d",
+        summary.approved_found, summary.exits_placed, summary.orders_placed, summary.orders_filled,
         summary.orders_partial, summary.orders_timeout, summary.orders_error,
     )
-    if summary.orders_placed or summary.orders_filled or summary.orders_error or summary.orders_timeout:
+    if summary.orders_placed or summary.exits_placed or summary.orders_filled or summary.orders_error or summary.orders_timeout:
         notify_event("EXECUTION_CYCLE_COMPLETE", {
+            "exits_placed":   summary.exits_placed,
+            "exits_error":    summary.exits_error,
             "orders_placed":  summary.orders_placed,
             "orders_filled":  summary.orders_filled,
             "orders_partial": summary.orders_partial,
