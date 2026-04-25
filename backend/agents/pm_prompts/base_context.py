@@ -152,17 +152,122 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("build_base_context: risk_alerts read failed — %s", exc)
 
-    # ── Recent PM decisions ───────────────────────────────────────────────────
+    # ── Recent PM decisions with outcome data ─────────────────────────────────
     try:
         resp = (
             supabase_client.table("pm_decisions")
-            .select("decision_id,timestamp,category,ticker,decision,confidence,execution_status")
+            .select("decision_id,timestamp,category,ticker,decision,confidence,execution_status,outcome,confidence_breakdown")
             .order("timestamp", desc=True)
-            .limit(10)
+            .limit(15)
             .execute()
         )
-        ctx["recent_decisions"] = resp.data or []
+        raw_decisions = resp.data or []
+        ctx["recent_decisions"] = raw_decisions
+
+        # Build a formatted outcome history for Claude: only decisions that have outcomes
+        outcome_entries = []
+        for d in raw_decisions:
+            outcome = d.get("outcome")
+            if not outcome:
+                continue
+            ret = outcome.get("return_pct")
+            ticker = d.get("ticker", "portfolio")
+            conviction = d.get("confidence", 0)
+            decision = d.get("decision", "")
+            status = outcome.get("position_status", "")
+            symbol = "✓" if (ret or 0) > 0 else "✗"
+            outcome_entries.append(
+                f"  {symbol} {ticker} ({decision}, conviction={conviction:.2f}): "
+                f"return={ret*100:+.1f}% [{status}]"
+            )
+        ctx["decision_outcome_history"] = outcome_entries
+
     except Exception as exc:
         logger.warning("build_base_context: pm_decisions read failed — %s", exc)
+        ctx["decision_outcome_history"] = []
+
+    # ── Calibration anchor from pm_calibration ────────────────────────────────
+    try:
+        cal_resp = (
+            supabase_client.table("pm_calibration")
+            .select("confidence_at_entry,return_pct,was_correct")
+            .order("created_at", desc=True)
+            .limit(100)
+            .execute()
+        )
+        cal_rows = cal_resp.data or []
+        ctx["calibration_anchor"] = _build_calibration_anchor(cal_rows)
+    except Exception as exc:
+        logger.warning("build_base_context: pm_calibration read failed — %s", exc)
+        ctx["calibration_anchor"] = {}
 
     return ctx
+
+
+def format_calibration_context(base_ctx: dict) -> str:
+    """
+    Return a formatted string block with past decision outcomes and calibration stats.
+    Returns an empty string if no data is available.
+    """
+    parts = []
+
+    outcome_history = base_ctx.get("decision_outcome_history", [])
+    if outcome_history:
+        parts.append("### Your Recent Decision Outcomes")
+        parts.extend(outcome_history[:10])
+        parts.append("")
+
+    calibration = base_ctx.get("calibration_anchor", {})
+    if calibration:
+        parts.append("### Historical Calibration (conviction bucket → avg outcome)")
+        for bucket, stats in calibration.items():
+            parts.append(
+                f"  {bucket}: n={stats['n']}, avg={stats['avg_return_pct']:+.1f}%, "
+                f"win_rate={stats['win_rate']:.0%}"
+            )
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+def _build_calibration_anchor(rows: list) -> dict:
+    """
+    Aggregate pm_calibration rows into conviction bucket → outcome stats.
+    Returns empty dict if insufficient data (<5 rows).
+    """
+    if len(rows) < 5:
+        return {}
+
+    buckets: dict = {
+        "high (0.8–1.0)": [],
+        "med-high (0.6–0.8)": [],
+        "medium (0.4–0.6)": [],
+        "low (<0.4)": [],
+    }
+
+    for row in rows:
+        conf = row.get("confidence_at_entry") or 0
+        ret = row.get("return_pct")
+        if ret is None:
+            continue
+        if conf >= 0.8:
+            buckets["high (0.8–1.0)"].append(ret)
+        elif conf >= 0.6:
+            buckets["med-high (0.6–0.8)"].append(ret)
+        elif conf >= 0.4:
+            buckets["medium (0.4–0.6)"].append(ret)
+        else:
+            buckets["low (<0.4)"].append(ret)
+
+    result = {}
+    for label, returns in buckets.items():
+        if not returns:
+            continue
+        avg = sum(returns) / len(returns)
+        win_rate = sum(1 for r in returns if r > 0) / len(returns)
+        result[label] = {
+            "n": len(returns),
+            "avg_return_pct": round(avg * 100, 2),
+            "win_rate": round(win_rate, 3),
+        }
+    return result

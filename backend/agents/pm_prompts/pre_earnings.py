@@ -8,6 +8,8 @@ Triggered when a position or watchlist name has an earnings release within
 import json
 from typing import Any, Dict, Tuple
 
+from backend.agents.pm_prompts.base_context import format_calibration_context
+
 from backend.fetchers.earnings_reactions import get_earnings_reactions
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. An earnings release is approaching for one of your positions. You must decide how to position before the event.
@@ -45,8 +47,20 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
     "re_entry_plan": null
   },
   "risk_assessment": "Primary risk of this pre-earnings positioning decision",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "confidence_breakdown": {
+    "data_quality": 0.0,
+    "thesis_quality": 0.0,
+    "timing": 0.0,
+    "portfolio_fit": 0.0
+  }
 }
+
+confidence_breakdown dimensions (each 0.0–1.0):
+- data_quality: how complete and reliable is the earnings estimate and consensus data
+- thesis_quality: how strong is the specific earnings edge or lack thereof
+- timing: how well-timed is the pre-earnings positioning relative to days-to-event
+- portfolio_fit: how appropriate is taking binary event risk given current portfolio exposure
 
 For SIZE_UP: specify size_up_dollar and beat_catalyst (the specific metric/guidance you expect to surprise)
 For TRIM: specify trim_pct
@@ -140,7 +154,7 @@ def build_pre_earnings_prompt(
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
----
+{format_calibration_context(base_ctx)}---
 Decide how to position this name into earnings. The EarningsAlpha signal above reflects a quantitative model comparing internal EPS extrapolation against consensus — treat it as one data point, not a directive. Be honest about whether you have a differentiated view on the earnings outcome itself — if you don't, HOLD or TRIM, not SIZE_UP.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

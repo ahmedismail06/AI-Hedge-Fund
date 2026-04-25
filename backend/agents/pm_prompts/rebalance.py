@@ -9,6 +9,8 @@ NO_ACTION | REBALANCE | RAISE_CASH | DEPLOY_CASH.
 import json
 from typing import Any, Dict, Tuple
 
+from backend.agents.pm_prompts.base_context import format_calibration_context
+
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. You are conducting a portfolio-level rebalancing review to ensure the portfolio's exposure and sector weights are appropriate for the current macro regime and risk environment.
 
 ## Rebalancing Philosophy
@@ -48,8 +50,20 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
     "deploy_criteria": null
   },
   "risk_assessment": "Primary risk of this rebalancing decision",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "confidence_breakdown": {
+    "data_quality": 0.0,
+    "thesis_quality": 0.0,
+    "timing": 0.0,
+    "portfolio_fit": 0.0
+  }
 }
+
+confidence_breakdown dimensions (each 0.0–1.0):
+- data_quality: how reliable is the exposure and macro data driving this assessment
+- thesis_quality: how clearly does the portfolio state deviate from regime guidance
+- timing: how well-timed is this rebalancing relative to market conditions
+- portfolio_fit: how appropriate is the target exposure given the current opportunity set
 
 For REBALANCE: adjustments is a list of {"ticker": str, "action": "TRIM|ADD", "pct_change": float, "reason": str}
 For RAISE_CASH: adjustments lists positions to close with reason
@@ -147,7 +161,7 @@ Net (signed weight — directional bet):
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
----
+{format_calibration_context(base_ctx)}---
 Assess whether the portfolio requires rebalancing given the current regime guidance, sector concentration, and exposure drift. Remember: rebalance only when deviation is meaningful, not mechanical.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""
