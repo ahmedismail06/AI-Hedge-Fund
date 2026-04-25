@@ -595,41 +595,388 @@ def _check_intraday_drawdown(portfolio_value: float) -> float:
     return max(0.0, drawdown_pct)
 
 
+# ── Claude API tool definitions ───────────────────────────────────────────────
+
+_PM_TOOLS = [
+    {
+        "name": "get_positions",
+        "description": (
+            "Get all currently OPEN positions with full detail: entry_price, current_price, "
+            "share_count, direction, sector, conviction_score, stop tiers, P&L, and dollar_size."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "Optional: filter to a single ticker. Omit to get all open positions.",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_exposure",
+        "description": (
+            "Get current portfolio gross and net exposure as fractions of NAV, "
+            "plus the regime caps and how far the portfolio is from each cap."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_memo_detail",
+        "description": (
+            "Get the full investment memo for a ticker from Supabase, including "
+            "variant_perception, repricing_catalyst, financial_health, all bull/bear thesis "
+            "fields, and raw sector/market_cap data. Use when the summary in context is insufficient."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "The ticker symbol to look up."}
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_risk_alerts",
+        "description": "Get all active (unresolved) BREACH and CRITICAL risk alerts, optionally filtered by ticker.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "Optional: filter alerts to a specific ticker.",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "check_correlation",
+        "description": (
+            "Check how correlated a given ticker is to the existing portfolio. "
+            "Returns sector overlap count and any positions with Pearson correlation > 0.75 "
+            "over the last 60 days."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Ticker to check correlation for."}
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_earnings_alpha",
+        "description": (
+            "Get the EarningsAlpha signal for a ticker: pre-earnings SIZE_UP/HOLD/REDUCE "
+            "recommendation, internal vs consensus EPS spread, historical beat rate, and "
+            "average 5-day post-earnings reaction over the last 8 quarters."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Ticker to get earnings alpha for."}
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "check_hard_gates",
+        "description": (
+            "Verify whether a proposed position size passes hard constraints: "
+            "15% position cap, 200% gross ceiling, and daily loss halt check. "
+            "Returns {position_cap_ok, gross_exposure_ok, daily_loss_ok} booleans."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Ticker of the proposed position."},
+                "dollar_amount": {
+                    "type": "number",
+                    "description": "Proposed dollar size of the position.",
+                },
+            },
+            "required": ["ticker", "dollar_amount"],
+        },
+    },
+    {
+        "name": "get_calibration_stats",
+        "description": (
+            "Get historical calibration stats: for each conviction bucket (high/med-high/medium/low), "
+            "how many decisions were made, the average return, and the win rate. "
+            "Use this to sanity-check whether your confidence level is historically well-calibrated."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+
+def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Dispatch a PM tool call and return the result as a dict.
+    Never raises — returns {"error": str} on failure.
+    """
+    try:
+        client = _get_client()
+
+        if tool_name == "get_positions":
+            ticker_filter = tool_input.get("ticker")
+            q = client.table("positions").select(
+                "ticker,direction,share_count,entry_price,current_price,conviction_score,"
+                "dollar_size,pct_of_portfolio,stop_tier1,stop_tier2,stop_tier3,"
+                "sector,next_earnings_date,opened_at,status,exit_action"
+            ).eq("status", "OPEN")
+            if ticker_filter:
+                q = q.eq("ticker", ticker_filter)
+            resp = q.execute()
+            positions = resp.data or []
+            # Enrich with P&L
+            for p in positions:
+                entry = float(p.get("entry_price") or 0)
+                current = float(p.get("current_price") or 0)
+                shares = float(p.get("share_count") or 0)
+                p["pnl_pct"] = round((current - entry) / entry, 4) if entry > 0 else 0.0
+                p["pnl_dollar"] = round((current - entry) * shares, 2)
+            return {"positions": positions, "count": len(positions)}
+
+        elif tool_name == "get_exposure":
+            from backend.agents.pm_prompts.base_context import _REGIME_CAPS
+            resp = client.table("positions").select(
+                "ticker,direction,dollar_size"
+            ).eq("status", "OPEN").execute()
+            positions = resp.data or []
+            try:
+                from backend.broker.ibkr import get_portfolio_value
+                nav = get_portfolio_value()
+            except Exception:
+                nav = _compute_portfolio_value()
+            gross = sum(abs(float(p.get("dollar_size") or 0)) / nav for p in positions if nav > 0)
+            net = sum(
+                (float(p.get("dollar_size") or 0) / nav) * (1 if p.get("direction") == "LONG" else -1)
+                for p in positions if nav > 0
+            )
+            regime_resp = client.table("macro_briefings").select("regime").order("date", desc=True).limit(1).execute()
+            regime = (regime_resp.data or [{}])[0].get("regime", "Transitional")
+            caps = _REGIME_CAPS.get(regime, _REGIME_CAPS["Transitional"])
+            return {
+                "gross_exposure": round(gross, 4),
+                "net_exposure": round(net, 4),
+                "cash_pct": round(max(0.0, 1.0 - gross), 4),
+                "regime": regime,
+                "regime_gross_cap": caps["gross"],
+                "regime_net_cap": caps["net"],
+                "gross_drift_from_cap": round(gross - caps["gross"], 4),
+                "net_drift_from_cap": round(net - caps["net"], 4),
+                "portfolio_nav": round(nav, 2),
+            }
+
+        elif tool_name == "get_memo_detail":
+            ticker = tool_input["ticker"]
+            resp = (
+                client.table("memos")
+                .select("ticker,verdict,conviction_score,memo_json,status,created_at")
+                .eq("ticker", ticker)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not resp.data:
+                return {"error": f"No memo found for {ticker}"}
+            row = resp.data[0]
+            memo_json = row.get("memo_json") or {}
+            if isinstance(memo_json, str):
+                try:
+                    memo_json = json.loads(memo_json)
+                except Exception:
+                    pass
+            return {
+                "ticker": row.get("ticker"),
+                "verdict": row.get("verdict"),
+                "conviction_score": row.get("conviction_score"),
+                "status": row.get("status"),
+                "created_at": str(row.get("created_at")),
+                **{k: memo_json.get(k) for k in (
+                    "variant_perception", "repricing_catalyst", "bull_thesis", "bear_thesis",
+                    "red_team_risks", "financial_health", "valuation_note", "cash_runway_months",
+                    "macro_sensitivity", "price_target", "summary", "catalysts",
+                ) if k in memo_json},
+            }
+
+        elif tool_name == "get_risk_alerts":
+            ticker_filter = tool_input.get("ticker")
+            q = (
+                client.table("risk_alerts")
+                .select("id,severity,ticker,trigger,created_at,resolved")
+                .eq("resolved", False)
+                .in_("severity", ["BREACH", "CRITICAL"])
+                .order("created_at", desc=True)
+                .limit(20)
+            )
+            if ticker_filter:
+                q = q.eq("ticker", ticker_filter)
+            resp = q.execute()
+            return {"alerts": resp.data or [], "count": len(resp.data or [])}
+
+        elif tool_name == "check_correlation":
+            ticker = tool_input["ticker"]
+            # Sector overlap check
+            resp = client.table("positions").select("ticker,sector").eq("status", "OPEN").execute()
+            positions = resp.data or []
+            # Get sector of the queried ticker from latest memo
+            memo_resp = (
+                client.table("memos")
+                .select("memo_json")
+                .eq("ticker", ticker)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            target_sector = None
+            if memo_resp.data:
+                mj = memo_resp.data[0].get("memo_json") or {}
+                target_sector = mj.get("sector") if isinstance(mj, dict) else None
+
+            sector_overlap = [
+                p["ticker"] for p in positions
+                if target_sector and p.get("sector") == target_sector
+            ]
+
+            # Try portfolio correlation module
+            correlation_flags = []
+            try:
+                from backend.portfolio.correlation import check_correlation
+                result = check_correlation(ticker, [p["ticker"] for p in positions])
+                correlation_flags = result.get("flagged_pairs", [])
+            except Exception:
+                pass
+
+            return {
+                "ticker": ticker,
+                "sector": target_sector,
+                "sector_overlap_tickers": sector_overlap,
+                "sector_overlap_count": len(sector_overlap),
+                "correlation_flags": correlation_flags,
+            }
+
+        elif tool_name == "get_earnings_alpha":
+            ticker = tool_input["ticker"]
+            try:
+                from backend.earnings_alpha.runner import run_earnings_alpha
+                result = run_earnings_alpha(ticker)
+                return result if isinstance(result, dict) else {"error": "runner returned non-dict"}
+            except Exception as exc:
+                return {"error": str(exc), "ticker": ticker}
+
+        elif tool_name == "check_hard_gates":
+            ticker = tool_input["ticker"]
+            dollar_amount = float(tool_input["dollar_amount"])
+            nav = _compute_portfolio_value()
+            weight = dollar_amount / nav if nav > 0 else 1.0
+            resp = client.table("positions").select("ticker,dollar_size").eq("status", "OPEN").execute()
+            positions = resp.data or []
+            gross = sum(abs(float(p.get("dollar_size") or 0)) / nav for p in positions if nav > 0)
+            config = _get_pm_config()
+            return {
+                "ticker": ticker,
+                "proposed_dollar": dollar_amount,
+                "proposed_weight_pct": round(weight * 100, 2),
+                "position_cap_ok": weight <= _MAX_POSITION_PCT,
+                "gross_exposure_ok": (gross + weight) <= _GROSS_EXPOSURE_CEILING,
+                "daily_loss_ok": not config.get("daily_loss_halt_triggered", False),
+                "portfolio_nav": round(nav, 2),
+                "current_gross_pct": round(gross * 100, 2),
+                "max_position_pct": _MAX_POSITION_PCT * 100,
+            }
+
+        elif tool_name == "get_calibration_stats":
+            return _get_client().table("pm_calibration").select(
+                "confidence_at_entry,return_pct,was_correct"
+            ).order("created_at", desc=True).limit(100).execute().data or []
+
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+    except Exception as exc:
+        logger.warning("_execute_pm_tool: %s failed — %s", tool_name, exc)
+        return {"error": str(exc)}
+
+
 # ── Claude API call ───────────────────────────────────────────────────────────
 
 def _call_claude(system_prompt: str, user_message: str) -> Dict[str, Any]:
     """
-    Make a Claude API call with extended thinking (budget_tokens=8000).
-    Returns the parsed JSON decision dict, or an empty dict on failure.
+    Make a Claude API call with tool use + extended thinking (budget_tokens=8000).
+
+    Claude can call PM tools to look up real-time data before making its decision.
+    The loop runs for up to 8 turns. On the final turn (text block with no tool_use),
+    Claude's JSON decision dict is returned.
+
+    Falls back to empty dict on any error.
     """
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    anthropic_client = anthropic.Anthropic()
+    messages: List[Dict[str, Any]] = [{"role": "user", "content": user_message}]
 
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=16000,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": 8000,
-            },
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
+    for turn in range(8):
+        try:
+            kwargs: Dict[str, Any] = {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 16000,
+                "system": system_prompt,
+                "messages": messages,
+                "tools": _PM_TOOLS,
+            }
+            # Extended thinking only on the first turn (decision synthesis turn)
+            # to avoid complexity of passing thinking blocks through tool-use turns.
+            if turn == 0:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
 
-        # Extract the text block (not the thinking block)
-        for block in response.content:
-            if block.type == "text":
-                return json.loads(block.text)
+            response = anthropic_client.messages.create(**kwargs)
 
-        logger.error("_call_claude: no text block in response")
-        return {}
+        except Exception as exc:
+            logger.error("_call_claude: API call failed (turn %d) — %s", turn, exc)
+            return {}
 
-    except json.JSONDecodeError as exc:
-        logger.error("_call_claude: JSON parse failed — %s", exc)
-        return {}
-    except Exception as exc:
-        logger.error("_call_claude: API call failed — %s", exc)
-        return {}
+        # Separate content blocks by type
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        text_blocks = [b for b in response.content if b.type == "text"]
+
+        if text_blocks and not tool_uses:
+            # Final decision — parse and return JSON
+            try:
+                return json.loads(text_blocks[0].text)
+            except json.JSONDecodeError as exc:
+                logger.error("_call_claude: JSON parse failed — %s", exc)
+                return {}
+
+        if tool_uses:
+            # Append assistant's full message (including any thinking blocks)
+            # Strip thinking blocks from assistant history to reduce token cost on subsequent turns
+            assistant_content = [
+                b for b in response.content if b.type != "thinking"
+            ]
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            # Execute each tool and collect results
+            tool_results = []
+            for tu in tool_uses:
+                result = _execute_pm_tool(tu.name, tu.input)
+                logger.info("PM tool: %s(%s) → %s keys", tu.name, list(tu.input.keys()), list(result.keys()) if isinstance(result, dict) else "list")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": json.dumps(result, default=str),
+                })
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # stop_reason=end_turn with no text or tool blocks
+        logger.warning("_call_claude: unexpected stop at turn %d (stop_reason=%s)", turn, response.stop_reason)
+        break
+
+    logger.error("_call_claude: exhausted %d turns without a final decision", 8)
+    return {}
 
 
 # ── Context snapshot from base_ctx ───────────────────────────────────────────
@@ -1495,6 +1842,7 @@ def run_pm_cycle(
                     context_snapshot=_snapshot(base_ctx),
                     hard_blocks_checked=hard_blocks,
                     execution_status="PENDING_HUMAN",  # filled below
+                    confidence_breakdown=decision_data.get("confidence_breakdown"),
                 )
 
                 # Always update memo status so this memo is not re-evaluated next cycle
@@ -1779,8 +2127,9 @@ def _build_decision_record(
     context_snapshot: Dict[str, Any],
     hard_blocks_checked: Dict[str, bool],
     execution_status: str,
+    confidence_breakdown: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    return {
+    record: Dict[str, Any] = {
         "decision_id": decision_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "category": category,
@@ -1795,6 +2144,11 @@ def _build_decision_record(
         "execution_status": execution_status,
         "human_override": None,
     }
+    if confidence_breakdown:
+        record["confidence_breakdown"] = {
+            k: round(float(v), 4) for k, v in confidence_breakdown.items()
+        }
+    return record
 
 
 # ── Reactive handlers ─────────────────────────────────────────────────────────
@@ -1857,6 +2211,7 @@ async def handle_critical_alert(alert_id: str) -> Dict[str, Any]:
             context_snapshot=_snapshot(base_ctx),
             hard_blocks_checked={"daily_loss_ok": True},
             execution_status="SENT_TO_EXECUTION",
+            confidence_breakdown=decision_data.get("confidence_breakdown"),
         )
 
         execution_status = _route_decision(decision_data, record)
@@ -1915,6 +2270,7 @@ async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
             context_snapshot=_snapshot(base_ctx),
             hard_blocks_checked={},
             execution_status="SENT_TO_EXECUTION",
+            confidence_breakdown=decision_data.get("confidence_breakdown"),
         )
 
         execution_status = _route_decision(decision_data, record)
@@ -2051,6 +2407,122 @@ async def run_orchestrator_cycle(portfolio_value: Optional[float] = None) -> dic
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
+def _update_decision_outcomes() -> None:
+    """
+    Nightly job (22:30 ET Mon–Fri) that back-fills outcome data on pm_decisions rows.
+
+    For each EXECUTE/MODIFY_SIZE decision with no recorded outcome:
+      1. Find the closed position by ticker + memo_id.
+      2. Compute return_pct from entry_price → exit_price (or current_price if still OPEN).
+      3. Write outcome JSONB to pm_decisions.
+      4. Upsert pm_calibration with conviction bucket → return data.
+
+    Never raises — failures are logged and skipped.
+    """
+    logger.info("PM: running nightly outcome update")
+    try:
+        client = _get_client()
+
+        # Fetch decisions that need outcomes: EXECUTE/MODIFY_SIZE with null outcome
+        resp = (
+            client.table("pm_decisions")
+            .select("decision_id,ticker,confidence,action_details,timestamp")
+            .in_("decision", ["EXECUTE", "MODIFY_SIZE"])
+            .eq("execution_status", "SENT_TO_EXECUTION")
+            .is_("outcome", "null")
+            .order("timestamp", desc=False)
+            .limit(50)
+            .execute()
+        )
+        decisions = resp.data or []
+        logger.info("PM outcome update: %d decisions to evaluate", len(decisions))
+
+        for dec in decisions:
+            ticker = dec.get("ticker")
+            decision_id = dec.get("decision_id")
+            confidence = dec.get("confidence")
+            memo_id = (dec.get("action_details") or {}).get("memo_id")
+
+            if not ticker or not decision_id:
+                continue
+
+            try:
+                # Look for CLOSED position matching ticker (latest by closed_at)
+                q = client.table("positions").select(
+                    "entry_price,current_price,status,closed_at,direction"
+                ).eq("ticker", ticker)
+                if memo_id:
+                    q = q.eq("memo_id", memo_id)
+                pos_resp = q.order("opened_at", desc=True).limit(1).execute()
+                pos = (pos_resp.data or [None])[0]
+
+                if not pos:
+                    continue
+
+                entry = float(pos.get("entry_price") or 0)
+                status = pos.get("status", "")
+                direction = pos.get("direction", "LONG")
+
+                if entry <= 0:
+                    continue
+
+                # Use exit price if closed, otherwise current price (mark-to-market)
+                if status == "CLOSED":
+                    exit_price = float(pos.get("current_price") or 0)
+                    closed_at = pos.get("closed_at")
+                elif status == "OPEN":
+                    exit_price = float(pos.get("current_price") or 0)
+                    closed_at = None
+                else:
+                    continue
+
+                if exit_price <= 0:
+                    continue
+
+                raw_return = (exit_price - entry) / entry
+                return_pct = raw_return if direction == "LONG" else -raw_return
+
+                outcome = {
+                    "return_pct": round(return_pct, 6),
+                    "entry_price": entry,
+                    "exit_price": exit_price,
+                    "position_status": status,
+                    "closed_at": closed_at,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+
+                # Write outcome to pm_decisions
+                client.table("pm_decisions").update({"outcome": outcome}).eq(
+                    "decision_id", decision_id
+                ).execute()
+
+                # Upsert pm_calibration row (skip if decision_id already exists)
+                was_correct = return_pct > 0
+                client.table("pm_calibration").upsert(
+                    {
+                        "ticker": ticker,
+                        "decision_id": decision_id,
+                        "confidence_at_entry": confidence,
+                        "return_pct": round(return_pct, 6),
+                        "was_correct": was_correct,
+                    },
+                    on_conflict="decision_id",
+                ).execute()
+
+                logger.info(
+                    "PM outcome: %s %s → return=%.1f%% correct=%s",
+                    ticker, decision_id, return_pct * 100, was_correct,
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "PM outcome update: failed for %s (%s) — %s", ticker, decision_id, exc
+                )
+
+    except Exception as exc:
+        logger.error("PM outcome update: outer error — %s", exc)
+
+
 def create_orchestrator_scheduler():
     """
     Return a configured (not yet started) BackgroundScheduler.
@@ -2111,6 +2583,19 @@ def create_orchestrator_scheduler():
         ),
         id="pm_trigger_research",
         name="PM → Research Queue (5:00PM ET)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Nightly outcome back-fill — 22:30 ET Mon–Fri
+    # Runs after risk_agent nightly metrics (22:00) so positions are up to date.
+    scheduler.add_job(
+        _update_decision_outcomes,
+        trigger=CronTrigger(
+            hour=22, minute=30, day_of_week="mon-fri", timezone="America/New_York"
+        ),
+        id="pm_outcome_update",
+        name="PM → Decision Outcome Back-fill (10:30PM ET)",
         replace_existing=True,
         misfire_grace_time=3600,
     )

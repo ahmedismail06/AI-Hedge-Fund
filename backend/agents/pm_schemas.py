@@ -126,6 +126,16 @@ class PMDecision(BaseModel):
         le=1.0,
         description="PM's confidence in this decision (0.0–1.0); tracked against outcomes for calibration",
     )
+    confidence_breakdown: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Per-dimension confidence scores (0.0–1.0): "
+            "data_quality (how complete/fresh is the research), "
+            "thesis_quality (how compelling is the variant perception), "
+            "timing (how well-timed is the entry/exit), "
+            "portfolio_fit (how well does this fit current exposure/regime)"
+        ),
+    )
     context_snapshot: PMContextSnapshot = Field(
         description="Full portfolio state at the moment this decision was made",
     )

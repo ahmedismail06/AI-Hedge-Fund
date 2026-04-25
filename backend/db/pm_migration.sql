@@ -85,6 +85,12 @@ ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_is_running       BOOLEAN NOT N
 -- ── Portfolio value tracking (added for _compute_portfolio_value) ─────────────
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS cash_balance NUMERIC(12, 2) NOT NULL DEFAULT 0;
 
+-- ── PM decisions: confidence breakdown + pipeline_is_running flag ─────────────
+ALTER TABLE pm_decisions ADD COLUMN IF NOT EXISTS confidence_breakdown JSONB;
+-- pm_config: track background pipeline state
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pipeline_is_running   BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pipeline_last_run     TIMESTAMPTZ;
+
 -- ── Positions table extensions (added for PM stop-tier + exit routing) ────────
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_action        TEXT CHECK (exit_action IN ('TRIM', 'CLOSE', 'ADD'));
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_trim_pct      NUMERIC(5, 2);

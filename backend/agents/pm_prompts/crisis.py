@@ -10,6 +10,8 @@ The PM decides: REDUCE_EXPOSURE | HALT_NEW_ENTRIES | LIQUIDATE_TO_TARGET | HEDGE
 import json
 from typing import Any, Dict, Tuple
 
+from backend.agents.pm_prompts.base_context import format_calibration_context
+
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. A crisis event has been detected — a CRITICAL risk alert, drawdown spike, or regime shift. You must assess the situation and choose a proportional response.
 
 ## Crisis Response Philosophy
@@ -45,8 +47,20 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
     "monitor_escalation_threshold": null
   },
   "risk_assessment": "What could go wrong with this crisis response — both over-reacting and under-reacting risks",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "confidence_breakdown": {
+    "data_quality": 0.0,
+    "thesis_quality": 0.0,
+    "timing": 0.0,
+    "portfolio_fit": 0.0
+  }
 }
+
+confidence_breakdown dimensions (each 0.0–1.0):
+- data_quality: how reliable is the crisis signal (real event vs data artifact)
+- thesis_quality: how clearly is the severity and scope of the crisis understood
+- timing: how well-timed is the response relative to crisis development
+- portfolio_fit: how proportional is the response to actual portfolio exposure to the crisis
 
 For REDUCE_EXPOSURE: positions_to_reduce is [{"ticker": str, "reduce_pct": float, "reason": str}]
 For LIQUIDATE_TO_TARGET: specify target_gross_exposure (fraction) and positions_to_reduce in priority order
@@ -110,7 +124,7 @@ def build_crisis_prompt(
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 Regime: {base_ctx['macro_regime']} | Gross cap: {base_ctx['regime_caps']['gross']:.0%}
 
----
+{format_calibration_context(base_ctx)}---
 Assess the severity of this crisis event and choose a proportional response. Consider: is this isolated or systemic, is it a data artifact or a real signal, and what is the cost of overreacting vs underreacting?
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""
