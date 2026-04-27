@@ -180,23 +180,41 @@ def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
         logger.error("_run_exit_cycle: DB query failed: %s", exc)
         return result
 
+    placed_this_cycle: set = set()
+
     for pos in positions_to_exit:
         exit_action = pos.get("exit_action")
         trim_pct = float(pos.get("exit_trim_pct") or 0)
         exit_type = "EXIT_CLOSE" if exit_action == "CLOSE" else "EXIT_TRIM"
 
-        # Skip if an active sell order already exists for this position.
+        # Guard 1: never process the same position twice in one cycle.
+        if pos["id"] in placed_this_cycle:
+            logger.warning("_run_exit_cycle: position %s seen twice in same cycle — skipping duplicate", pos["id"])
+            continue
+
+        # Guard 2: skip if an active sell order (SUBMITTED or PARTIAL) already exists.
+        # Guard 3: skip if a SELL order filled within the last 30 minutes (cycle already executed).
         try:
+            from datetime import datetime, timezone, timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
             existing = (
                 client.table("orders")
-                .select("id")
+                .select("id,status,filled_at")
                 .eq("position_id", pos["id"])
                 .eq("order_side", "SELL")
-                .in_("status", ["SUBMITTED", "PARTIAL"])
                 .execute()
             )
-            if existing.data:
+            active = [o for o in (existing.data or []) if o["status"] in ("SUBMITTED", "PARTIAL")]
+            recent_filled = [
+                o for o in (existing.data or [])
+                if o["status"] == "FILLED" and o.get("filled_at") and o["filled_at"] >= cutoff
+            ]
+            if active:
                 logger.debug("Position %s already has an active exit order — skipping", pos["id"])
+                continue
+            if recent_filled:
+                logger.info("Position %s had a SELL order filled within 30 min — clearing exit_action and skipping", pos["id"])
+                client.table("positions").update({"exit_action": None, "exit_trim_pct": None}).eq("id", pos["id"]).execute()
                 continue
         except Exception as exc:
             logger.warning("_run_exit_cycle: order check failed for %s: %s", pos.get("ticker"), exc)
@@ -217,6 +235,7 @@ def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
             except Exception as exc:
                 logger.warning("Could not clear exit_action for %s after successful placement: %s", pos.get("ticker"), exc)
 
+            placed_this_cycle.add(pos["id"])
             result["exit_order_ids"].append(order_status.order_id)
             result["exits_placed"] += 1
             logger.info(
