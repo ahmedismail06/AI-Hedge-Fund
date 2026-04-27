@@ -35,6 +35,13 @@ function fmtTime(ts) {
   } catch { return ts; }
 }
 
+function fmtResolved(ts) {
+  if (!ts) return 'Resolved';
+  try {
+    return `Resolved ${fmtTime(ts)}`;
+  } catch { return 'Resolved'; }
+}
+
 export default function RiskAlert({ alert, onResolve, compact = false }) {
   const s = SEVERITY_STYLES[alert.severity] || SEVERITY_STYLES.WARN;
 
@@ -62,25 +69,26 @@ export default function RiskAlert({ alert, onResolve, compact = false }) {
             {alert.severity}
           </span>
           <span className="text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
-            {fmtTime(alert.triggered_at)}
+            {fmtTime(alert.created_at)}
           </span>
           {alert.resolved && (
             <span
               className="text-[10px] px-1.5 py-0.5 rounded-sm"
               style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}
+              title={alert.resolved_at ? new Date(alert.resolved_at).toLocaleString() : undefined}
             >
-              Resolved
+              {fmtResolved(alert.resolved_at)}
             </span>
           )}
         </div>
 
         {!compact ? (
           <p className="text-sm mt-1.5 leading-snug" style={{ color: s.textVar }}>
-            {alert.message}
+            {alert.trigger}
           </p>
         ) : (
           <p className="text-[11px] mt-0.5 truncate font-data" style={{ color: 'var(--text-2)' }}>
-            {alert.message}
+            {alert.trigger}
           </p>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getAlerts, getCriticalAlerts, getMetrics, getMetricsHistory, runRiskMonitor, runNightlyMetrics } from '../api/risk';
+import { getAlerts, getCriticalAlerts, resolveAlert, getMetrics, getMetricsHistory, runRiskMonitor, runNightlyMetrics } from '../api/risk';
 import { getRegime } from '../api/macro';
 import RiskAlert from '../components/RiskAlert';
 import StatCard from '../components/StatCard';
@@ -87,6 +87,17 @@ export default function Risk() {
     setRunningMetrics(false);
   };
 
+  const handleResolve = async (alertId) => {
+    try {
+      await resolveAlert(alertId);
+      setAlerts(prev => prev.map(a => a.id === alertId
+        ? { ...a, resolved: true, resolved_at: new Date().toISOString() }
+        : a
+      ));
+      setCriticals(prev => prev.filter(c => c.id !== alertId));
+    } catch {}
+  };
+
   const isRiskOff = regime && (regime.regime === 'Risk-Off' || regime.regime === 'Stagflation');
   const tiers = isRiskOff ? STOP_TIERS.riskOff : STOP_TIERS.normal;
 
@@ -154,7 +165,7 @@ export default function Risk() {
         ) : (
           <div className="space-y-2">
             {visibleAlerts.map(a => (
-              <RiskAlert key={a.id} alert={a} />
+              <RiskAlert key={a.id} alert={a} onResolve={handleResolve} />
             ))}
           </div>
         )}
