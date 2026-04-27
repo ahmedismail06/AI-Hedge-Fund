@@ -113,6 +113,24 @@ async def get_metrics():
     return data[0]
 
 
+# ── GET /risk/metrics/history ─────────────────────────────────────────────────
+
+@router.get("/metrics/history")
+async def get_metrics_history(limit: int = 30):
+    """Return the last N days of portfolio metrics, ordered oldest-first for charting."""
+    supabase = _get_client()
+    resp = (
+        supabase
+        .table("portfolio_metrics")
+        .select("date,sharpe_ratio,sortino_ratio,max_drawdown,var_95,beta,calmar_ratio")
+        .order("date", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = resp.data or []
+    return list(reversed(rows))
+
+
 # ── POST /risk/metrics/run ────────────────────────────────────────────────────
 
 @router.post("/metrics/run")
