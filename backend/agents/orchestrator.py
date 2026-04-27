@@ -1272,23 +1272,44 @@ def _route_decision(
 
         elif category == "REBALANCE" and decision == "REBALANCE":
             # Trim overweight positions to bring gross/net exposure back toward regime caps.
-            # PM should include trim_pct in action_details; default to 20% if absent.
+            # PM may include per-ticker adjustments[] or a single trim_pct.
+            # Never overwrite exit_action if a trim is already pending — prevents re-arming
+            # a position that the execution agent has already picked up this cycle.
             action = decision_data.get("action_details", {})
-            trim_pct = _clean_float(action.get("trim_pct"), 0.20)
-            if ticker:
+            adjustments = action.get("adjustments", [])
+
+            if adjustments:
+                # Per-ticker trims from the PM's adjustments array.
+                for adj in adjustments:
+                    adj_ticker = adj.get("ticker")
+                    adj_action = adj.get("action", "TRIM")
+                    pct_change = _clean_float(adj.get("pct_change"))
+                    if not adj_ticker or not pct_change:
+                        continue
+                    trim_pct = abs(pct_change) / 100.0
+                    exit_act = "CLOSE" if adj_action == "CLOSE" else "TRIM"
+                    # Only arm if no exit is already pending for this position.
+                    client.table("positions").update({
+                        "exit_action": exit_act,
+                        "exit_trim_pct": trim_pct,
+                    }).eq("ticker", adj_ticker).eq("status", "OPEN").is_("exit_action", "null").execute()
+                    logger.info("PM: REBALANCE %s %s %.0f%%", exit_act, adj_ticker, trim_pct * 100)
+            elif ticker:
                 # Single-ticker rebalance (e.g. trim one concentrated position)
+                trim_pct = _clean_float(action.get("trim_pct"), 0.20)
                 client.table("positions").update({
                     "exit_action": "TRIM",
                     "exit_trim_pct": trim_pct,
-                }).eq("ticker", ticker).eq("status", "OPEN").execute()
+                }).eq("ticker", ticker).eq("status", "OPEN").is_("exit_action", "null").execute()
                 logger.info("PM: REBALANCE TRIM %s %.0f%%", ticker, trim_pct * 100)
             else:
                 # Portfolio-wide rebalance — trim all open positions proportionally
+                trim_pct = _clean_float(action.get("trim_pct"), 0.20)
                 client.table("positions").update({
                     "exit_action": "TRIM",
                     "exit_trim_pct": trim_pct,
-                }).eq("status", "OPEN").execute()
-                logger.info("PM: REBALANCE (portfolio-wide) — trim %.0f%% applied to all OPEN positions", trim_pct * 100)
+                }).eq("status", "OPEN").is_("exit_action", "null").execute()
+                logger.info("PM: REBALANCE (portfolio-wide) — trim %.0f%% applied to OPEN positions without pending exit", trim_pct * 100)
             return "SENT_TO_EXECUTION"
 
         elif category == "REBALANCE" and decision == "RAISE_CASH":
@@ -1298,7 +1319,7 @@ def _route_decision(
             client.table("positions").update({
                 "exit_action": "TRIM",
                 "exit_trim_pct": trim_pct,
-            }).eq("status", "OPEN").execute()
+            }).eq("status", "OPEN").is_("exit_action", "null").execute()
             logger.warning("PM: REBALANCE RAISE_CASH — trim %.0f%% written to all OPEN positions", trim_pct * 100)
             return "SENT_TO_EXECUTION"
 
