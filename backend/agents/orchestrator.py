@@ -322,6 +322,7 @@ def _handle_empty_portfolio_deploy(
         f"{action}: {detail}",
         mode_snapshot=regime,
     )
+    notify_event("DEPLOY_CASH_ACTION", {"action": action, "detail": detail, "regime": regime})
 
     return {
         "cycle_id": cycle_id,
