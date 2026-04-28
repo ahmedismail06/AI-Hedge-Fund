@@ -356,6 +356,21 @@ def _fmt_pm_decision(p: dict):
     )
 
 
+def _fmt_deploy_cash_action(p: dict):
+    action = p.get("action", "—")
+    detail = p.get("detail", "—")
+    regime = p.get("regime", "—")
+    return (
+        f"PM — Deploy Cash: {action.replace('_', ' ').title()}",
+        [
+            {"title": "Regime",  "value": str(regime), "short": True},
+            {"title": "Action",  "value": str(action), "short": True},
+            {"title": "Detail",  "value": str(detail), "short": False},
+        ],
+        COLOR_INFO,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Formatter registry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,4 +406,5 @@ _FORMATTERS = {
     "RISK_BREACH":                _fmt_risk_breach,
     # PM Agent decisions
     "PM_DECISION":                _fmt_pm_decision,
+    "DEPLOY_CASH_ACTION":         _fmt_deploy_cash_action,
 }
