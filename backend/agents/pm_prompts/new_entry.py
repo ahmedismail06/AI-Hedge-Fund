@@ -29,7 +29,7 @@ _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity
 - MODIFY_SIZE: Adjust position size (up or down) — specify new dollar_amount and reason
 - DEFER: Hold for a better entry or wait for a catalyst — specify what you're waiting for AND when to re-check
 - REJECT: Pass on this idea entirely — specify why this memo does not meet your standards
-- WATCHLIST: Interesting thesis but not actionable now (sizing, concentration, timing) — revisit later
+- WATCHLIST: Interesting thesis but not actionable now (sizing, concentration, timing) — set defer_until to when you'd revisit
 
 ## Strategic Deferral Rules
 When choosing DEFER, always set both defer_until (the re-check date) and defer_condition (the reason):
@@ -77,7 +77,7 @@ confidence_breakdown dimensions (each 0.0–1.0):
 
 For DEFER: populate defer_until (ISO date YYYY-MM-DD or integer days) and defer_condition (what you're waiting for).
 For REJECT: populate reject_reason with the specific thesis failure.
-For WATCHLIST: use reject_reason to describe what would change your view.
+For WATCHLIST: set defer_until (ISO date or integer days) to when you'd revisit, and use reject_reason to describe what would change your view.
 For EXECUTE/MODIFY_SIZE: populate direction, shares, dollar_amount, limit_price (optional), sizing_rationale.
 """
 

@@ -1042,7 +1042,7 @@ def _update_memo_after_decision(
 
     try:
         update: Dict[str, Any] = {"status": memo_status}
-        if memo_status == "DEFERRED":
+        if memo_status in ("DEFERRED", "WATCHLIST") and defer_val:
             update["deferred_until"] = _parse_defer_time(defer_val).isoformat()
 
         q = _get_client().table("memos").update(update)
@@ -2019,9 +2019,19 @@ def run_pm_cycle(
                             "TRIM": "APPROVED",
                             "CLOSE": "APPROVED",
                         }.get(final_decision, "WATCHLIST")
+                    defer_val = (decision_data.get("action_details") or {}).get("defer_until")
+                    if memo_decision == "DEFER":
+                        earnings_str = data.get("memo", {}).get("next_earnings_date")
+                        if earnings_str:
+                            try:
+                                earnings_dt = date.fromisoformat(str(earnings_str)[:10])
+                                if date.today() <= earnings_dt <= date.today() + timedelta(days=_EARNINGS_LOOKAHEAD_DAYS):
+                                    defer_val = (earnings_dt + timedelta(days=1)).isoformat()
+                            except (ValueError, TypeError):
+                                pass
                     _update_memo_after_decision(
                         ticker, memo_decision, memo_id=memo_id,
-                        defer_val=(decision_data.get("action_details") or {}).get("defer_until"),
+                        defer_val=defer_val,
                     )
 
                 # Embed alert_id in action_details for CRISIS deduplication
