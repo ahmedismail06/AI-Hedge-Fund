@@ -269,7 +269,7 @@ def _save_universe_cache(universe: List[UniverseCandidate]) -> None:
 def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     """
     Build the screener universe from Polygon reference tickers.
-    Filters: US exchange, Cap $50M–$2B, non-excluded SIC, ADV ≥ $500K, Analyst ≤ 5.
+    Filters: US exchange, Cap $50M–$2B, non-excluded SIC, ADV ≥ $500K, Analyst ≤ 8.
     """
     polygon_key = os.getenv("POLYGON_API_KEY")
     fmp_key = os.getenv("FMP_API_KEY")
@@ -378,7 +378,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
         cand.analyst_count = count
         time.sleep(0.5)  # Proactive pacing to protect FMP 300 req/min
         
-        if count is not None and count > 5:
+        if count is not None and count > 8:
             return None
         return cand
 
@@ -391,7 +391,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
             if result is not None:
                 final.append(result)
 
-    logger.info("Final universe after analyst ≤ 5 filter: %d candidates", len(final))
+    logger.info("Final universe after analyst ≤ 8 filter: %d candidates", len(final))
 
     if final:
         _save_universe_cache(final)
@@ -427,18 +427,23 @@ def _polygon_roe(polygon_financials: dict) -> Optional[float]:
 
 def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dict[str, dict]) -> List[UniverseCandidate]:
     """
-    Exclude tickers with negative ROE, pre-revenue biotech signature, or insufficient data.
+    Exclude tickers that fail institutional-quality profitability gates.
     Runs after data fetch but before scoring.
 
-    ROE source priority:
+    Gates (in order):
+      1. BROKEN_UNIT_ECONOMICS  — gm < 0.15 (product-level economics irreparable)
+      2. NO_PROFITABILITY_PATH  — roe < -0.20 AND rev_growth < 0 AND gm < 0.30
+      3. PRE_REVENUE_BIOTECH    — roe is None AND gm > 0.95 (pre-revenue signal)
+      4. INSUFFICIENT_QUALITY_DATA — gm is None AND rev_growth is None
+
+    ROE source priority (for gate 2):
       1. FMP income_statement + balance_sheet (fetch_quality_fmp_batch output)
       2. Polygon annual financials (always fetched in fetch_ticker_data)
-    If FMP data is absent (no FMP_API_KEY or API failure), the Polygon fallback
-    ensures negative-ROE tickers are still caught.
     """
     filtered: List[UniverseCandidate] = []
     exclusions = {
-        "NEGATIVE_ROE": 0,
+        "BROKEN_UNIT_ECONOMICS": 0,
+        "NO_PROFITABILITY_PATH": 0,
         "PRE_REVENUE_BIOTECH": 0,
         "INSUFFICIENT_QUALITY_DATA": 0
     }
@@ -488,19 +493,30 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
             if r1 is not None and r2 and r2 != 0:
                 rev_growth = (r1 - r2) / abs(r2)
 
-        # 1. Negative ROE
-        if roe is not None and roe < 0:
-            exclusions["NEGATIVE_ROE"] += 1
-            logger.info("%s: Excluded — NEGATIVE_ROE (%.3f, source=%s)", ticker, roe, roe_source)
+        # 1. Broken unit economics — sub-15% gross margin is irreparable at the product level
+        if gm is not None and gm < 0.15:
+            exclusions["BROKEN_UNIT_ECONOMICS"] += 1
+            logger.info("%s: Excluded — BROKEN_UNIT_ECONOMICS (gm=%.3f)", ticker, gm)
             continue
 
-        # 2. Pre-revenue biotech signature
+        # 2. No profitability path — must fail all three simultaneously to exclude
+        if (roe is not None and roe < -0.20
+                and rev_growth is not None and rev_growth < 0.0
+                and gm is not None and gm < 0.30):
+            exclusions["NO_PROFITABILITY_PATH"] += 1
+            logger.info(
+                "%s: Excluded — NO_PROFITABILITY_PATH (roe=%.3f, rev_growth=%.3f, gm=%.3f)",
+                ticker, roe, rev_growth, gm,
+            )
+            continue
+
+        # 3. Pre-revenue biotech signature
         if roe is None and gm is not None and gm > 0.95:
             exclusions["PRE_REVENUE_BIOTECH"] += 1
             logger.info("%s: Excluded — PRE_REVENUE_BIOTECH (gm=%.3f)", ticker, gm)
             continue
 
-        # 3. Insufficient data
+        # 4. Insufficient data
         if gm is None and rev_growth is None:
             exclusions["INSUFFICIENT_QUALITY_DATA"] += 1
             logger.info("%s: Excluded — INSUFFICIENT_QUALITY_DATA", ticker)
