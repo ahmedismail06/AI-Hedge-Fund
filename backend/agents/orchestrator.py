@@ -1448,7 +1448,7 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             .select("*")
             .eq("status", "PENDING_PM_REVIEW")
             .order("created_at", desc=False)
-            .limit(5)
+            .limit(10)
             .execute()
         )
         open_tickers = {p["ticker"] for p in base_ctx.get("positions", []) if p.get("status") == "OPEN"}
@@ -2009,7 +2009,12 @@ def run_pm_cycle(
                 record_template["execution_status"] = execution_status
 
                 # Post-routing memo update (Fix for desynchronization)
-                if category in ("NEW_ENTRY", "POSITION_UPDATE") and ticker and execution_status != "BLOCKED":
+                # Allow REJECT through even though _route_decision returns "BLOCKED" for it —
+                # the BLOCKED guard is only meant to protect sizing-failure paths (EXECUTE/MODIFY_SIZE).
+                # Hard-block pre-routing REJECTs use `continue` and never reach this line.
+                if category in ("NEW_ENTRY", "POSITION_UPDATE") and ticker and (
+                    execution_status != "BLOCKED" or final_decision == "REJECT"
+                ):
                     # Map POSITION_UPDATE decisions to memo-status equivalents
                     memo_decision = final_decision
                     if category == "POSITION_UPDATE":
