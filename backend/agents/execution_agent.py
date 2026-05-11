@@ -98,10 +98,13 @@ def run_fill_recon() -> int:
         loop = _ibkr.get_loop()
 
         async def _get_fills():
+            # Request today's execution reports from TWS — ib.fills() is
+            # session-local and empty on a fresh connection after a restart.
+            await ib.reqExecutionsAsync()
             return ib.fills()
 
         future = asyncio.run_coroutine_threadsafe(_get_fills(), loop)
-        fills = future.result(timeout=10)
+        fills = future.result(timeout=15)
 
         if not fills:
             return 0

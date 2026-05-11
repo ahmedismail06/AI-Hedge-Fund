@@ -184,7 +184,10 @@ def cancel_order(order_id: str) -> bool:
             ib = connect()
 
             async def _do_cancel():
-                for t in ib.trades():
+                # Fetch live open orders from TWS — ib.trades() is session-local
+                # and will be empty after a backend restart.
+                await ib.reqOpenOrdersAsync()
+                for t in ib.openTrades():
                     if t.order.permId == ibkr_order_id:
                         ib.cancelOrder(t.order)
                         logger.info(
@@ -192,9 +195,15 @@ def cancel_order(order_id: str) -> bool:
                             order_id,
                             ibkr_order_id,
                         )
-                        break
+                        return
+                logger.warning(
+                    "cancel_order: perm_id=%s not found in IBKR open orders "
+                    "(order_id=%s) — may already be filled or cancelled on exchange",
+                    ibkr_order_id,
+                    order_id,
+                )
 
-            asyncio.run_coroutine_threadsafe(_do_cancel(), get_loop()).result(timeout=10)
+            asyncio.run_coroutine_threadsafe(_do_cancel(), get_loop()).result(timeout=15)
         except IBKRConnectionError as exc:
             # IBKR unavailable — still mark CANCELLED in Supabase so the
             # execution cycle does not keep retrying this order.
@@ -275,12 +284,13 @@ def check_timeouts() -> List[str]:
                 ib = connect()
 
                 async def _do_timeout_cancel():
-                    for t in ib.trades():
+                    await ib.reqOpenOrdersAsync()
+                    for t in ib.openTrades():
                         if t.order.permId == ibkr_order_id:
                             ib.cancelOrder(t.order)
                             break
 
-                asyncio.run_coroutine_threadsafe(_do_timeout_cancel(), get_loop()).result(timeout=10)
+                asyncio.run_coroutine_threadsafe(_do_timeout_cancel(), get_loop()).result(timeout=15)
             except IBKRConnectionError as exc:
                 logger.warning(
                     "IBKR unreachable while timing out order_id=%s: %s",
