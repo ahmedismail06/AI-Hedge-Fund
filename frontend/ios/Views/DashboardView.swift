@@ -1,299 +1,232 @@
-//
-//  DashboardView.swift
-//  TradingDashboard
-//
-//  Main dashboard overview with key metrics and charts
-//
-
 import SwiftUI
-import Charts
+
+// MARK: - View
 
 struct DashboardView: View {
-    @EnvironmentObject var themeManager: ThemeManager
-    @State private var showSettings = false
-    
+    @StateObject private var vm = DashboardVM()
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Portfolio Summary Card
-                    PortfolioSummaryCard()
-                    
-                    // Performance Chart
-                    PerformanceChartCard()
-                    
-                    // Quick Stats Grid
-                    QuickStatsGrid()
-                    
-                    // Recent Activity
-                    RecentActivityCard()
+            Group {
+                if vm.isLoading && vm.status == nil {
+                    ProgressView("Loading…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            if let err = vm.error { ErrorCard(message: err) }
+                            if let s = vm.status {
+                                PMStatusCard(status: s, onHalt: { Task { await vm.halt() } },
+                                             onResume: { Task { await vm.resume() } })
+                                PortfolioStatsRow(p: s.portfolio)
+                                if let last = s.lastCycle { LastCycleCard(cycle: last) }
+                            }
+                            if !vm.decisions.isEmpty {
+                                RecentDecisionsSection(decisions: vm.decisions)
+                            }
+                        }
+                        .padding()
+                    }
                 }
-                .padding()
             }
-            .navigationTitle("Dashboard")
+            .navigationTitle("AI Hedge Fund")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Image(systemName: "gearshape.fill")
+                    Button { Task { await vm.runCycle() } } label: {
+                        Label("Run Cycle", systemImage: "play.circle")
+                    }
+                    .disabled(vm.cycleRunning)
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { Task { await vm.load() } } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
                 }
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView()
-            }
-            .background(Color(.systemGroupedBackground))
+            .task { await vm.load() }
+            .refreshable { await vm.load() }
         }
     }
 }
 
-struct PortfolioSummaryCard: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Portfolio Value")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            
-            HStack(alignment: .firstTextBaseline) {
-                Text("$124,567.89")
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
-                
-                Spacer()
-                
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.up.right")
-                        .font(.caption)
-                    Text("+2.34%")
-                        .font(.subheadline)
-                }
-                .foregroundStyle(.green)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.green.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Today's P&L")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("+$1,234.56")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.green)
-                }
-                
-                Spacer()
-                
-                VStack(alignment: .trailing) {
-                    Text("Total Return")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("+$24,567.89")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                }
-            }
-            .padding(.top, 4)
-        }
-        .padding()
-        .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
-    }
-}
+// MARK: - PM Status Card
 
-struct PerformanceChartCard: View {
-    @State private var selectedPeriod: TimePeriod = .oneMonth
-    
-    enum TimePeriod: String, CaseIterable {
-        case oneDay = "1D"
-        case oneWeek = "1W"
-        case oneMonth = "1M"
-        case threeMonths = "3M"
-        case oneYear = "1Y"
-        case all = "All"
-    }
-    
+private struct PMStatusCard: View {
+    let status: PMStatus
+    let onHalt: () -> Void
+    let onResume: () -> Void
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Performance")
-                    .font(.headline)
-                
-                Spacer()
-                
-                Picker("Period", selection: $selectedPeriod) {
-                    ForEach(TimePeriod.allCases, id: \.self) { period in
-                        Text(period.rawValue).tag(period)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("AI Portfolio Manager").font(.headline)
+                    HStack(spacing: 8) {
+                        ModeBadge(mode: status.mode)
+                        if status.dailyLossHaltTriggered {
+                            Label("HALTED", systemImage: "pause.fill")
+                                .font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(.red, in: Capsule())
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 240)
-            }
-            
-            // Sample chart - replace with real data
-            Chart {
-                ForEach(sampleChartData) { item in
-                    LineMark(
-                        x: .value("Date", item.date),
-                        y: .value("Value", item.value)
-                    )
-                    .foregroundStyle(.blue.gradient)
-                    .interpolationMethod(.catmullRom)
-                    
-                    AreaMark(
-                        x: .value("Date", item.date),
-                        y: .value("Value", item.value)
-                    )
-                    .foregroundStyle(.blue.opacity(0.1).gradient)
-                    .interpolationMethod(.catmullRom)
+                Spacer()
+                VStack(alignment: .trailing, spacing: 6) {
+                    if status.activeCriticalAlerts > 0 {
+                        Label("\(status.activeCriticalAlerts) CRITICAL", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(.red, in: Capsule())
+                    }
+                    Text("\(status.decisionsToday) decisions today")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .frame(height: 200)
-            .chartYAxis {
-                AxisMarks(position: .leading)
+
+            Divider()
+
+            HStack {
+                Text("Cycle every \(status.cycleIntervalSeconds / 60) min")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if status.dailyLossHaltTriggered {
+                    Button("Resume", action: onResume)
+                        .buttonStyle(.borderedProminent).tint(.green).controlSize(.small)
+                } else {
+                    Button("Halt All Entries", action: onHalt)
+                        .buttonStyle(.bordered).tint(.red).controlSize(.small)
+                }
             }
         }
         .padding()
-        .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
-    }
-    
-    private var sampleChartData: [ChartDataPoint] {
-        let calendar = Calendar.current
-        let endDate = Date()
-        return (0..<30).reversed().map { day in
-            let date = calendar.date(byAdding: .day, value: -day, to: endDate)!
-            let value = 100000.0 + Double.random(in: -5000...15000)
-            return ChartDataPoint(date: date, value: value)
-        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
-struct ChartDataPoint: Identifiable {
-    let id = UUID()
-    let date: Date
-    let value: Double
-}
+// MARK: - Portfolio Stats
 
-struct QuickStatsGrid: View {
-    let stats = [
-        StatItem(title: "Win Rate", value: "67.8%", icon: "chart.bar.fill", color: .green),
-        StatItem(title: "Sharpe Ratio", value: "1.85", icon: "waveform.path.ecg", color: .blue),
-        StatItem(title: "Max Drawdown", value: "-8.2%", icon: "arrow.down.right", color: .red),
-        StatItem(title: "Positions", value: "12", icon: "square.grid.2x2.fill", color: .orange)
-    ]
-    
+private struct PortfolioStatsRow: View {
+    let p: PortfolioSummary
+
     var body: some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            ForEach(stats) { stat in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: stat.icon)
-                            .foregroundStyle(stat.color)
-                        Spacer()
-                    }
-                    
-                    Text(stat.value)
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    Text(stat.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding()
-                .background(Color(.systemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
-            }
+        HStack(spacing: 0) {
+            StatCell(label: "Positions", value: "\(p.positionCount)")
+            divider
+            StatCell(label: "Gross Exp", value: (p.grossExposure * 100).pctString)
+            divider
+            StatCell(label: "Net Exp",   value: (p.netExposure * 100).pctString)
+            divider
+            StatCell(label: "Cash",      value: (p.cashPct * 100).pctString)
         }
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var divider: some View {
+        Divider().frame(height: 36)
     }
 }
 
-struct StatItem: Identifiable {
-    let id = UUID()
-    let title: String
+private struct StatCell: View {
+    let label: String
     let value: String
-    let icon: String
-    let color: Color
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(value).font(.title3.bold())
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
 }
 
-struct RecentActivityCard: View {
+// MARK: - Last Cycle Card
+
+private struct LastCycleCard: View {
+    let cycle: LastCycleInfo
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Recent Activity")
-                .font(.headline)
-            
-            VStack(spacing: 12) {
-                ActivityRow(
-                    icon: "arrow.up.circle.fill",
-                    iconColor: .green,
-                    title: "Bought AAPL",
-                    subtitle: "100 shares @ $175.50",
-                    time: "2h ago"
-                )
-                
-                ActivityRow(
-                    icon: "arrow.down.circle.fill",
-                    iconColor: .red,
-                    title: "Sold TSLA",
-                    subtitle: "50 shares @ $245.30",
-                    time: "5h ago"
-                )
-                
-                ActivityRow(
-                    icon: "bell.fill",
-                    iconColor: .orange,
-                    title: "Price Alert",
-                    subtitle: "NVDA reached $850",
-                    time: "1d ago"
-                )
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Last Cycle", systemImage: "clock.arrow.circlepath")
+                .font(.subheadline.bold()).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                if let cat = cycle.category { CategoryBadge(category: cat) }
+                if let dec = cycle.decision {
+                    Text(dec).font(.subheadline).lineLimit(1)
+                }
+                Spacer()
+                if let ts = cycle.timestamp {
+                    Text(ts.shortTimestamp).font(.caption).foregroundStyle(.secondary)
+                }
             }
+            if let es = cycle.executionStatus { ExecutionStatusBadge(status: es) }
         }
         .padding()
-        .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.05), radius: 5, x: 0, y: 2)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
-struct ActivityRow: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    let subtitle: String
-    let time: String
-    
+// MARK: - Recent Decisions
+
+private struct RecentDecisionsSection: View {
+    let decisions: [PMDecision]
+
     var body: some View {
-        HStack {
-            Image(systemName: icon)
-                .foregroundStyle(iconColor)
-                .font(.title3)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent Decisions").font(.headline)
+            ForEach(decisions.prefix(6)) { d in
+                HStack(spacing: 10) {
+                    CategoryBadge(category: d.category)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            if let t = d.ticker { Text(t).font(.subheadline.bold()) }
+                            Text(d.decision).font(.subheadline).lineLimit(1)
+                        }
+                        Text(d.timestamp.shortTimestamp).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    ExecutionStatusBadge(status: d.executionStatus)
+                }
+                .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
             }
-            
-            Spacer()
-            
-            Text(time)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 }
 
-#Preview {
-    DashboardView()
-        .environmentObject(ThemeManager())
+// MARK: - ViewModel
+
+@MainActor
+final class DashboardVM: ObservableObject {
+    @Published var status: PMStatus?
+    @Published var decisions: [PMDecision] = []
+    @Published var isLoading = false
+    @Published var cycleRunning = false
+    @Published var error: String?
+
+    func load() async {
+        isLoading = true; error = nil
+        defer { isLoading = false }
+        do {
+            async let s = APIService.shared.getPMStatus()
+            async let d = APIService.shared.getDecisions(limit: 8)
+            status    = try await s
+            decisions = try await d
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func halt() async {
+        do { try await APIService.shared.haltPM(); await load() }
+        catch { self.error = error.localizedDescription }
+    }
+
+    func resume() async {
+        do { try await APIService.shared.resumePM(); await load() }
+        catch { self.error = error.localizedDescription }
+    }
+
+    func runCycle() async {
+        cycleRunning = true; defer { cycleRunning = false }
+        do { try await APIService.shared.triggerCycle(); await load() }
+        catch { self.error = error.localizedDescription }
+    }
 }

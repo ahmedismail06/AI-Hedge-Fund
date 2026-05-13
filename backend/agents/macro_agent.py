@@ -263,9 +263,10 @@ Stagflation:
   Stop posture: Risk-Off stops apply
 
 Transitional:
-  Gross exposure: hold current book at reduced size; no new large positions
+  Gross exposure: hold current book at reduced size
+  Entry sizing: Small positions (≤3% NAV) remain actionable on high-quality setups. Medium positions (3–6% NAV) require conviction ≥ 7.5. Large positions (>6% NAV) deferred until regime confidence ≥ 7.0.
   Sector tilt: neutral across all three sectors
-  Stop posture: standard stops; wait for regime clarity before sizing up
+  Stop posture: standard stops; wait for regime clarity before sizing up large positions
 
 ---
 
@@ -970,9 +971,10 @@ def run_macro_pipeline() -> MacroBriefing:
             portfolio_guidance_text = (
                 f"Signal confidence is {final_scores.regime_confidence:.1f}/10 — regime signals "
                 f"are mixed. Adopt Transitional posture regardless of {final_regime} "
-                f"classification: hold current book at reduced size, no new large positions, "
-                f"standard stops. Wait for confidence ≥ 7.0 before sizing to {final_regime} "
-                f"implications."
+                f"classification: hold current book at reduced size, standard stops. "
+                f"Small positions (≤3% NAV) remain actionable on high-quality setups. "
+                f"Medium positions (3–6% NAV) require conviction ≥ 7.5. "
+                f"Large positions (>6% NAV) deferred until confidence ≥ 7.0."
             )
             logger.info(
                 "Confidence gate triggered: confidence=%.1f < 7.0 — portfolio_guidance "
@@ -1059,7 +1061,8 @@ def run_macro_pipeline() -> MacroBriefing:
             key_themes=["Pipeline error — no macro signals available"],
             portfolio_guidance=(
                 "Transitional regime assumed due to data failure. "
-                "Hold existing positions, no new entries until pipeline recovers."
+                "Hold existing positions. Small positions (≤3% NAV) may be initiated on very high-conviction setups only. "
+                "No medium or large new entries until pipeline recovers."
             ),
             override_reason=f"Pipeline error: {exc}",
         )

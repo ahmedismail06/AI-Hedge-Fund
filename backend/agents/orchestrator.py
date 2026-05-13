@@ -265,52 +265,94 @@ def _handle_empty_portfolio_deploy(
     today_str = date.today().isoformat()
     top_tickers: List[str] = []
 
-    # Only pick rows that haven't been queued yet so we don't re-trigger research
-    # that's already in-flight or completed.
+    # Check whether the screener has produced any results for today at all.
+    screener_has_run = False
     try:
-        resp = (
+        any_resp = (
             _get_client()
             .table("watchlist")
-            .select("ticker,composite_score")
+            .select("ticker")
             .eq("run_date", today_str)
-            .eq("queued_for_research", False)
             .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
-            .order("composite_score", desc=True)
-            .limit(3)
+            .limit(1)
             .execute()
         )
-        top_tickers = [row["ticker"] for row in (resp.data or [])]
+        screener_has_run = bool(any_resp.data)
     except Exception as exc:
-        logger.warning("_handle_empty_portfolio_deploy: watchlist query failed — %s", exc)
+        logger.warning("_handle_empty_portfolio_deploy: screener-check query failed — %s", exc)
 
-    if top_tickers:
-        # Mark rows as queued BEFORE triggering so a concurrent cycle can't double-queue.
-        try:
-            _get_client().table("watchlist").update({"queued_for_research": True}).in_(
-                "ticker", top_tickers
-            ).eq("run_date", today_str).execute()
-        except Exception as exc:
-            logger.error(
-                "_handle_empty_portfolio_deploy: failed to set queued_for_research — %s", exc
-            )
-        action = "triggered_research_queue"
-        detail = f"top candidates: {top_tickers}"
-        try:
-            _trigger_research_queue()
-        except Exception as exc:
-            logger.error(
-                "_handle_empty_portfolio_deploy: research queue trigger failed — %s", exc
-            )
-    else:
-        # No unqueued results for today — kick off the screener. The NEXT PM cycle
-        # (≈5 min later) will land in the `top_tickers` branch above once it has data.
+    if not screener_has_run:
+        # Screener hasn't run today yet — kick it off. Next cycle will find candidates.
         action = "triggered_screener_run"
-        detail = "no unqueued screener results found for today"
+        detail = "no screener results found for today"
         try:
             threading.Thread(target=_run_screener_async, daemon=True).start()
         except Exception as exc:
             logger.error(
                 "_handle_empty_portfolio_deploy: screener trigger failed — %s", exc
+            )
+    else:
+        # Screener has run — only queue tickers not yet researched within the staleness window.
+        staleness_cutoff = (date.today() - timedelta(days=7)).isoformat()
+        already_researched: set = set()
+        try:
+            memo_resp = (
+                _get_client()
+                .table("memos")
+                .select("ticker")
+                .gte("date", staleness_cutoff)
+                .execute()
+            )
+            already_researched = {row["ticker"] for row in (memo_resp.data or [])}
+        except Exception as exc:
+            logger.warning(
+                "_handle_empty_portfolio_deploy: memos query failed — %s", exc
+            )
+
+        try:
+            resp = (
+                _get_client()
+                .table("watchlist")
+                .select("ticker,composite_score")
+                .eq("run_date", today_str)
+                .eq("queued_for_research", False)
+                .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
+                .order("composite_score", desc=True)
+                .limit(20)
+                .execute()
+            )
+            top_tickers = [
+                row["ticker"] for row in (resp.data or [])
+                if row["ticker"] not in already_researched
+            ][:3]
+        except Exception as exc:
+            logger.warning("_handle_empty_portfolio_deploy: watchlist query failed — %s", exc)
+
+        if top_tickers:
+            # Mark rows as queued BEFORE triggering so a concurrent cycle can't double-queue.
+            try:
+                _get_client().table("watchlist").update({"queued_for_research": True}).in_(
+                    "ticker", top_tickers
+                ).eq("run_date", today_str).execute()
+            except Exception as exc:
+                logger.error(
+                    "_handle_empty_portfolio_deploy: failed to set queued_for_research — %s", exc
+                )
+            action = "triggered_research_queue"
+            detail = f"unresearched candidates: {top_tickers}"
+            try:
+                _trigger_research_queue()
+            except Exception as exc:
+                logger.error(
+                    "_handle_empty_portfolio_deploy: research queue trigger failed — %s", exc
+                )
+        else:
+            # All above-threshold tickers already have fresh memos — nothing to queue.
+            action = "no_action"
+            detail = "all qualifying tickers already researched within staleness window"
+            logger.info(
+                "_handle_empty_portfolio_deploy: %s (excluded: %s)",
+                detail, already_researched,
             )
 
     logger.info(
@@ -346,6 +388,50 @@ def _trigger_deploy_cash_pipeline() -> str:
     global _deploy_cash_triggered_at
 
     today_str = date.today().isoformat()
+
+    # Check whether the screener has produced any results for today at all.
+    screener_has_run = False
+    try:
+        any_resp = (
+            _get_client()
+            .table("watchlist")
+            .select("ticker")
+            .eq("run_date", today_str)
+            .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
+            .limit(1)
+            .execute()
+        )
+        screener_has_run = bool(any_resp.data)
+    except Exception as exc:
+        logger.warning("_trigger_deploy_cash_pipeline: screener-check query failed — %s", exc)
+
+    if not screener_has_run:
+        # Screener hasn't run today yet — kick it off in background.
+        try:
+            threading.Thread(target=_run_screener_async, daemon=True).start()
+            detail = "triggered_screener_background (no screener results for today)"
+            logger.info("_trigger_deploy_cash_pipeline: screener triggered in background")
+        except Exception as exc:
+            logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
+            detail = "screener_trigger_failed"
+        _deploy_cash_triggered_at = datetime.now(timezone.utc)
+        return detail
+
+    # Screener has run — only queue tickers not yet researched within the staleness window.
+    staleness_cutoff = (date.today() - timedelta(days=7)).isoformat()
+    already_researched: set = set()
+    try:
+        memo_resp = (
+            _get_client()
+            .table("memos")
+            .select("ticker")
+            .gte("date", staleness_cutoff)
+            .execute()
+        )
+        already_researched = {row["ticker"] for row in (memo_resp.data or [])}
+    except Exception as exc:
+        logger.warning("_trigger_deploy_cash_pipeline: memos query failed — %s", exc)
+
     top_tickers: List[str] = []
     try:
         resp = (
@@ -356,25 +442,15 @@ def _trigger_deploy_cash_pipeline() -> str:
             .eq("queued_for_research", False)
             .gte("composite_score", _DEPLOY_CASH_MIN_SCORE)
             .order("composite_score", desc=True)
-            .limit(3)
+            .limit(20)
             .execute()
         )
-        top_tickers = [row["ticker"] for row in (resp.data or [])]
+        top_tickers = [
+            row["ticker"] for row in (resp.data or [])
+            if row["ticker"] not in already_researched
+        ][:3]
     except Exception as exc:
         logger.warning("_trigger_deploy_cash_pipeline: watchlist query failed — %s", exc)
-
-    if not top_tickers:
-        # No candidates yet — run screener in background
-        try:
-            threading.Thread(target=_run_screener_async, daemon=True).start()
-            detail = "triggered_screener_background (no candidates found after screen)"
-            logger.info("_trigger_deploy_cash_pipeline: screener triggered in background")
-        except Exception as exc:
-            logger.error("_trigger_deploy_cash_pipeline: screener trigger failed — %s", exc)
-            detail = "screener_trigger_failed"
-        
-        _deploy_cash_triggered_at = datetime.now(timezone.utc)
-        return detail
 
     if top_tickers:
         try:
@@ -389,7 +465,9 @@ def _trigger_deploy_cash_pipeline() -> str:
             logger.error("_trigger_deploy_cash_pipeline: research queue trigger failed — %s", exc)
         detail = f"queued_research: {top_tickers}"
     else:
-        detail = "triggered_screener (no candidates found after screen)"
+        # All above-threshold tickers already have fresh memos — nothing to queue.
+        detail = "no_action: all qualifying tickers already researched within staleness window"
+        logger.info("_trigger_deploy_cash_pipeline: %s (excluded: %s)", detail, already_researched)
 
     _deploy_cash_triggered_at = datetime.now(timezone.utc)
     logger.info("PM: DEPLOY_CASH pipeline action — %s", detail)
@@ -1920,6 +1998,28 @@ def run_pm_cycle(
                         decision_data["reasoning"] = (
                             decision_data.get("reasoning", "")
                             + " (Post-Claude hard block: position would exceed portfolio constraints.)"
+                        )
+
+                # 21-day DEFER cap: defer_until > 21 days is a de-facto rejection — auto-convert
+                # so long deferrals don't silently accumulate and remain auditable via reject_reason.
+                if decision_data.get("decision") == "DEFER":
+                    _defer_val = (decision_data.get("action_details") or {}).get("defer_until")
+                    _defer_dt = _parse_defer_time(_defer_val)
+                    if _defer_dt > datetime.now(timezone.utc) + timedelta(days=21):
+                        _orig_defer = _defer_val
+                        _orig_reason = decision_data.get("reasoning", "")
+                        decision_data["decision"] = "REJECT"
+                        decision_data.setdefault("action_details", {})["reject_reason"] = (
+                            f"[Auto-converted from DEFER: defer_until '{_orig_defer}' exceeded 21-day cap. "
+                            f"Original reasoning: {_orig_reason}]"
+                        )
+                        decision_data["reasoning"] = (
+                            f"DEFER converted to REJECT: defer_until ({_orig_defer}) exceeds the 21-day "
+                            f"maximum deferral window. " + _orig_reason
+                        )
+                        logger.info(
+                            "PM: DEFER→REJECT for %s — defer_until '%s' exceeded 21-day cap",
+                            ticker, _orig_defer,
                         )
 
                 # Determine execution_status

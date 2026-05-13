@@ -43,6 +43,19 @@ When choosing DEFER, always set both defer_until (the re-check date) and defer_c
 
 Never defer indefinitely — every DEFER must have a finite re-check date.
 
+## What DEFER Is NOT For
+Do not defer solely because:
+- Earnings are in the next 30–90 days (earnings are a catalyst, not a reason to wait unless the report is within 72 hours AND the position would be at medium or large target size)
+- Macro regime confidence is below 7.0 (this restricts LARGE positions only — defined as >6% NAV — not small or medium)
+- A binary event exists somewhere in the future (all small-cap investing has future binary events)
+
+DEFER is appropriate only when:
+- Earnings are within 72 hours AND you would otherwise size at medium (3–6% NAV) or large (>6% NAV)
+- A specific data point needed to validate the core thesis arrives within 14 days
+- Portfolio is at or near the gross exposure ceiling
+
+If deferring, defer_until must be within 21 days. If the thesis is not actionable within 21 days, use REJECT instead of DEFER.
+
 ## Response Format
 Respond with ONLY a valid JSON object — no markdown fences, no preamble, no trailing text.
 

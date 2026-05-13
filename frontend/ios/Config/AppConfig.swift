@@ -16,17 +16,8 @@ enum AppConfig {
     
     // MARK: - API Configuration
     enum API {
-        static let baseURL = "https://api.yourtradingplatform.com"
-        static let apiVersion = "v1"
+        static let baseURL = "http://YOUR_BACKEND_HOST:8000"
         static let timeout: TimeInterval = 30
-        
-        // Endpoints
-        static let portfolio = "/portfolio"
-        static let positions = "/positions"
-        static let orders = "/orders"
-        static let stocks = "/stocks"
-        static let news = "/news"
-        static let research = "/research"
     }
     
     // MARK: - Feature Flags
@@ -115,7 +106,7 @@ extension AppConfig {
         static let compactNumber: NumberFormatter = {
             let formatter = NumberFormatter()
             formatter.numberStyle = .decimal
-            formatter.notation = .compactName
+            formatter.maximumFractionDigits = 1
             return formatter
         }()
     }

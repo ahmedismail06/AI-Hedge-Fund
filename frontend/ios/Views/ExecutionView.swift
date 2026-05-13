@@ -1,363 +1,299 @@
-//
-//  ExecutionView.swift
-//  TradingDashboard
-//
-//  Trade execution and order management
-//
-
 import SwiftUI
 
-struct ExecutionView: View {
-    @State private var selectedSegment: ExecutionSegment = .orders
-    @State private var showingNewOrder = false
-    
-    enum ExecutionSegment: String, CaseIterable {
-        case orders = "Orders"
-        case history = "History"
-        case fills = "Fills"
-    }
-    
+// MARK: - View (struct name kept as DecisionsView — tab shows "Decisions")
+
+struct DecisionsView: View {
+    @StateObject private var vm = DecisionsVM()
+    @State private var selectedCategory: String? = nil
+    @State private var selectedDecision: PMDecision?
+
+    private let categories = ["NEW_ENTRY", "EXIT_TRIM", "REBALANCE", "PRE_EARNINGS", "CRISIS"]
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Segmented Control
-                Picker("Execution View", selection: $selectedSegment) {
-                    ForEach(ExecutionSegment.allCases, id: \.self) { segment in
-                        Text(segment.rawValue).tag(segment)
+                // Category filter strip
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        FilterChip(label: "All", selected: selectedCategory == nil) {
+                            selectedCategory = nil
+                        }
+                        ForEach(categories, id: \.self) { cat in
+                            FilterChip(label: CategoryBadge(category: cat).label,
+                                       selected: selectedCategory == cat) {
+                                selectedCategory = selectedCategory == cat ? nil : cat
+                            }
+                        }
+                    }
+                    .padding(.horizontal).padding(.vertical, 8)
+                }
+                .background(Color(.systemGroupedBackground))
+
+                Group {
+                    if vm.isLoading && vm.decisions.isEmpty {
+                        ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if let err = vm.error {
+                        VStack { ErrorCard(message: err).padding(); Spacer() }
+                    } else {
+                        let filtered = vm.decisions.filter { d in
+                            guard let cat = selectedCategory else { return true }
+                            return d.category == cat
+                        }
+                        if filtered.isEmpty {
+                            EmptyStateView(icon: "brain.head.profile",
+                                           title: "No Decisions",
+                                           subtitle: "The PM agent hasn't fired yet, or no decisions match this filter")
+                        } else {
+                            List(filtered) { d in
+                                Button { selectedDecision = d } label: { DecisionCard(decision: d) }
+                                    .buttonStyle(.plain)
+                            }
+                            .listStyle(.plain)
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
-                .padding()
-                
-                // Content
-                switch selectedSegment {
-                case .orders:
-                    OrdersListView()
-                case .history:
-                    OrderHistoryView()
-                case .fills:
-                    FillsListView()
-                }
+                .frame(maxHeight: .infinity)
             }
-            .navigationTitle("Execution")
+            .navigationTitle("PM Decisions")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingNewOrder = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.title3)
+                    Button { Task { await vm.load() } } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
                 }
             }
-            .sheet(isPresented: $showingNewOrder) {
-                NewOrderSheet()
+            .sheet(item: $selectedDecision) { d in
+                DecisionDetailSheet(decision: d, onOverride: { type, reason, deferUntil in
+                    Task {
+                        await vm.override(id: d.decisionId, type: type,
+                                          reason: reason, deferUntil: deferUntil)
+                    }
+                })
             }
+            .task { await vm.load() }
+            .refreshable { await vm.load() }
         }
     }
 }
 
-struct OrdersListView: View {
+// MARK: - Filter Chip
+
+private struct FilterChip: View {
+    let label: String
+    let selected: Bool
+    let action: () -> Void
+
     var body: some View {
-        List {
-            if sampleOrders.isEmpty {
-                ContentUnavailableView(
-                    "No Active Orders",
-                    systemImage: "tray",
-                    description: Text("Place a new order to get started")
-                )
-            } else {
-                ForEach(sampleOrders) { order in
-                    OrderRow(order: order)
-                }
-            }
+        Button(action: action) {
+            Text(label)
+                .font(.caption.bold())
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(selected ? Color.accentColor : Color.secondary.opacity(0.15),
+                            in: Capsule())
+                .foregroundStyle(selected ? .white : .primary)
         }
-        .listStyle(.plain)
-    }
-    
-    private let sampleOrders = [
-        Order(symbol: "AAPL", type: "Limit Buy", quantity: 100, price: 170.00, status: "Pending"),
-        Order(symbol: "TSLA", type: "Stop Loss", quantity: 50, price: 240.00, status: "Active"),
-        Order(symbol: "NVDA", type: "Limit Sell", quantity: 25, price: 900.00, status: "Pending")
-    ]
-}
-
-struct Order: Identifiable {
-    let id = UUID()
-    let symbol: String
-    let type: String
-    let quantity: Double
-    let price: Double
-    let status: String
-}
-
-struct OrderRow: View {
-    let order: Order
-    
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(order.symbol)
-                    .font(.headline)
-                
-                Text(order.type)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            
-            Spacer()
-            
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("\(order.quantity, specifier: "%.0f") @ $\(order.price, specifier: "%.2f")")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                
-                Text(order.status)
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(statusColor(order.status).opacity(0.2))
-                    .foregroundStyle(statusColor(order.status))
-                    .cornerRadius(4)
-            }
-        }
-        .padding(.vertical, 4)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                // Cancel order
-            } label: {
-                Label("Cancel", systemImage: "xmark")
-            }
-            
-            Button {
-                // Edit order
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            .tint(.blue)
-        }
-    }
-    
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "Active": return .green
-        case "Pending": return .orange
-        case "Filled": return .blue
-        default: return .gray
-        }
+        .buttonStyle(.plain)
     }
 }
 
-struct OrderHistoryView: View {
-    var body: some View {
-        List {
-            ForEach(sampleHistory) { trade in
-                TradeHistoryRow(trade: trade)
-            }
-        }
-        .listStyle(.plain)
-    }
-    
-    private let sampleHistory = [
-        TradeHistory(symbol: "AAPL", type: "Buy", quantity: 50, price: 170.25, date: Date(), status: "Filled"),
-        TradeHistory(symbol: "GOOGL", type: "Sell", quantity: 25, price: 135.50, date: Date().addingTimeInterval(-86400), status: "Filled"),
-        TradeHistory(symbol: "MSFT", type: "Buy", quantity: 30, price: 395.75, date: Date().addingTimeInterval(-172800), status: "Filled"),
-        TradeHistory(symbol: "TSLA", type: "Buy", quantity: 15, price: 242.00, date: Date().addingTimeInterval(-259200), status: "Cancelled")
-    ]
-}
+// MARK: - Decision Card
 
-struct TradeHistory: Identifiable {
-    let id = UUID()
-    let symbol: String
-    let type: String
-    let quantity: Double
-    let price: Double
-    let date: Date
-    let status: String
-}
+private struct DecisionCard: View {
+    let decision: PMDecision
 
-struct TradeHistoryRow: View {
-    let trade: TradeHistory
-    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(trade.symbol)
-                    .font(.headline)
-                
+            HStack(spacing: 8) {
+                CategoryBadge(category: decision.category)
+                if let t = decision.ticker { Text(t).font(.subheadline.bold()) }
                 Spacer()
-                
-                Text(trade.date, style: .date)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                ExecutionStatusBadge(status: decision.executionStatus)
             }
-            
+
+            Text(decision.decision)
+                .font(.subheadline)
+                .lineLimit(2)
+
             HStack {
-                Text("\(trade.type) \(trade.quantity, specifier: "%.0f") @ $\(trade.price, specifier: "%.2f")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                
+                if let conf = decision.confidence {
+                    Label(String(format: "%.0f%%", conf * 100), systemImage: "brain")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
-                
-                Text(trade.status)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundStyle(trade.status == "Filled" ? .green : .red)
+                Text(decision.timestamp.shortTimestamp)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if decision.humanOverride != nil {
+                Label("Human Override Applied", systemImage: "person.badge.shield.checkmark")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 }
 
-struct FillsListView: View {
+// MARK: - Decision Detail Sheet
+
+private struct DecisionDetailSheet: View {
+    let decision: PMDecision
+    let onOverride: (String, String, String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showOverrideSheet = false
+    @State private var overrideType = "BLOCK"
+    @State private var overrideReason = ""
+    @State private var deferUntil = ""
+
     var body: some View {
-        List {
-            ForEach(sampleFills) { fill in
-                FillRow(fill: fill)
+        NavigationStack {
+            List {
+                Section("Summary") {
+                    detailRow("Category",   decision.category)
+                    detailRow("Ticker",     decision.ticker ?? "—")
+                    detailRow("Decision",   decision.decision)
+                    detailRow("Status",     decision.executionStatus)
+                    if let c = decision.confidence {
+                        detailRow("Confidence", String(format: "%.0f%%", c * 100))
+                    }
+                    detailRow("Timestamp",  decision.timestamp.shortTimestamp)
+                }
+
+                Section("Reasoning") {
+                    Text(decision.reasoning)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
+
+                if let ra = decision.riskAssessment, !ra.isEmpty {
+                    Section("Risk Assessment") {
+                        Text(ra).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let ad = decision.actionDetails, !ad.isEmpty {
+                    Section("Action Details") {
+                        ForEach(ad.sorted(by: { $0.key < $1.key }), id: \.key) { k, v in
+                            detailRow(k.replacingOccurrences(of: "_", with: " ").capitalized,
+                                      v.description)
+                        }
+                    }
+                }
+
+                if let ho = decision.humanOverride {
+                    Section("Human Override") {
+                        if let type = ho["override_type"] { detailRow("Type",   type.description) }
+                        if let reason = ho["reason"]      { detailRow("Reason", reason.description) }
+                    }
+                }
+
+                if ["PENDING_HUMAN", "SENT_TO_EXECUTION"].contains(decision.executionStatus) {
+                    Section("Override") {
+                        Button("Override This Decision") { showOverrideSheet = true }
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Decision \(decision.decisionId)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            }
+            .sheet(isPresented: $showOverrideSheet) {
+                OverrideSheet(
+                    overrideType: $overrideType,
+                    reason: $overrideReason,
+                    deferUntil: $deferUntil,
+                    onSubmit: {
+                        let du = overrideType == "DEFER" && !deferUntil.isEmpty ? deferUntil : nil
+                        onOverride(overrideType, overrideReason, du)
+                        showOverrideSheet = false
+                        dismiss()
+                    },
+                    onCancel: { showOverrideSheet = false }
+                )
             }
         }
-        .listStyle(.plain)
     }
-    
-    private let sampleFills = [
-        Fill(symbol: "AAPL", quantity: 100, price: 170.50, time: Date(), side: "Buy"),
-        Fill(symbol: "NVDA", quantity: 25, price: 875.25, time: Date().addingTimeInterval(-3600), side: "Buy"),
-        Fill(symbol: "TSLA", quantity: 50, price: 246.00, time: Date().addingTimeInterval(-7200), side: "Sell")
-    ]
-}
 
-struct Fill: Identifiable {
-    let id = UUID()
-    let symbol: String
-    let quantity: Double
-    let price: Double
-    let time: Date
-    let side: String
-}
-
-struct FillRow: View {
-    let fill: Fill
-    
-    var body: some View {
+    private func detailRow(_ label: String, _ value: String) -> some View {
         HStack {
-            Image(systemName: fill.side == "Buy" ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
-                .foregroundStyle(fill.side == "Buy" ? .green : .red)
-                .font(.title3)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(fill.symbol)
-                    .font(.headline)
-                
-                Text("\(fill.quantity, specifier: "%.0f") shares @ $\(fill.price, specifier: "%.2f")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            
+            Text(label).foregroundStyle(.secondary)
             Spacer()
-            
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(fill.time, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                
-                Text("$\(fill.quantity * fill.price, specifier: "%.2f")")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-            }
+            Text(value).bold().multilineTextAlignment(.trailing).lineLimit(3)
         }
-        .padding(.vertical, 4)
     }
 }
 
-struct NewOrderSheet: View {
-    @Environment(\.dismiss) var dismiss
-    @State private var symbol = ""
-    @State private var orderType: OrderType = .market
-    @State private var side: OrderSide = .buy
-    @State private var quantity = ""
-    @State private var limitPrice = ""
-    @State private var stopPrice = ""
-    
-    enum OrderType: String, CaseIterable {
-        case market = "Market"
-        case limit = "Limit"
-        case stop = "Stop"
-        case stopLimit = "Stop Limit"
-    }
-    
-    enum OrderSide: String, CaseIterable {
-        case buy = "Buy"
-        case sell = "Sell"
-    }
-    
+// MARK: - Override Sheet
+
+private struct OverrideSheet: View {
+    @Binding var overrideType: String
+    @Binding var reason: String
+    @Binding var deferUntil: String
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+
+    private let types = ["BLOCK", "FORCE_EXECUTE", "DEFER"]
+
     var body: some View {
         NavigationStack {
             Form {
-                Section("Order Details") {
-                    TextField("Symbol", text: $symbol)
-                        .textInputAutocapitalization(.characters)
-                    
-                    Picker("Side", selection: $side) {
-                        ForEach(OrderSide.allCases, id: \.self) { side in
-                            Text(side.rawValue).tag(side)
-                        }
+                Section("Override Type") {
+                    Picker("Type", selection: $overrideType) {
+                        ForEach(types, id: \.self) { Text($0.replacingOccurrences(of: "_", with: " ")) }
                     }
                     .pickerStyle(.segmented)
-                    
-                    Picker("Order Type", selection: $orderType) {
-                        ForEach(OrderType.allCases, id: \.self) { type in
-                            Text(type.rawValue).tag(type)
-                        }
-                    }
-                    
-                    TextField("Quantity", text: $quantity)
-                        .keyboardType(.numberPad)
                 }
-                
-                if orderType == .limit || orderType == .stopLimit {
-                    Section("Limit Price") {
-                        TextField("Price", text: $limitPrice)
-                            .keyboardType(.decimalPad)
+
+                Section("Reason") {
+                    TextField("Why are you overriding?", text: $reason, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+
+                if overrideType == "DEFER" {
+                    Section("Defer Until") {
+                        TextField("YYYY-MM-DD or e.g. '7 days'", text: $deferUntil)
                     }
                 }
-                
-                if orderType == .stop || orderType == .stopLimit {
-                    Section("Stop Price") {
-                        TextField("Stop Price", text: $stopPrice)
-                            .keyboardType(.decimalPad)
-                    }
-                }
-                
+
                 Section {
-                    Button(action: submitOrder) {
-                        HStack {
-                            Spacer()
-                            Text("Place \(side.rawValue) Order")
-                                .fontWeight(.semibold)
-                            Spacer()
-                        }
-                    }
-                    .disabled(symbol.isEmpty || quantity.isEmpty)
+                    Button("Submit Override") { onSubmit() }
+                        .disabled(reason.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .frame(maxWidth: .infinity)
+                        .foregroundStyle(reason.isEmpty ? Color.secondary : Color.orange)
                 }
             }
-            .navigationTitle("New Order")
+            .navigationTitle("Override Decision")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { onCancel() } }
             }
         }
-    }
-    
-    private func submitOrder() {
-        // Submit order logic
-        dismiss()
+        .presentationDetents([.medium, .large])
     }
 }
 
-#Preview {
-    ExecutionView()
+// MARK: - ViewModel
+
+@MainActor
+final class DecisionsVM: ObservableObject {
+    @Published var decisions: [PMDecision] = []
+    @Published var isLoading = false
+    @Published var error: String?
+
+    func load() async {
+        isLoading = true; error = nil
+        defer { isLoading = false }
+        do { decisions = try await APIService.shared.getDecisions(limit: 100) }
+        catch { self.error = error.localizedDescription }
+    }
+
+    func override(id: String, type: String, reason: String, deferUntil: String?) async {
+        do {
+            try await APIService.shared.overrideDecision(id: id, type: type, reason: reason,
+                                                          deferUntil: deferUntil)
+            await load()
+        } catch { self.error = error.localizedDescription }
+    }
 }
