@@ -280,6 +280,34 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
     cycle_start = datetime.utcnow().isoformat()
     summary = ExecutionSummary(cycle_at=cycle_start)
 
+    # ── Pre-gate: log pending exit_actions so the gate decision is always visible.
+    # exit_action set by the PM agent after 4 PM persists in the DB overnight
+    # and is naturally picked up at the next pre-market window (07:00 ET) or
+    # market open (09:30 ET) — this query confirms positions are in the queue
+    # even when the gate below fires and skips execution.
+    try:
+        _pending = (
+            _get_client()
+            .table("positions")
+            .select("ticker,exit_action")
+            .in_("exit_action", ["CLOSE", "TRIM"])
+            .eq("status", "OPEN")
+            .execute()
+        )
+        _pending_data = _pending.data or []
+        if _pending_data:
+            _pending_desc = ", ".join(
+                f"{p['ticker']}({p['exit_action']})" for p in _pending_data
+            )
+            logger.info(
+                "Exit queue: %d position(s) pending — %s",
+                len(_pending_data), _pending_desc,
+            )
+        else:
+            logger.debug("Exit queue: 0 positions with exit_action set")
+    except Exception as _exc:
+        logger.warning("Could not query exit queue pre-gate: %s", _exc)
+
     # ── A: Market hours guard ─────────────────────────────────────────────────
     # Pre-market (07:00–09:29 ET): exits only, with outsideRth=True so orders
     # queue on the exchange before the 09:30 open. No new entries allowed.
