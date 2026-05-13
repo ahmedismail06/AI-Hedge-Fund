@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getPositions, getPending, getExposure, approveTrade, rejectTrade } from '../api/portfolio';
+import { getPositions, getPending, getExposure, approveTrade, rejectTrade, getEquityCurve } from '../api/portfolio';
 import { getAlerts, getCriticalAlerts, getMetrics } from '../api/risk';
 import { getRegime, getBriefing } from '../api/macro';
 import { getExecutionStatus } from '../api/execution';
 import { getHistory } from '../api/research';
+import { getPMDecisions } from '../api/pm';
 import EquityCurveChart from '../components/EquityCurveChart';
 import RiskAlert from '../components/RiskAlert';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -151,9 +152,11 @@ export default function Dashboard() {
   const [metrics,     setMetrics]     = useState(null);
   const [regime,      setRegime]      = useState(null);
   const [briefing,    setBriefing]    = useState(null);
-  const [execStatus,  setExecStatus]  = useState(null);
-  const [memoHistory, setMemoHistory] = useState([]);
-  const [confirm,     setConfirm]     = useState(null);
+  const [execStatus,   setExecStatus]   = useState(null);
+  const [memoHistory,  setMemoHistory]  = useState([]);
+  const [equityCurve,  setEquityCurve]  = useState([]);
+  const [pmDecisions,  setPmDecisions]  = useState([]);
+  const [confirm,      setConfirm]      = useState(null);
 
   const loadPnL = useCallback(async () => {
     try {
@@ -189,13 +192,29 @@ export default function Dashboard() {
     } catch {}
   }, []);
 
+  const loadEquityCurve = useCallback(async () => {
+    try {
+      const data = await getEquityCurve(30);
+      setEquityCurve(Array.isArray(data) ? data : []);
+    } catch {}
+  }, []);
+
+  const loadPmDecisions = useCallback(async () => {
+    try {
+      const data = await getPMDecisions({ limit: 5 });
+      setPmDecisions(Array.isArray(data) ? data : []);
+    } catch {}
+  }, []);
+
   useEffect(() => {
-    loadPnL(); loadAlerts(); loadHealth(); loadMemos();
-    const t1 = setInterval(loadPnL,    60_000);
-    const t2 = setInterval(loadAlerts, 30_000);
-    const t3 = setInterval(loadHealth, 300_000);
-    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
-  }, [loadPnL, loadAlerts, loadHealth, loadMemos]);
+    loadPnL(); loadAlerts(); loadHealth(); loadMemos(); loadEquityCurve(); loadPmDecisions();
+    const t1 = setInterval(loadPnL,          60_000);
+    const t2 = setInterval(loadAlerts,        30_000);
+    const t3 = setInterval(loadHealth,       300_000);
+    const t4 = setInterval(loadEquityCurve,  300_000);
+    const t5 = setInterval(loadPmDecisions,   60_000);
+    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); clearInterval(t4); clearInterval(t5); };
+  }, [loadPnL, loadAlerts, loadHealth, loadMemos, loadEquityCurve, loadPmDecisions]);
 
   const regimeKey = regime?.regime ?? briefing?.regime;
   const regCfg    = REGIME_CONFIG[regimeKey] ?? null;
@@ -291,9 +310,9 @@ export default function Dashboard() {
           onClick={() => navigate('/execution')}
         />
         <HealthPill
-          ok={briefing?.created_at ? true : null}
+          ok={(briefing?.date || regime?.date) ? true : null}
           label="Macro Engine"
-          sub={briefing?.created_at ? fmtAgo(briefing.created_at) : 'No data'}
+          sub={(briefing?.date || regime?.date) ? fmtAgo(briefing?.date || regime?.date) : 'No data'}
           onClick={() => navigate('/macro')}
         />
         <HealthPill ok={true} label="Screener" sub="Ready" onClick={() => navigate('/screener')} />
@@ -382,10 +401,10 @@ export default function Dashboard() {
           <div className="flex items-center justify-between mb-4">
             <div className="section-label">Portfolio Equity Curve</div>
             <span className="text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
-              Based on closed fills
+              30-day NAV · account snapshots
             </span>
           </div>
-          <EquityCurveChart data={[]} height={180} />
+          <EquityCurveChart data={equityCurve} height={180} />
         </div>
 
         {/* Pending approvals (supervised mode only) / PM Decisions link */}
@@ -413,14 +432,65 @@ export default function Dashboard() {
           </div>
 
           {pending.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 cursor-pointer"
-              style={{ height: 160, color: 'var(--text-3)' }}
-              onClick={() => navigate('/orchestrator')}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>smart_toy</span>
-              <p className="text-[12px]">PM agent handles all decisions autonomously</p>
-              <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>View audit log →</p>
-            </div>
+            pmDecisions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-2 cursor-pointer"
+                style={{ height: 160, color: 'var(--text-3)' }}
+                onClick={() => navigate('/orchestrator')}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>smart_toy</span>
+                <p className="text-[12px]">No decisions yet</p>
+                <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>View audit log →</p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {pmDecisions.map((d, i) => {
+                  const statusColor = {
+                    SENT_TO_EXECUTION: 'var(--green)',
+                    BLOCKED:           'var(--red)',
+                    DEFERRED:          'var(--amber)',
+                    PENDING_HUMAN:     'var(--amber)',
+                    NO_ACTION:         'var(--text-3)',
+                    TRIGGERED_PIPELINE:'var(--accent)',
+                  }[d.execution_status] ?? 'var(--text-3)';
+                  const statusBg = {
+                    SENT_TO_EXECUTION: 'var(--green-bg)',
+                    BLOCKED:           'var(--red-bg)',
+                    DEFERRED:          'var(--amber-bg)',
+                    PENDING_HUMAN:     'var(--amber-bg)',
+                    NO_ACTION:         'var(--surface-2)',
+                    TRIGGERED_PIPELINE:'var(--accent-muted)',
+                  }[d.execution_status] ?? 'var(--surface-2)';
+                  return (
+                    <div
+                      key={d.decision_id ?? i}
+                      className="flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer transition-colors"
+                      onClick={() => navigate('/orchestrator')}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <span className="font-bold text-[11px] font-data w-14 flex-shrink-0 truncate"
+                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}>
+                        {d.ticker ?? '—'}
+                      </span>
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm flex-shrink-0"
+                        style={{ background: 'var(--surface-2)', color: 'var(--text-2)', fontFamily: 'Syne', border: '1px solid var(--border)' }}>
+                        {d.category}
+                      </span>
+                      <span className="text-[10px] truncate flex-1 font-data" style={{ color: 'var(--text-2)' }}>
+                        {d.decision}
+                      </span>
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm flex-shrink-0"
+                        style={{ background: statusBg, color: statusColor, fontFamily: 'Syne' }}>
+                        {d.execution_status?.replace('_', ' ')}
+                      </span>
+                      <span className="text-[10px] flex-shrink-0 font-data" style={{ color: 'var(--text-3)' }}>
+                        {d.timestamp ? fmtAgo(d.timestamp) : ''}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )
           ) : (
             <div className="space-y-2.5">
               {pending.slice(0, 3).map(item => {

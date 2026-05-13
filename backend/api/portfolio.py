@@ -9,6 +9,7 @@ Endpoints:
   POST /portfolio/approve/{id}      — human approves a PENDING_APPROVAL record
   POST /portfolio/reject/{id}       — human rejects a PENDING_APPROVAL record
   GET  /portfolio/history           — CLOSED/REJECTED positions (default last 30 days)
+  GET  /portfolio/equity-curve      — daily NAV snapshots for the equity curve chart
 """
 
 from dotenv import load_dotenv
@@ -288,6 +289,7 @@ async def reject_position(position_id: str):
 # ── GET /portfolio/history ────────────────────────────────────────────────────
 
 
+
 @router.get("/history")
 async def get_position_history(days: int = Query(30, ge=1, le=365)):
     """
@@ -310,5 +312,41 @@ async def get_position_history(days: int = Query(30, ge=1, le=365)):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
         return result.data or []
+
+    return await asyncio.to_thread(_run)
+
+
+# ── GET /portfolio/equity-curve ───────────────────────────────────────────────
+
+
+@router.get("/equity-curve")
+async def get_equity_curve(days: int = Query(30, ge=1, le=365)):
+    """
+    Return daily NAV snapshots from account_snapshots for the equity curve chart.
+
+    Groups by calendar date (UTC), keeping the last snapshot per day.
+    Returns [{date: "YYYY-MM-DD", value: float}, ...] sorted oldest-first.
+    """
+    def _run():
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        try:
+            client = _get_client()
+            result = (
+                client.table("account_snapshots")
+                .select("net_liquidation, captured_at")
+                .gte("captured_at", cutoff)
+                .order("captured_at", desc=False)
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+
+        rows = result.data or []
+        daily: dict[str, float] = {}
+        for row in rows:
+            date_key = row["captured_at"][:10]
+            daily[date_key] = float(row["net_liquidation"])
+
+        return [{"date": d, "value": v} for d, v in sorted(daily.items())]
 
     return await asyncio.to_thread(_run)
