@@ -2903,7 +2903,7 @@ def _check_intraday_move(ticker: str) -> bool:
         prev_resp = session.get(
             f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev",
             params={"apiKey": polygon_key},
-            timeout=5,
+            timeout=15,
         )
         if not prev_resp.ok:
             return False
@@ -2918,7 +2918,7 @@ def _check_intraday_move(ticker: str) -> bool:
         trade_resp = session.get(
             f"https://api.polygon.io/v2/last/trade/{ticker}",
             params={"apiKey": polygon_key},
-            timeout=5,
+            timeout=15,
         )
         if not trade_resp.ok:
             return False
