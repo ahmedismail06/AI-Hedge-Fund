@@ -246,6 +246,9 @@ def build_exit_trim_prompt(
 ### Adversarial Risks (red-team from original research)
 {json.dumps(top_risks, indent=2) if top_risks else "None recorded"}
 
+### Recent Decisions for {ticker}
+{json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for this ticker."}
+
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}

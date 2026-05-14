@@ -1546,26 +1546,40 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         logger.warning("_scan_actionable_items: memos scan failed — %s", exc)
 
     # 2. Unprocessed CRITICAL/BREACH alerts not yet in pm_decisions
+    processed_ids: set = set()
+    processed_recent: set = set()  # set of (ticker, category)
     try:
         alerts = base_ctx.get("active_alerts", [])
-        # Get alert IDs already processed
-        processed_ids: set = set()
         try:
+            # Look back 50 decisions to capture recent evaluations
             resp = (
                 _get_client()
                 .table("pm_decisions")
-                .select("action_details")
-                .in_("category", ["CRISIS", "EXIT_TRIM"])
+                .select("category, ticker, action_details, timestamp")
                 .order("timestamp", desc=True)
-                .limit(20)
+                .limit(50)
                 .execute()
             )
+            now = datetime.now(timezone.utc)
             for row in (resp.data or []):
+                cat = row.get("category")
+                ticker = row.get("ticker")
                 ad = row.get("action_details") or {}
+                ts_str = row.get("timestamp")
+
                 if ad.get("alert_id"):
                     processed_ids.add(ad["alert_id"])
-        except Exception:
-            pass
+
+                if ticker and cat and ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        # 1-hour cooldown for re-evaluating the same ticker in the same category
+                        if (now - ts).total_seconds() < 3600:
+                            processed_recent.add((ticker, cat))
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as _db_exc:
+            logger.warning("_scan_actionable_items: pm_decisions dedupe query failed — %s", _db_exc)
 
         open_tickers_set = {p["ticker"] for p in base_ctx.get("positions", []) if p.get("status") == "OPEN"}
         for alert in alerts:
@@ -1611,6 +1625,11 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         ticker_p = p.get("ticker")
         if ticker_p and ticker_p in _alerted_tickers:
             continue  # already queued from alert scanner (WARN→EXIT_TRIM or BREACH/CRITICAL→CRISIS) — skip duplicate
+        
+        # 1-hour cooldown check for automated triggers
+        if (ticker_p, "EXIT_TRIM") in processed_recent:
+            continue
+
         current = float(p.get("current_price") or 0)
         stop1 = float(p.get("stop_tier1") or 0)
         if current > 0 and stop1 > 0:
@@ -1645,6 +1664,9 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
 
             for p in _open_positions:
                 t = p.get("ticker")
+                if (t, "EXIT_TRIM") in processed_recent:
+                    continue
+
                 current_p = float(p.get("current_price") or 0)
                 fm = _latest_fm.get(t)
                 if fm and fm.get("dcf_bull_target") and current_p > 0:
@@ -1668,6 +1690,10 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 4. Positions with earnings within 14 days
     cutoff = date.today() + timedelta(days=_EARNINGS_LOOKAHEAD_DAYS)
     for p in base_ctx.get("positions", []):
+        ticker_p = p.get("ticker")
+        if (ticker_p, "PRE_EARNINGS") in processed_recent:
+            continue
+
         earnings_str = p.get("next_earnings_date")
         if earnings_str:
             try:
@@ -2227,6 +2253,27 @@ def _build_prompt(
     from backend.agents.pm_prompts.rebalance import build_rebalance_prompt
     from backend.agents.pm_prompts.crisis import build_crisis_prompt
     from backend.agents.pm_prompts.pre_earnings import build_pre_earnings_prompt
+
+    ticker = (
+        data.get("memo", {}).get("ticker")
+        or data.get("position", {}).get("ticker")
+        or data.get("alert", {}).get("ticker")
+    )
+
+    if ticker:
+        try:
+            resp = (
+                _get_client()
+                .table("pm_decisions")
+                .select("decision_id,timestamp,category,decision,action_details,reasoning,confidence")
+                .eq("ticker", ticker)
+                .order("timestamp", desc=True)
+                .limit(5)
+                .execute()
+            )
+            base_ctx["ticker_history"] = resp.data or []
+        except Exception as _hist_exc:
+            logger.warning("_build_prompt: ticker history query failed for %s — %s", ticker, _hist_exc)
 
     if category == "POSITION_UPDATE":
         # Updated research arrived for a stock we already own.

@@ -145,6 +145,9 @@ def build_pre_earnings_prompt(
 ### Original Investment Memo (thesis context)
 {json.dumps(original_memo, indent=2, default=str) if original_memo else "Not available"}
 
+### Recent Decisions for {ticker}
+{json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for this ticker."}
+
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}

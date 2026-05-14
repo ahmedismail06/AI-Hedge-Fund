@@ -161,6 +161,9 @@ Net (signed weight — directional bet):
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
+### Recent Decisions for Portfolio
+{json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for the portfolio."}
+
 {format_calibration_context(base_ctx)}---
 Assess whether the portfolio requires rebalancing given the current regime guidance, sector concentration, and exposure drift. Remember: rebalance only when deviation is meaningful, not mechanical.
 

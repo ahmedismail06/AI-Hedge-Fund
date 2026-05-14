@@ -164,6 +164,9 @@ Existing positions in same sector ({memo_sector}): {sector_overlap if sector_ove
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
+### Recent Decisions for {memo_slim.get('ticker')}
+{json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for this ticker."}
+
 ### Recent PM Decisions (last 10)
 {json.dumps([{k: v for k, v in d.items() if k not in ('outcome', 'confidence_breakdown')} for d in base_ctx['recent_decisions']], indent=2, default=str)}
 
