@@ -177,36 +177,74 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _refresh_prices(
-    positions: list[dict], tickers: list[str], supabase_client=None
-) -> list[dict]:
+def _fetch_prices_ibkr(tickers: list[str]) -> dict[str, float]:
     """
-    Batch-fetch live prices from Polygon for all tickers in a single call,
-    update pnl_pct in memory, and persist current_price + pnl_pct to Supabase.
-
-    Returns ONLY positions for which a live price was successfully obtained.
-    Positions with no Polygon data are excluded — stop checks must never run
-    against a stale DB value.
-
-    On total Polygon failure (network error, bad key, non-200) returns [] so
-    the caller can detect that no live data is available this cycle.
-
-    Uses /v2/snapshot/locale/us/markets/stocks/tickers (batch, one call).
-    Prefers lastTrade.p (real-time during market hours), falls back to day.c.
+    Fetch a one-shot price snapshot from IBKR for each ticker.
+    Uses reqTickersAsync on the dedicated ib_insync loop — no streaming subscription.
+    Returns {ticker: price}. Empty dict on any failure (caller falls back to Polygon).
     """
-    if not tickers:
-        return positions
+    import asyncio as _asyncio
+    try:
+        from ib_insync import Stock
+        from backend.broker.ibkr import connect as _ibkr_connect, get_loop as _ibkr_loop
+        from backend.broker.ibkr import IBKRConnectionError
+    except ImportError:
+        return {}
 
+    try:
+        ib = _ibkr_connect()
+        loop = _ibkr_loop()
+    except Exception as exc:
+        logger.warning("IBKR not available for price fetch: %s", exc)
+        return {}
+
+    async def _snapshot():
+        contracts = [Stock(t, "SMART", "USD") for t in tickers]
+        qualified = await ib.qualifyContractsAsync(*contracts)
+        if not qualified:
+            return {}
+        ticker_objs = await ib.reqTickersAsync(*qualified)
+        result: dict[str, float] = {}
+        for td in ticker_objs:
+            symbol = td.contract.symbol if td.contract else None
+            if not symbol:
+                continue
+            # Prefer last trade; fall back to close (after-hours) then mid
+            price = None
+            if td.last and td.last > 0:
+                price = td.last
+            elif td.close and td.close > 0:
+                price = td.close
+            elif td.bid and td.ask and td.bid > 0 and td.ask > 0:
+                price = (td.bid + td.ask) / 2
+            if price:
+                result[symbol] = float(price)
+        return result
+
+    try:
+        future = _asyncio.run_coroutine_threadsafe(_snapshot(), loop)
+        price_map = future.result(timeout=15)
+        logger.info(
+            "IBKR price snapshot: %d/%d tickers returned prices",
+            len(price_map), len(tickers),
+        )
+        return price_map
+    except Exception as exc:
+        logger.warning("IBKR price snapshot failed: %s", exc)
+        return {}
+
+
+def _fetch_prices_polygon(tickers: list[str]) -> dict[str, float]:
+    """
+    Batch-fetch prices from Polygon snapshot API.
+    Returns {ticker: price}. Empty dict on failure.
+    Note: free-tier Polygon returns 15-min delayed lastTrade; day.c is previous close.
+    """
     polygon_key = os.getenv("POLYGON_API_KEY")
     if not polygon_key:
-        logger.error(
-            "POLYGON_API_KEY not set — cannot fetch live prices; "
-            "all %d position(s) excluded from stop checks this cycle",
-            len(positions),
-        )
-        return []
+        logger.error("POLYGON_API_KEY not set — cannot fetch Polygon prices")
+        return {}
 
-    logger.info("fetching live Polygon prices for: %s", ", ".join(sorted(tickers)))
     try:
         resp = requests.get(
             "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers",
@@ -215,55 +253,81 @@ def _refresh_prices(
         )
         resp.raise_for_status()
         data = resp.json()
-        logger.info(
-            "Polygon snapshot OK: status=%s, tickers_returned=%d/%d",
-            data.get("status"), len(data.get("tickers", [])), len(tickers),
-        )
     except Exception as exc:
-        logger.error(
-            "Polygon price fetch FAILED — all %d position(s) excluded from stop checks: %s",
-            len(positions), exc,
-        )
-        return []
+        logger.error("Polygon price fetch failed: %s", exc)
+        return {}
 
-    # ── Build price map from Polygon response ─────────────────────────────────
     price_map: dict[str, float] = {}
     for item in data.get("tickers", []):
         ticker = item.get("ticker")
         last_trade = (item.get("lastTrade") or {}).get("p")
         day_close = (item.get("day") or {}).get("c")
-        live_price = last_trade or day_close
-        if ticker and live_price:
-            price_map[ticker] = float(live_price)
+        price = last_trade or day_close
+        if ticker and price:
+            price_map[ticker] = float(price)
             logger.info(
-                "live price: %s = $%.4f (source=%s)",
-                ticker, float(live_price), "lastTrade" if last_trade else "day.close",
+                "Polygon price: %s = $%.4f (source=%s)",
+                ticker, float(price), "lastTrade" if last_trade else "day.close",
             )
         elif ticker:
-            logger.warning(
-                "Polygon returned %s but no lastTrade.p or day.c — "
-                "excluding from stop checks this cycle",
-                ticker,
+            logger.warning("Polygon returned %s but no price fields", ticker)
+
+    return price_map
+
+
+def _refresh_prices(
+    positions: list[dict], tickers: list[str], supabase_client=None
+) -> list[dict]:
+    """
+    Fetch fresh prices and persist them to Supabase.
+
+    Strategy:
+      - Market hours: IBKR first (real-time), Polygon as fallback per-ticker.
+      - Outside market hours: Polygon only; skip DB write if price is unchanged
+        (avoids noisy writes when market is closed and prices don't move).
+
+    Returns ONLY positions that received a fresh price. Stop checks must never
+    run against a stale DB value, so positions with no price are excluded.
+    """
+    if not tickers:
+        return positions
+
+    market_open = is_market_open()
+    price_map: dict[str, float] = {}
+
+    if market_open:
+        # Try IBKR first — real-time, no API tier limitations.
+        price_map = _fetch_prices_ibkr(tickers)
+        missing = [t for t in tickers if t not in price_map]
+        if missing:
+            logger.info(
+                "IBKR missing %d ticker(s) — falling back to Polygon: %s",
+                len(missing), ", ".join(missing),
             )
+            polygon_prices = _fetch_prices_polygon(missing)
+            price_map.update(polygon_prices)
+    else:
+        # Outside market hours: Polygon only (day.c = previous close).
+        price_map = _fetch_prices_polygon(tickers)
 
-    # Warn for any requested ticker that wasn't in the Polygon response at all.
-    missing = set(tickers) - set(price_map)
-    for m in sorted(missing):
-        logger.warning(
-            "no Polygon data for %s — excluding from stop checks this cycle "
-            "(stale DB price will NOT be used)",
-            m,
-        )
+    if not price_map:
+        logger.error("no prices obtained from any source — all positions excluded this cycle")
+        return []
 
-    # ── Build output: only positions with a fresh live price ──────────────────
+    # Warn for tickers with no price from any source.
+    for m in sorted(set(tickers) - set(price_map)):
+        logger.warning("no price available for %s from IBKR or Polygon", m)
+
     updated: list[dict] = []
     for pos in positions:
         ticker = pos.get("ticker")
         if not ticker or ticker not in price_map:
-            continue  # excluded — logged above
+            continue
 
         live_price = price_map[ticker]
+        db_price = float(pos.get("current_price") or 0)
         entry_price = pos.get("entry_price")
+
         pos = dict(pos)
         pos["current_price"] = live_price
 
@@ -279,25 +343,20 @@ def _refresh_prices(
             except (TypeError, ValueError) as exc:
                 logger.warning("pnl_pct computation failed for %s: %s", ticker, exc)
 
-        # Persist live price back to Supabase so the dashboard and other agents
-        # see fresh data without needing their own Polygon call.
         if supabase_client:
             pos_id = pos.get("id")
-            if pos_id:
+            # Outside market hours: skip write if price is unchanged (< $0.01 diff).
+            price_changed = abs(live_price - db_price) >= 0.01
+            if not market_open and not price_changed:
+                logger.debug("%s price unchanged at $%.4f — skipping DB write", ticker, live_price)
+            elif pos_id:
                 try:
                     supabase_client.table("positions").update({
                         "current_price": round(live_price, 4),
                         "pnl_pct": round(float(pos.get("pnl_pct") or 0), 6),
                     }).eq("id", pos_id).execute()
-                except Exception as _persist_exc:
-                    logger.warning(
-                        "failed to persist live price for %s to Supabase: %s",
-                        ticker, _persist_exc,
-                    )
-            else:
-                logger.debug(
-                    "position dict for %s missing 'id' — skipping Supabase persist", ticker
-                )
+                except Exception as exc:
+                    logger.warning("failed to persist price for %s: %s", ticker, exc)
 
         updated.append(pos)
 
