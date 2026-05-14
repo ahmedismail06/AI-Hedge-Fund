@@ -15,6 +15,27 @@ except ImportError:  # Pydantic v1 fallback
     _HAS_PYDANTIC_V2 = False
 
 
+class DCFSnapshot(BaseModel):
+    """Structured DCF output stored on the memo for downstream use."""
+    bull_target: float
+    base_target: float
+    bear_target: float
+    wacc: float
+    terminal_growth: float
+    key_drivers: list[str]
+
+
+class RelativeValuationSnapshot(BaseModel):
+    """Peer-comps output stored on the memo when DCF gate fires."""
+    bull_target: float
+    base_target: float
+    bear_target: float
+    primary_multiple: str
+    ev_revenue_used: float
+    peer_count: int
+    basis: str
+
+
 class FinancialHealth(BaseModel):
     revenue_trend: Literal["growing", "stable", "declining", "unknown"]
     margin_trend: Literal["expanding", "stable", "contracting", "unknown"]
@@ -56,6 +77,11 @@ class InvestmentMemo(BaseModel):
     # /equity-research:thesis or /financial-analysis:dcf-model
     price_target: Optional[float] = None
     price_target_basis: Optional[str] = None  # e.g. "DCF (WACC 10%, terminal 3%)"
+
+    # Valuation method selected by Component 10 (populated by runner.py)
+    valuation_method: Literal["dcf", "relative", "none"] = "none"
+    dcf: Optional[DCFSnapshot] = None
+    relative_valuation: Optional[RelativeValuationSnapshot] = None
 
     # /equity-research:earnings-preview
     earnings_scenarios: Optional[EarningsScenarios] = None

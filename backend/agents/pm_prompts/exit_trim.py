@@ -18,11 +18,14 @@ You entered this position with a specific variant perception and repricing catal
 
 ## Key Evaluation Framework
 1. **Thesis check**: Is the original variant perception still intact? Has the catalyst materialised, been disproven, or moved further away?
-2. **Risk/reward**: Given current price vs original entry, what is the remaining upside vs downside? If dcf_valuation is provided, reference upside_to_bull and downside_to_bear when assessing whether the remaining risk/reward justifies holding the position.
-3. **Stop proximity**: How close is the current price to the stop-loss levels?
-4. **Earnings drift**: Is this position in a post-earnings drift hold window?
-5. **Position weight**: Has this position drifted above/below its intended portfolio weight?
-6. **Opportunity cost**: Is this capital better deployed elsewhere?
+2. **Risk/reward**: Given current price vs original entry, what is the remaining upside vs downside? 
+   - If valuation block is present with method=dcf or method=relative, reference upside/downside as a sanity check on current price. 
+   - If method=none, do not rely on price targets — reason from the thesis, risk signals, and macro context only.
+3. **Quality & Manipulation**: Check quality_grade and beneish_gate. A quality_grade=C combined with a MANIPULATOR flag is a hard exit signal. If beneish_gate=INSUFFICIENT_DATA, treat quality_grade=C with caution but not as an automatic exit.
+4. **Stop proximity**: How close is the current price to the stop-loss levels?
+5. **Earnings drift**: Is this position in a post-earnings drift hold window?
+6. **Position weight**: Has this position drifted above/below its intended portfolio weight?
+7. **Opportunity cost**: Is this capital better deployed elsewhere?
 
 ## Hard Constraints
 - Maximum position size: 15% of portfolio (hard cap enforced in code)
@@ -157,15 +160,20 @@ def build_exit_trim_prompt(
         "holding_period_days": holding_period_days,
     }
 
-    # DCF valuation context — fetch latest model for this ticker
-    dcf_context: dict = {}
+    # Valuation context — fetch latest model for this ticker
+    valuation_block: Any = "unavailable"
+    valuation_key = "dcf_valuation"
     if ticker:
         try:
             from backend.db.utils import get_supabase_client
             _client = get_supabase_client()
             fm_resp = (
                 _client.table("financial_models")
-                .select("dcf_bull_target,dcf_base_target,dcf_bear_target,wacc,quality_grade")
+                .select(
+                    "dcf_bull_target,dcf_base_target,dcf_bear_target,wacc,quality_grade,"
+                    "valuation_method,dcf_skipped_reason,beneish_gate,accruals_ratio,"
+                    "relative_bull_target,relative_base_target,relative_bear_target,ev_revenue_used,peer_count"
+                )
                 .eq("ticker", ticker)
                 .order("run_date", desc=True)
                 .limit(1)
@@ -173,20 +181,56 @@ def build_exit_trim_prompt(
             )
             if fm_resp.data:
                 fm = fm_resp.data[0]
-                bull = float(fm["dcf_bull_target"]) if fm.get("dcf_bull_target") else None
-                bear = float(fm["dcf_bear_target"]) if fm.get("dcf_bear_target") else None
-                dcf_context = {
-                    "dcf_bull_target": bull,
-                    "dcf_base_target": float(fm["dcf_base_target"]) if fm.get("dcf_base_target") else None,
-                    "dcf_bear_target": bear,
+                vm = fm.get("valuation_method") or "dcf"
+                
+                # Quality signals included in all branches
+                quality = {
                     "quality_grade": fm.get("quality_grade"),
-                    "upside_to_bull": round((bull - current) / current, 4) if (bull and current) else None,
-                    "downside_to_bear": round((current - bear) / current, 4) if (bear and current) else None,
+                    "beneish_gate": fm.get("beneish_gate"),
+                    "accruals_ratio": float(fm["accruals_ratio"]) if fm.get("accruals_ratio") else None,
                 }
+
+                if vm == "none":
+                    valuation_key = "valuation"
+                    valuation_block = {
+                        "method": "none",
+                        "skipped_reason": fm.get("dcf_skipped_reason") or "no_model",
+                        "note": "No reliable valuation model could be computed for this ticker. Use thesis quality and risk signals instead of price targets.",
+                        **quality
+                    }
+                elif vm == "relative":
+                    valuation_key = "relative_valuation"
+                    rb = float(fm["relative_bull_target"]) if fm.get("relative_bull_target") else None
+                    rb_base = float(fm["relative_base_target"]) if fm.get("relative_base_target") else None
+                    rb_bear = float(fm["relative_bear_target"]) if fm.get("relative_bear_target") else None
+                    valuation_block = {
+                        "method": "relative",
+                        "ev_revenue_multiple": float(fm["ev_revenue_used"]) if fm.get("ev_revenue_used") else None,
+                        "peer_count": fm.get("peer_count"),
+                        "bull_target": rb,
+                        "base_target": rb_base,
+                        "bear_target": rb_bear,
+                        "upside_to_bull": round((rb - current) / current, 4) if (rb and current) else None,
+                        "downside_to_bear": round((current - rb_bear) / current, 4) if (rb_bear and current) else None,
+                        **quality
+                    }
+                else: # dcf
+                    valuation_key = "dcf_valuation"
+                    bull = float(fm["dcf_bull_target"]) if fm.get("dcf_bull_target") else None
+                    bear = float(fm["dcf_bear_target"]) if fm.get("dcf_bear_target") else None
+                    valuation_block = {
+                        "method": "dcf",
+                        "dcf_bull_target": bull,
+                        "dcf_base_target": float(fm["dcf_base_target"]) if fm.get("dcf_base_target") else None,
+                        "dcf_bear_target": bear,
+                        "upside_to_bull": round((bull - current) / current, 4) if (bull and current) else None,
+                        "downside_to_bear": round((current - bear) / current, 4) if (bear and current) else None,
+                        **quality
+                    }
         except Exception:
             pass
 
-    position_summary["dcf_valuation"] = dcf_context if dcf_context else "unavailable"
+    position_summary[valuation_key] = valuation_block
 
     user_message = f"""## Decision Required: Position Review — {ticker}
 

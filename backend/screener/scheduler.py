@@ -18,6 +18,57 @@ from backend.notifications.events import notify_event
 logger = logging.getLogger(__name__)
 
 
+async def run_peer_multiples_job() -> None:
+    """
+    Compute and upsert peer EV/Revenue multiples from the latest screener universe.
+    Called after run_screening_job() completes. Never propagates exceptions.
+    """
+    logger.info("Peer multiples refresh starting")
+    try:
+        from backend.financial_modeling.relative_valuation import compute_peer_multiples_for_universe
+        from backend.db.utils import get_supabase_client
+
+        client = get_supabase_client()
+
+        # Find the most recent screener run date
+        date_resp = (
+            client.table("watchlist")
+            .select("run_date")
+            .order("run_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not date_resp.data:
+            logger.warning("run_peer_multiples_job: no watchlist rows found")
+            return
+
+        latest_date = date_resp.data[0]["run_date"]
+
+        # Pull active universe (all non-excluded tickers from latest run)
+        universe_resp = (
+            client.table("watchlist")
+            .select("ticker,sector,market_cap_m")
+            .eq("run_date", latest_date)
+            .execute()
+        )
+        active_tickers = universe_resp.data or []
+        # Filter out rows missing sector or market_cap_m
+        active_tickers = [
+            t for t in active_tickers
+            if t.get("sector") and t.get("market_cap_m") and t.get("ticker")
+        ]
+
+        logger.info(
+            "Peer multiples refresh: %d tickers from run_date %s",
+            len(active_tickers), latest_date,
+        )
+        compute_peer_multiples_for_universe(active_tickers)
+        logger.info("Peer multiples refresh complete")
+
+    except Exception as exc:
+        logger.exception("Peer multiples refresh failed: %s", exc)
+
+
 async def run_screening_job() -> None:
     """
     Async wrapper for the screening pipeline. Logs start/end.
@@ -42,6 +93,9 @@ async def run_screening_job() -> None:
         logger.error("Screener pipeline error: %s", exc)
     except Exception as exc:
         logger.exception("Unexpected screener job failure: %s", exc)
+
+    # Refresh peer multiples after screener finishes (needed for relative valuation at memo time)
+    await run_peer_multiples_job()
 
 
 def create_screener_scheduler() -> AsyncIOScheduler:

@@ -11,7 +11,8 @@ create table if not exists memos (
     raw_docs        jsonb,
     status          text not null default 'PENDING'
                         check (status in ('PENDING', 'PENDING_PM_REVIEW', 'APPROVED', 'REJECTED', 'WATCHLIST', 'DEFERRED')),
-    deferred_until  timestamptz,
+    deferred_until          timestamptz,
+    valuation_backfilled_at timestamptz,
     created_at      timestamptz not null default now()
 );
 
@@ -443,6 +444,35 @@ CREATE TABLE IF NOT EXISTS financial_models (
 );
 CREATE INDEX IF NOT EXISTS financial_models_ticker_idx
     ON financial_models (ticker, run_date DESC);
+
+-- Valuation method split columns (added Component 10 v2)
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS dcf_skipped_reason TEXT;
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS valuation_method TEXT DEFAULT 'dcf';
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS relative_bull_target NUMERIC(12,4);
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS relative_base_target NUMERIC(12,4);
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS relative_bear_target NUMERIC(12,4);
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS peer_count INTEGER;
+ALTER TABLE financial_models ADD COLUMN IF NOT EXISTS ev_revenue_used NUMERIC(8,4);
+
+-- ── Peer Multiples ────────────────────────────────────────────────────────────
+-- Precomputed EV/Revenue and EV/Gross Profit sector comps, refreshed nightly at 4PM.
+-- Keyed by (sector, market_cap_bucket); used by relative_valuation.py at memo time.
+CREATE TABLE IF NOT EXISTS peer_multiples (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sector                  TEXT NOT NULL,
+    market_cap_bucket       TEXT NOT NULL,   -- 'micro' | 'small_low' | 'small_high'
+    ev_revenue_median       NUMERIC(8,4),
+    ev_revenue_25th         NUMERIC(8,4),
+    ev_revenue_75th         NUMERIC(8,4),
+    ev_gross_profit_median  NUMERIC(8,4),
+    ev_gross_profit_25th    NUMERIC(8,4),
+    ev_gross_profit_75th    NUMERIC(8,4),
+    peer_count              INTEGER NOT NULL,
+    computed_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (sector, market_cap_bucket)
+);
+CREATE INDEX IF NOT EXISTS peer_multiples_sector_bucket_idx
+    ON peer_multiples (sector, market_cap_bucket);
 
 -- ── EarningsAlpha Events ─────────────────────────────────────────────────────
 -- One row per earnings event per ticker.  Pre-earnings signal and post-print

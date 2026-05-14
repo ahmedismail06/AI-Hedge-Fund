@@ -36,6 +36,23 @@ class EarningsQualityResult(BaseModel):
     unavailable: bool = False
 
 
+class RelativeValuationResult(BaseModel):
+    """EV/Revenue + EV/Gross Profit peer comps — used when DCF gate fires."""
+    bull_target: float
+    base_target: float
+    bear_target: float
+    primary_multiple: str = "EV/Revenue"
+    ev_revenue_used: float           # peer median EV/Revenue applied
+    ev_gross_profit_secondary: Optional[float] = None  # peer median EV/GP for reference
+    peer_count: int
+    peer_median_ev_revenue: float
+    peer_25th_ev_revenue: float
+    peer_75th_ev_revenue: float
+    basis: str                       # 1-2 sentence description of what was applied
+    skipped_reason: Optional[str] = None
+    unavailable: bool = False
+
+
 class FinancialModelOutput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -43,5 +60,7 @@ class FinancialModelOutput(BaseModel):
     run_date: str  # YYYY-MM-DD
     dcf: DCFResult
     earnings_quality: EarningsQualityResult
+    relative_valuation: Optional[RelativeValuationResult] = None
+    valuation_method: str = "dcf"   # "dcf" | "relative" | "none"
     summary: str
     model_json: dict

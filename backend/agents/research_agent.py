@@ -111,23 +111,51 @@ def _format_news(news_data: dict) -> str:
 
 
 
-def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
-    """Render pre-extracted financial metrics block for the LLM prompt."""
+def _format_financial_metrics(
+    metrics_10k: dict,
+    metrics_10q: dict,
+    fmp_data: dict | None = None,
+) -> str:
+    """Render pre-extracted financial metrics block for the LLM prompt.
+
+    SEC regex extraction is primary; fmp_data is used as a labelled fallback for
+    fields that the regex consistently misses (revenue, cash, LTD, AP).
+    """
     if not metrics_10k and not metrics_10q:
         return "[Pre-extraction unavailable — not in source documents]"
 
-    # Income statement items (revenue, margins, net income) use the 10-K (full fiscal year)
-    # so the figures are annual, matching the Polygon/FMP fundamentals data the LLM also sees.
+    # Income statement items (revenue, margins, net income) use the 10-K (full fiscal year).
     # Balance sheet items (cash, debt, AP) prefer the 10-Q (more recent point-in-time).
-    # Bug 15 fix: greedy [\s\S]{0,60} was capturing the prior-year comparison column
-    # instead of the current-period column; fixed to non-greedy in sec_fetcher.py.
-    m_income = metrics_10k if metrics_10k else metrics_10q   # annual for P&L
-    m_balance = metrics_10q if metrics_10q else metrics_10k  # most recent for B/S
+    m_income = metrics_10k if metrics_10k else metrics_10q
+    m_balance = metrics_10q if metrics_10q else metrics_10k
     m_annual = metrics_10k if metrics_10k else {}
+    fmp = fmp_data or {}
 
-    def _val(key: str, source: dict) -> str:
+    def _fmp_fmt(v: float | None) -> str | None:
+        """Format a raw-dollar FMP float into a human-readable string."""
+        if v is None:
+            return None
+        if abs(v) >= 1_000_000:
+            return f"${v / 1_000_000:.2f}M"
+        if abs(v) >= 1_000:
+            return f"${v / 1_000:.0f}K"
+        return f"${v:.0f}"
+
+    def _val(key: str, source: dict, fmp_key: str | None = None) -> str:
+        """Return SEC value if present; fall back to FMP with source label."""
         v = source.get(key)
-        return str(v) if v is not None else "unavailable"
+        if v is not None:
+            return str(v)
+        if fmp_key:
+            fmp_val = fmp.get(fmp_key)
+            if fmp_val is not None:
+                # Percentage fields (gross_margin_pct) are already 0–100 floats
+                if fmp_key.endswith("_pct"):
+                    return f"{fmp_val:.1f}% (FMP)"
+                formatted = _fmp_fmt(fmp_val)
+                if formatted:
+                    return f"{formatted} (FMP)"
+        return "unavailable"
 
     atm = m_annual.get("atm_or_shelf") or (metrics_10q or {}).get("atm_or_shelf", False)
     maturities = m_annual.get("debt_maturities") or (metrics_10q or {}).get("debt_maturities")
@@ -136,22 +164,23 @@ def _format_financial_metrics(metrics_10k: dict, metrics_10q: dict) -> str:
     if reporting_unit:
         unit_label = f"[REPORTING UNIT: values are in {reporting_unit.upper()} (detected from filing header)]"
     else:
-        unit_label = "[REPORTING UNIT: not detected in filing — assume THOUSANDS per SEC convention]"
+        unit_label = "[REPORTING UNIT: not detected — SEC values may be in thousands; FMP values are raw dollars]"
 
     lines = [
         "=== PRE-EXTRACTED FINANCIAL METRICS ===",
         "[Programmatically extracted — verify against filing text if values seem off]",
         "[Income statement items from 10-K (full fiscal year); balance sheet from most recent filing]",
+        "[(FMP) suffix = SEC regex failed, value sourced from Polygon/yfinance via FMP fetcher]",
         unit_label,
         "",
-        f"Revenue (recent):    {_val('revenue_recent', m_income)}",
-        f"Revenue (prior):     {_val('revenue_prior', m_income)}",
-        f"Gross margin:        {_val('gross_margin', m_income)}",
+        f"Revenue (recent):    {_val('revenue_recent', m_income, 'revenue_recent')}",
+        f"Revenue (prior):     {_val('revenue_prior', m_income, 'revenue_prior')}",
+        f"Gross margin:        {_val('gross_margin', m_income, 'gross_margin_pct')}",
         f"Operating income:    {_val('operating_income', m_income)}",
         f"Net income/loss:     {_val('net_income', m_income)}",
-        f"Cash:                {_val('cash', m_balance)}",
-        f"Long-term debt:      {_val('long_term_debt', m_balance)}",
-        f"Accounts payable:    {_val('accounts_payable', m_balance)}",
+        f"Cash:                {_val('cash', m_balance, 'cash')}",
+        f"Long-term debt:      {_val('long_term_debt', m_balance, 'long_term_debt')}",
+        f"Accounts payable:    {_val('accounts_payable', m_balance, 'accounts_payable')}",
         f"Capital raise risk:  {'ATM program on file' if atm else 'None found'}",
         f"Debt maturities:     {maturities if maturities else 'None found'}",
     ]
@@ -528,7 +557,7 @@ def _build_structured_block(
         sec.get("metrics_10k", {}), sec.get("metrics_10q", {}), fmp
     )
 
-    return f"""{_format_financial_metrics(sec.get('metrics_10k', {}), sec.get('metrics_10q', {}))}
+    return f"""{_format_financial_metrics(sec.get('metrics_10k', {}), sec.get('metrics_10q', {}), fmp)}
 
 {_format_insider_buying(form4)}
 
@@ -1827,6 +1856,42 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
     memo["ticker"] = ticker
     if not memo.get("sector"):
         memo["sector"] = fmp_data.get("sector") if isinstance(fmp_data, dict) else None
+
+    # ── Map Financial Modeling Output (Component 10) ──────────────────────────
+    if financial_model_output:
+        memo["valuation_method"] = financial_model_output.valuation_method
+        
+        # If the LLM didn't produce a target, fallback to the base target from the model
+        if not memo.get("price_target") and not financial_model_output.dcf.unavailable:
+            memo["price_target"] = financial_model_output.dcf.base.price_target
+            memo["price_target_basis"] = f"DCF (WACC {financial_model_output.dcf.wacc*100:.1f}%)"
+        elif not memo.get("price_target") and financial_model_output.relative_valuation and not financial_model_output.relative_valuation.unavailable:
+            memo["price_target"] = financial_model_output.relative_valuation.base_target
+            memo["price_target_basis"] = f"Relative Valuation ({financial_model_output.relative_valuation.primary_multiple})"
+
+        # Persist structured snapshots for downstream tool use
+        if not financial_model_output.dcf.unavailable:
+            memo["dcf"] = {
+                "bull_target": financial_model_output.dcf.bull.price_target,
+                "base_target": financial_model_output.dcf.base.price_target,
+                "bear_target": financial_model_output.dcf.bear.price_target,
+                "wacc": financial_model_output.dcf.wacc,
+                "terminal_growth": financial_model_output.dcf.terminal_growth,
+                "key_drivers": financial_model_output.dcf.key_drivers,
+            }
+        
+        rel = financial_model_output.relative_valuation
+        if rel and not rel.unavailable:
+            memo["relative_valuation"] = {
+                "bull_target": rel.bull_target,
+                "base_target": rel.base_target,
+                "bear_target": rel.bear_target,
+                "primary_multiple": rel.primary_multiple,
+                "ev_revenue_used": rel.ev_revenue_used,
+                "peer_count": rel.peer_count,
+                "basis": rel.basis,
+            }
+
     validated = _validate_memo(memo)
     result = validated.model_dump(exclude_none=True)
 

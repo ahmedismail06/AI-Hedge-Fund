@@ -4,6 +4,7 @@ Inputs come entirely from fetch_fmp() extended output. No LLM calls.
 """
 
 import logging
+import statistics
 from typing import Optional
 
 import yfinance as yf
@@ -258,6 +259,143 @@ def _dcf_price_target(
     return max(0.01, price)
 
 
+def _dcf_is_applicable(fmp_data: dict) -> tuple[bool, str]:
+    """
+    Returns (applicable, reason). DCF only runs if ALL data-present criteria pass:
+      - TTM free cash flow > 0
+      - TTM EBITDA margin >= 0.10
+      - TTM revenue growth (YoY) <= 0.25
+
+    Missing data for a criterion → criterion is skipped (not a blocking gate).
+    Reason is a short string explaining the first failing criterion.
+    """
+    # ── Criterion 1: TTM FCF > 0 ─────────────────────────────────────────────
+    ttm_ocf = fmp_data.get("ttm_operating_cash_flow")
+    revenue_recent = fmp_data.get("revenue_recent")
+    if ttm_ocf is not None and revenue_recent is not None:
+        capex_estimate = revenue_recent * 0.05  # 5% default if no Polygon capex
+        poly_raw = fmp_data.get("polygon_financials_raw")
+        if poly_raw:
+            try:
+                fy_rows = _extract_fy_rows(poly_raw)
+                if fy_rows:
+                    capex_val = fy_rows[0]["financials"]["cash_flow_statement"][
+                        "capital_expenditure"
+                    ]["value"]
+                    capex_estimate = abs(capex_val)
+            except (KeyError, TypeError):
+                pass
+        ttm_fcf = ttm_ocf - capex_estimate
+        if ttm_fcf <= 0:
+            return False, "negative_fcf"
+
+    # ── Criterion 2: EBITDA margin >= 10% ────────────────────────────────────
+    poly_raw = fmp_data.get("polygon_financials_raw")
+    ebitda_margin_known: Optional[float] = None
+    if poly_raw:
+        try:
+            fy_rows = _extract_fy_rows(poly_raw)
+            if fy_rows:
+                rev = fy_rows[0]["financials"]["income_statement"]["revenues"]["value"]
+                try:
+                    ebitda = fy_rows[0]["financials"]["income_statement"][
+                        "earnings_before_interest_taxes_depreciation_and_amortization"
+                    ]["value"]
+                except (KeyError, TypeError):
+                    try:
+                        ebitda = fy_rows[0]["financials"]["income_statement"][
+                            "operating_income"
+                        ]["value"]
+                    except (KeyError, TypeError):
+                        ebitda = None
+                if ebitda is not None and rev and rev > 0:
+                    ebitda_margin_known = ebitda / rev
+        except (KeyError, TypeError):
+            pass
+    if ebitda_margin_known is None:
+        gross_margin_pct = fmp_data.get("gross_margin_pct")
+        if gross_margin_pct is not None:
+            ebitda_margin_known = gross_margin_pct / 100.0
+    if ebitda_margin_known is not None and ebitda_margin_known < 0.10:
+        return False, "low_ebitda_margin"
+
+    # ── Criterion 3: YoY revenue growth <= 25% ───────────────────────────────
+    rev_recent = fmp_data.get("revenue_recent")
+    rev_prior = fmp_data.get("revenue_prior")
+    if rev_recent is not None and rev_prior is not None and rev_prior > 0:
+        yoy_growth = (rev_recent - rev_prior) / rev_prior
+        if yoy_growth > 0.25:
+            return False, "high_growth_company"
+
+    return True, ""
+
+
+def _compute_growth_std_dev(fy_rows: list[dict]) -> Optional[float]:
+    """
+    Compute std dev of YoY revenue growth rates from FY rows (newest first).
+    Returns None if fewer than 3 years of data (need at least 2 growth rates).
+    """
+    if len(fy_rows) < 3:
+        return None
+    revenues = []
+    for row in fy_rows:
+        try:
+            rev = row["financials"]["income_statement"]["revenues"]["value"]
+            if rev is not None and rev > 0:
+                revenues.append(rev)
+        except (KeyError, TypeError):
+            pass
+    if len(revenues) < 3:
+        return None
+    # revenues is newest-first; compute YoY growth rates oldest-to-newest
+    growth_rates = []
+    for i in range(len(revenues) - 1):
+        older = revenues[i + 1]
+        newer = revenues[i]
+        if older > 0:
+            growth_rates.append((newer - older) / older)
+    if len(growth_rates) < 2:
+        return None
+    try:
+        return statistics.stdev(growth_rates)
+    except statistics.StatisticsError:
+        return None
+
+
+def _compute_margin_std_dev(fy_rows: list[dict]) -> Optional[float]:
+    """
+    Compute std dev of EBITDA margins from FY rows (newest first).
+    Returns None if fewer than 3 years of data.
+    """
+    if len(fy_rows) < 3:
+        return None
+    margins = []
+    for row in fy_rows:
+        try:
+            rev = row["financials"]["income_statement"]["revenues"]["value"]
+            if not rev or rev <= 0:
+                continue
+            try:
+                ebitda = row["financials"]["income_statement"][
+                    "earnings_before_interest_taxes_depreciation_and_amortization"
+                ]["value"]
+            except (KeyError, TypeError):
+                try:
+                    ebitda = row["financials"]["income_statement"]["operating_income"]["value"]
+                except (KeyError, TypeError):
+                    ebitda = None
+            if ebitda is not None:
+                margins.append(ebitda / rev)
+        except (KeyError, TypeError):
+            pass
+    if len(margins) < 2:
+        return None
+    try:
+        return statistics.stdev(margins)
+    except statistics.StatisticsError:
+        return None
+
+
 def run_dcf(
     ticker: str,
     fmp_data: dict,
@@ -382,11 +520,23 @@ def run_dcf(
         if base_growth is None:
             base_growth = 0.07
 
-        # Step 19: Scenarios
-        bull_growth = min(base_growth + 0.02, 0.60)
-        bull_margin = min(ebitda_margin + 0.02, 0.80)
-        bear_growth = max(base_growth - 0.03, -0.20)
-        bear_margin = max(ebitda_margin - 0.015, 0.0)
+        # Step 19: Dynamic scenario spreads based on historical revenue/margin volatility
+        growth_std = _compute_growth_std_dev(fy_rows)
+        if growth_std is not None and len(fy_rows) >= 3:
+            spread_g = max(0.05, min(growth_std, 0.50 * abs(base_growth)))
+        else:
+            spread_g = 0.15
+
+        margin_std = _compute_margin_std_dev(fy_rows)
+        if margin_std is not None and len(fy_rows) >= 3:
+            spread_m = max(0.02, min(margin_std, 0.50 * abs(ebitda_margin)))
+        else:
+            spread_m = 0.05
+
+        bull_growth = min(base_growth + spread_g, 0.60)
+        bull_margin = min(ebitda_margin + spread_m, 0.80)
+        bear_growth = max(base_growth - spread_g, -0.20)
+        bear_margin = max(ebitda_margin - spread_m, 0.0)
 
         def _run_scenario(growth: float, margin: float) -> DCFScenario:
             projected = _project_fcff(base_revenue, growth, margin, capex_pct_revenue)

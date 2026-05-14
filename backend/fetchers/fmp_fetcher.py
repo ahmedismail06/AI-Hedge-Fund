@@ -186,6 +186,9 @@ def fetch_fmp(ticker: str) -> dict:
         "consensus_eps_next_year": None,
         "consensus_revenue_current_year": None,
         "consensus_revenue_next_year": None,
+        "revenue_recent": None,   # raw dollars — Polygon FY[0] income statement
+        "revenue_prior": None,    # raw dollars — Polygon FY[1] income statement
+        "gross_margin_pct": None, # float 0–100 — computed from Polygon gross_profit / revenues
         "next_earnings_date": None,
         "sector": None,
         "cash": None,
@@ -351,6 +354,25 @@ def fetch_fmp(ticker: str) -> dict:
                             )
                             if ie is not None:
                                 result["interest_expense"] = abs(float(ie))
+                    except Exception:
+                        pass
+
+                    # Revenue and gross margin from annual income statements
+                    try:
+                        fy_results = [r2 for r2 in results if r2.get("fiscal_period") == "FY"]
+                        if fy_results:
+                            inc_fy0 = fy_results[0].get("financials", {}).get("income_statement", {})
+                            rev0 = inc_fy0.get("revenues", {}).get("value")
+                            gp0 = inc_fy0.get("gross_profit", {}).get("value")
+                            if rev0 is not None:
+                                result["revenue_recent"] = float(rev0)
+                            if rev0 and gp0 is not None:
+                                result["gross_margin_pct"] = round(gp0 / rev0 * 100, 1)
+                            if len(fy_results) >= 2:
+                                inc_fy1 = fy_results[1].get("financials", {}).get("income_statement", {})
+                                rev1 = inc_fy1.get("revenues", {}).get("value")
+                                if rev1 is not None:
+                                    result["revenue_prior"] = float(rev1)
                     except Exception:
                         pass
 
