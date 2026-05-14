@@ -179,58 +179,34 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 
 def _fetch_prices_ibkr(tickers: list[str]) -> dict[str, float]:
     """
-    Fetch a one-shot price snapshot from IBKR for each ticker.
-    Uses reqTickersAsync on the dedicated ib_insync loop — no streaming subscription.
+    Read real-time market prices from IBKR's portfolio cache.
+
+    ib_insync keeps ib.portfolio() updated continuously for every position held —
+    no extra market data subscription required. Only covers tickers we own.
     Returns {ticker: price}. Empty dict on any failure (caller falls back to Polygon).
     """
-    import asyncio as _asyncio
     try:
-        from ib_insync import Stock
-        from backend.broker.ibkr import connect as _ibkr_connect, get_loop as _ibkr_loop
-        from backend.broker.ibkr import IBKRConnectionError
+        from backend.broker.ibkr import connect as _ibkr_connect
     except ImportError:
         return {}
 
     try:
         ib = _ibkr_connect()
-        loop = _ibkr_loop()
     except Exception as exc:
         logger.warning("IBKR not available for price fetch: %s", exc)
         return {}
 
-    async def _snapshot():
-        contracts = [Stock(t, "SMART", "USD") for t in tickers]
-        qualified = await ib.qualifyContractsAsync(*contracts)
-        if not qualified:
-            return {}
-        ticker_objs = await ib.reqTickersAsync(*qualified)
-        result: dict[str, float] = {}
-        for td in ticker_objs:
-            symbol = td.contract.symbol if td.contract else None
-            if not symbol:
-                continue
-            # Prefer last trade; fall back to close (after-hours) then mid
-            price = None
-            if td.last and td.last > 0:
-                price = td.last
-            elif td.close and td.close > 0:
-                price = td.close
-            elif td.bid and td.ask and td.bid > 0 and td.ask > 0:
-                price = (td.bid + td.ask) / 2
-            if price:
-                result[symbol] = float(price)
-        return result
-
     try:
-        future = _asyncio.run_coroutine_threadsafe(_snapshot(), loop)
-        price_map = future.result(timeout=15)
-        logger.info(
-            "IBKR price snapshot: %d/%d tickers returned prices",
-            len(price_map), len(tickers),
-        )
-        return price_map
+        result: dict[str, float] = {}
+        wanted = set(tickers)
+        for item in ib.portfolio():
+            symbol = item.contract.symbol if item.contract else None
+            if symbol and symbol in wanted and item.marketPrice and item.marketPrice > 0:
+                result[symbol] = float(item.marketPrice)
+                logger.info("IBKR portfolio price: %s = $%.4f", symbol, item.marketPrice)
+        return result
     except Exception as exc:
-        logger.warning("IBKR price snapshot failed: %s", exc)
+        logger.warning("IBKR portfolio price read failed: %s", exc)
         return {}
 
 
