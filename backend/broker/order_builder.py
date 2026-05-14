@@ -47,6 +47,24 @@ def _fetch_adv(ticker: str) -> float:
         return 0.0
 
 
+def _fetch_live_price(ticker: str, fallback: float) -> float:
+    """Fetch the latest available market price via yfinance.
+
+    Uses fast_info for speed. Falls back to the DB value so the order is never
+    blocked by a price-fetch failure.
+    """
+    try:
+        info = yf.Ticker(ticker).fast_info
+        # fast_info.last_price reflects the most recent trade (includes pre/post market).
+        price = getattr(info, "last_price", None)
+        if price and float(price) > 0:
+            logger.debug("Live price for %s: %.4f (DB fallback was %.4f)", ticker, price, fallback)
+            return float(price)
+    except Exception as exc:
+        logger.warning("_fetch_live_price failed for %s: %s — using DB fallback %.4f", ticker, exc, fallback)
+    return fallback
+
+
 def _select_order_type(share_count: int, adv: float) -> tuple:
     """
     Return (order_type, timeout_minutes) based on share_count relative to ADV.
@@ -199,7 +217,12 @@ def build_exit_order(
     ref_price_raw = position_row.get("current_price") or position_row.get("entry_price")
     if ref_price_raw is None:
         raise OrderBuildError(f"position_row missing current_price and entry_price for {ticker}")
-    ref_price: float = float(ref_price_raw)
+    db_price: float = float(ref_price_raw)
+
+    # Always fetch the live price so the limit is anchored to the actual market,
+    # not a stale DB value (risk monitor only runs during market hours, so the
+    # DB price can be yesterday's close during pre-market exits).
+    ref_price: float = _fetch_live_price(ticker, db_price)
 
     if exit_type == "EXIT_TRIM":
         if not trim_pct or trim_pct <= 0:
