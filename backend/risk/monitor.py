@@ -95,10 +95,6 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
     Returns:
         Summary dict: {positions_checked, alerts_fired, critical_count, skipped}
     """
-    if not force and not is_market_open():
-        logger.debug("market closed — skipping risk monitor cycle")
-        return {"positions_checked": 0, "alerts_fired": 0, "critical_count": 0, "skipped": True}
-
     # ── 1. Fetch OPEN positions ───────────────────────────────────────────────
     resp = (
         supabase_client
@@ -116,55 +112,61 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
         logger.debug("no OPEN positions — risk cycle done")
         return {"positions_checked": 0, "alerts_fired": 0, "critical_count": 0, "skipped": False}
 
-    # ── 2. Fetch live prices and drop any position without a fresh quote ────────
+    # ── 2. Refresh prices (always — keeps current_price fresh for PM + order builder) ──
     tickers = list({p["ticker"] for p in positions if p.get("ticker")})
     original_count = len(positions)
-    positions = _refresh_prices(positions, tickers, supabase_client)
-    live_count = len(positions)
+    positions_with_prices = _refresh_prices(positions, tickers, supabase_client)
+    live_count = len(positions_with_prices)
 
     if live_count < original_count:
         logger.warning(
-            "%d/%d position(s) excluded from stop checks — no live Polygon price available",
+            "%d/%d position(s) had no live Polygon price this cycle",
             original_count - live_count,
             original_count,
         )
 
-    if not positions:
+    # ── 3. Stop checks and alerts only during market hours ───────────────────
+    # Price refresh above always runs so the PM and order builder see fresh data.
+    # Stop checks outside market hours produce noise (bid/ask spreads widen,
+    # pre-market prints are thin) so we skip them.
+    if not force and not is_market_open():
+        logger.debug(
+            "market closed — prices refreshed for %d position(s), stop checks skipped",
+            live_count,
+        )
+        return {"positions_checked": live_count, "alerts_fired": 0, "critical_count": 0, "skipped": True}
+
+    if not positions_with_prices:
         logger.error(
             "no positions have live prices this cycle — stop checks skipped entirely "
             "(Polygon unavailable or all tickers returned no data)"
         )
         return {"positions_checked": 0, "alerts_fired": 0, "critical_count": 0, "skipped": False}
 
-    # ── 3. Check stops ────────────────────────────────────────────────────────
-    stop_events = check_stops(positions, regime)
+    stop_events = check_stops(positions_with_prices, regime)
 
-    # ── 4. Check exposure drift ───────────────────────────────────────────────
     from backend.broker.ibkr import get_portfolio_value as _get_portfolio_value
-    exposure_breaches = check_exposure_drift(positions, regime, _get_portfolio_value())
+    exposure_breaches = check_exposure_drift(positions_with_prices, regime, _get_portfolio_value())
 
-    # ── 5. Build alerts ───────────────────────────────────────────────────────
     alerts = build_alerts(stop_events, exposure_breaches, regime)
 
-    # ── 6. Dispatch ───────────────────────────────────────────────────────────
     if alerts:
         logger.info("generated %d alert(s) — dispatching to Supabase", len(alerts))
         dispatch_alerts(alerts, supabase_client)
     else:
         logger.info(
-            "risk cycle complete: %d positions checked, 0 alerts — all clear "
-            "(stop checks ran, no thresholds breached, no approaching-stop warnings)",
-            len(positions),
+            "risk cycle complete: %d positions checked, 0 alerts — all clear",
+            len(positions_with_prices),
         )
 
     critical_count = sum(1 for a in alerts if a.tier == 3)
     logger.info(
         "risk cycle complete: %d positions, %d alerts (%d critical)",
-        len(positions), len(alerts), critical_count,
+        len(positions_with_prices), len(alerts), critical_count,
     )
 
     return {
-        "positions_checked": len(positions),
+        "positions_checked": len(positions_with_prices),
         "alerts_fired": len(alerts),
         "critical_count": critical_count,
         "skipped": False,
