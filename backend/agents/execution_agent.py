@@ -202,7 +202,7 @@ def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
             existing = (
                 client.table("orders")
-                .select("id,status,filled_at")
+                .select("id,status,filled_at,created_at")
                 .eq("position_id", pos["id"])
                 .eq("order_side", "SELL")
                 .execute()
@@ -219,6 +219,22 @@ def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
                 logger.info("Position %s had a SELL order filled within 30 min — clearing exit_action and skipping", pos["id"])
                 client.table("positions").update({"exit_action": None, "exit_trim_pct": None}).eq("id", pos["id"]).execute()
                 continue
+            # Guard 4: during pre-market, if a SELL order already timed out within
+            # the last 3 hours, hold until market open rather than retrying in a loop.
+            # IBKR won't fill illiquid stocks pre-market; each retry just wastes an
+            # order submission. At 09:30 _is_market_open() becomes True → guard skips.
+            if not _is_market_open():
+                timeout_window = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+                recent_timeout = [
+                    o for o in (existing.data or [])
+                    if o["status"] == "TIMEOUT" and o.get("created_at", "") >= timeout_window
+                ]
+                if recent_timeout:
+                    logger.info(
+                        "Pre-market: exit for %s already timed out — holding until market open",
+                        pos.get("ticker"),
+                    )
+                    continue
         except Exception as exc:
             logger.warning("_run_exit_cycle: order check failed for %s: %s", pos.get("ticker"), exc)
             continue
@@ -404,6 +420,13 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         # In pre-market, skip new entries — only exits are allowed.
         if pre_market_mode:
             logger.info("Pre-market mode: %d exit order(s) placed, skipping new entries", len(exit_order_ids))
+            return summary
+
+        # New entries only allowed during regular market hours (09:30–15:55 ET).
+        # This applies even when force=True so a manual API trigger can't push
+        # entry orders at 09:20 or 23:27.
+        if not _is_market_open():
+            logger.info("Outside market hours: skipping new entries (%d exit(s) placed)", len(exit_order_ids))
             return summary
 
         # ── F: Fetch APPROVED positions ───────────────────────────────────────

@@ -1530,9 +1530,15 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             .execute()
         )
         open_tickers = {p["ticker"] for p in base_ctx.get("positions", []) if p.get("status") == "OPEN"}
-        for memo in (resp.data or []):
+        # Deduplicate by ticker — keep only the latest memo per ticker so two pending
+        # memos for the same stock don't produce contradictory decisions in one cycle.
+        _seen_memo_tickers: set = set()
+        for memo in reversed(resp.data or []):  # reversed = newest first (query is asc)
             memo_ticker = memo.get("ticker")
-            if memo_ticker and memo_ticker in open_tickers:
+            if not memo_ticker or memo_ticker in _seen_memo_tickers:
+                continue
+            _seen_memo_tickers.add(memo_ticker)
+            if memo_ticker in open_tickers:
                 items.append({"category": "POSITION_UPDATE", "data": {"memo": memo}, "priority": 2})
             else:
                 items.append({"category": "NEW_ENTRY", "data": {"memo": memo}, "priority": 2})
