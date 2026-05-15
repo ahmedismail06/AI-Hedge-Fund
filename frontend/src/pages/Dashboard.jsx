@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getPositions, getPending, getExposure, approveTrade, rejectTrade, getEquityCurve } from '../api/portfolio';
+import { getPositions, getPending, approveTrade, rejectTrade, getEquityCurve } from '../api/portfolio';
 import { getAlerts, getCriticalAlerts, getMetrics } from '../api/risk';
 import { getRegime, getBriefing } from '../api/macro';
 import { getExecutionStatus } from '../api/execution';
@@ -11,24 +11,12 @@ import RiskAlert from '../components/RiskAlert';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ConvictionBadge from '../components/ConvictionBadge';
 
-/* ─── Regime config (CSS variables for both themes) ──────────────── */
+/* ─── Regime config ─────────────────────────────────────────────── */
 const REGIME_CONFIG = {
-  'Risk-On': {
-    cls: 'regime-risk-on', dotCls: 'dot-green',
-    colorVar: 'var(--regime-on-text)', label: 'RISK-ON',
-  },
-  'Risk-Off': {
-    cls: 'regime-risk-off', dotCls: 'dot-red',
-    colorVar: 'var(--regime-off-text)', label: 'RISK-OFF',
-  },
-  'Stagflation': {
-    cls: 'regime-stagflation', dotCls: 'dot-amber',
-    colorVar: 'var(--regime-st-text)', label: 'STAGFLATION',
-  },
-  'Transitional': {
-    cls: 'regime-transitional', dotCls: 'dot-blue',
-    colorVar: 'var(--regime-tr-text)', label: 'TRANSITIONAL',
-  },
+  'Risk-On':     { cls: 'regime-risk-on',     dotCls: 'dot-green', colorVar: 'var(--regime-on-text)' },
+  'Risk-Off':    { cls: 'regime-risk-off',    dotCls: 'dot-red',   colorVar: 'var(--regime-off-text)' },
+  'Stagflation': { cls: 'regime-stagflation', dotCls: 'dot-amber', colorVar: 'var(--regime-st-text)' },
+  'Transitional':{ cls: 'regime-transitional',dotCls: 'dot-blue',  colorVar: 'var(--regime-tr-text)' },
 };
 
 const SUB_SCORES = [
@@ -44,6 +32,15 @@ const VERDICT_STYLES = {
   AVOID: { bgVar: 'var(--surface-2)', colorVar: 'var(--text-2)' },
 };
 
+const DECISION_STATUS_STYLE = {
+  SENT_TO_EXECUTION:  { color: 'var(--green)',  bg: 'var(--green-bg)' },
+  BLOCKED:            { color: 'var(--red)',    bg: 'var(--red-bg)' },
+  DEFERRED:           { color: 'var(--amber)',  bg: 'var(--amber-bg)' },
+  PENDING_HUMAN:      { color: 'var(--amber)',  bg: 'var(--amber-bg)' },
+  NO_ACTION:          { color: 'var(--text-3)', bg: 'var(--surface-2)' },
+  TRIGGERED_PIPELINE: { color: 'var(--accent)', bg: 'var(--accent-muted)' },
+};
+
 /* ─── Formatters ─────────────────────────────────────────────────── */
 function fmt$(v) {
   if (v == null) return '—';
@@ -55,57 +52,74 @@ function fmt$(v) {
 }
 
 function fmtAgo(ts) {
-  if (!ts) return null;
-  const diff = Math.round((Date.now() - new Date(ts)) / 1000);
-  if (diff < 60)   return `${diff}s ago`;
-  if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
-  return `${Math.round(diff / 3600)}h ago`;
+  if (!ts) return '—';
+  const diff = (Date.now() - new Date(ts)) / 1000;
+  if (diff < 60)    return 'just now';
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
-/* ─── PnL Card ───────────────────────────────────────────────────── */
-function PnLCard({ label, value, sub, colorVar }) {
+/* ─── Section Label ──────────────────────────────────────────────── */
+function SectionLabel({ children }) {
   return (
     <div
-      className="rounded-lg p-4 card-hover"
-      style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+      className="text-[9px] font-bold tracking-[0.18em] uppercase"
+      style={{ color: 'var(--text-3)', fontFamily: 'Syne' }}
     >
-      <div className="section-label mb-2">{label}</div>
-      <div
-        className="text-2xl font-semibold font-data leading-none"
-        style={{ color: colorVar ?? 'var(--text)', fontFamily: 'JetBrains Mono' }}
-      >
-        {value ?? '—'}
-      </div>
-      <div className="text-[10px] mt-1.5 font-data" style={{ color: 'var(--text-3)' }}>{sub}</div>
+      {children}
     </div>
   );
 }
 
-/* ─── Health Pill ────────────────────────────────────────────────── */
-function HealthPill({ ok, label, sub, badge, badgeStyle, onClick }) {
-  const dotCls = ok === true ? 'dot-green' : ok === false ? 'dot-red' : 'dot-gray';
+/* ─── Metric Block ───────────────────────────────────────────────── */
+function Metric({ label, value, sub, color }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <SectionLabel>{label}</SectionLabel>
+      <div
+        className="text-[22px] font-bold leading-none"
+        style={{ color: color ?? 'var(--text)', fontFamily: 'JetBrains Mono' }}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>{sub}</div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Status Chip (inline system status ribbon) ──────────────────── */
+function StatusChip({ ok, label, sub, badge, onClick }) {
+  const dotColor  = ok === true  ? 'var(--green)'              : ok === false ? 'var(--red)'              : 'var(--text-3)';
+  const glowColor = ok === true  ? 'rgba(0,217,138,0.55)'      : ok === false ? 'rgba(255,51,71,0.55)'    : 'none';
 
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-2.5 rounded-md px-3 py-2.5 text-left w-full transition-all card-hover"
-      style={{ background: 'var(--surface)', border: '1px solid var(--border)', cursor: onClick ? 'pointer' : 'default' }}
+      className="flex items-center gap-1.5 transition-opacity hover:opacity-70 flex-shrink-0"
+      style={{ cursor: onClick ? 'pointer' : 'default' }}
     >
-      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotCls}`} />
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] font-bold truncate" style={{ color: 'var(--text)', fontFamily: 'Syne' }}>
+      <span
+        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+        style={{ background: dotColor, boxShadow: ok != null ? `0 0 5px ${glowColor}` : 'none' }}
+      />
+      <div className="flex items-baseline gap-1">
+        <span
+          className="text-[11px] font-bold"
+          style={{ color: 'var(--text)', fontFamily: 'Syne' }}
+        >
           {label}
-        </div>
+        </span>
         {sub && (
-          <div className="text-[10px] truncate font-data" style={{ color: 'var(--text-3)' }}>
-            {sub}
-          </div>
+          <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>{sub}</span>
         )}
       </div>
       {badge != null && badge > 0 && (
         <span
-          className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm font-data flex-shrink-0"
-          style={badgeStyle}
+          className="text-[9px] font-bold px-1 py-px rounded"
+          style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid var(--red-border)' }}
         >
           {badge}
         </span>
@@ -114,35 +128,83 @@ function HealthPill({ ok, label, sub, badge, badgeStyle, onClick }) {
   );
 }
 
-/* ─── Sub-score bar ──────────────────────────────────────────────── */
-function SubScore({ label, value }) {
-  const v   = value ?? 0;
-  const pos = v >= 0;
-  const pct = Math.min(Math.abs(v) * 100, 100);
-
+/* ─── Score Pill (regime sub-scores) ────────────────────────────── */
+function ScorePill({ label, value }) {
+  if (value == null) return null;
+  const n     = parseFloat(value);
+  const color = n >= 7 ? 'var(--green)' : n >= 4 ? 'var(--amber)' : 'var(--red)';
+  const bg    = n >= 7 ? 'var(--green-bg)' : n >= 4 ? 'var(--amber-bg)' : 'var(--red-bg)';
   return (
-    <div className="text-center">
-      <div className="section-label mb-1.5">{label}</div>
+    <div className="flex flex-col items-center gap-1">
+      <SectionLabel>{label}</SectionLabel>
       <div
-        className="text-sm font-semibold font-data"
-        style={{ color: pos ? 'var(--green)' : 'var(--red)', fontFamily: 'JetBrains Mono' }}
+        className="text-[15px] font-bold px-2.5 py-0.5 rounded-lg"
+        style={{ color, background: bg, fontFamily: 'JetBrains Mono' }}
       >
-        {value != null ? `${pos ? '+' : ''}${v.toFixed(2)}` : '—'}
-      </div>
-      <div
-        className="mt-1.5 h-1 rounded-full mx-auto"
-        style={{ width: '48px', background: 'var(--border)' }}
-      >
-        <div
-          className="h-full rounded-full"
-          style={{ width: `${pct}%`, background: pos ? 'var(--green)' : 'var(--red)', opacity: 0.8 }}
-        />
+        {n.toFixed(1)}
       </div>
     </div>
   );
 }
 
-/* ─── Main component ─────────────────────────────────────────────── */
+/* ─── Card Shell ─────────────────────────────────────────────────── */
+function Card({ children, className = '', style = {} }) {
+  return (
+    <div
+      className={`rounded-xl p-5 ${className}`}
+      style={{ background: 'var(--surface)', border: '1px solid var(--border)', ...style }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/* ─── Card Header ────────────────────────────────────────────────── */
+function CardHeader({ label, title, action, onAction }) {
+  return (
+    <div className="flex items-start justify-between mb-4">
+      <div>
+        <SectionLabel>{label}</SectionLabel>
+        {title && (
+          <div className="text-[13px] font-semibold mt-0.5" style={{ color: 'var(--text)' }}>
+            {title}
+          </div>
+        )}
+      </div>
+      {action && (
+        <button
+          onClick={onAction}
+          className="text-[11px] font-bold transition-opacity hover:opacity-70 flex-shrink-0"
+          style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
+        >
+          {action}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ─── Empty State ────────────────────────────────────────────────── */
+function EmptyState({ icon, label, sub, onClick, iconColor }) {
+  return (
+    <div
+      className="flex flex-col items-center justify-center gap-2"
+      style={{ height: 110, cursor: onClick ? 'pointer' : 'default' }}
+      onClick={onClick}
+    >
+      <span
+        className="material-symbols-outlined"
+        style={{ fontSize: '26px', color: iconColor ?? 'var(--border-2)' }}
+      >
+        {icon}
+      </span>
+      <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>{label}</p>
+      {sub && <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>{sub}</p>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════ */
 export default function Dashboard() {
   const navigate = useNavigate();
   const [positions,   setPositions]   = useState([]);
@@ -152,11 +214,11 @@ export default function Dashboard() {
   const [metrics,     setMetrics]     = useState(null);
   const [regime,      setRegime]      = useState(null);
   const [briefing,    setBriefing]    = useState(null);
-  const [execStatus,   setExecStatus]   = useState(null);
-  const [memoHistory,  setMemoHistory]  = useState([]);
-  const [equityCurve,  setEquityCurve]  = useState([]);
-  const [pmDecisions,  setPmDecisions]  = useState([]);
-  const [confirm,      setConfirm]      = useState(null);
+  const [execStatus,  setExecStatus]  = useState(null);
+  const [memoHistory, setMemoHistory] = useState([]);
+  const [equityCurve, setEquityCurve] = useState([]);
+  const [pmDecisions, setPmDecisions] = useState([]);
+  const [confirm,     setConfirm]     = useState(null);
 
   const loadPnL = useCallback(async () => {
     try {
@@ -226,7 +288,8 @@ export default function Dashboard() {
   const unrealizedPnl  = execStatus?.unrealized_pnl   ?? null;
   const realizedPnl    = execStatus?.realized_pnl     ?? null;
 
-  const pnlColor = (v) => v == null ? undefined : v >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlColor = (v) => v == null ? 'var(--text)' : v >= 0 ? 'var(--green)' : 'var(--red)';
+  const riskClear = alerts.length === 0 && criticals.length === 0;
 
   const handleConfirm = async () => {
     if (!confirm) return;
@@ -240,7 +303,7 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="p-5 space-y-4 max-w-[1400px] mx-auto animate-fade-in">
+    <div className="p-6 space-y-4 max-w-[1400px] mx-auto animate-fade-in">
       {confirm && (
         <ConfirmDialog
           title={confirm.action === 'approve' ? `Approve ${confirm.ticker}?` : `Reject ${confirm.ticker}?`}
@@ -256,95 +319,171 @@ export default function Dashboard() {
         />
       )}
 
-      {/* ── CRITICAL banner ───────────────────────────────────────── */}
+      {/* ── Critical Banner ───────────────────────────────────────── */}
       {criticals.length > 0 && (
         <div
-          className="rounded-lg px-5 py-3 flex items-center gap-3 cursor-pointer transition-opacity hover:opacity-90"
-          style={{
-            background:  'var(--red-bg)',
-            border:      '1px solid var(--red-border)',
-          }}
+          className="rounded-xl px-5 py-3.5 flex items-center gap-3 cursor-pointer transition-opacity hover:opacity-90"
+          style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)' }}
           onClick={() => navigate('/risk')}
         >
-          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 dot-red pulse-critical" />
-          <span className="font-bold text-sm tracking-wide" style={{ color: 'var(--red)', fontFamily: 'Syne' }}>
-            CRITICAL ALERT — Trade approvals blocked.
+          <span className="w-2 h-2 rounded-full flex-shrink-0 dot-red pulse-critical" />
+          <span
+            className="font-bold text-[12px] tracking-widest uppercase flex-shrink-0"
+            style={{ color: 'var(--red)', fontFamily: 'Syne' }}
+          >
+            Critical Alert
           </span>
-          <span className="text-[13px]" style={{ color: 'var(--text)' }}>
+          <span className="w-px h-4 flex-shrink-0" style={{ background: 'var(--red-border)' }} />
+          <span className="text-[12px] truncate" style={{ color: 'var(--text)' }}>
             {criticals[0]?.message}
           </span>
-          <span className="ml-auto text-[11px] font-bold underline" style={{ color: 'var(--red)' }}>
+          <span
+            className="ml-auto text-[11px] font-bold flex-shrink-0"
+            style={{ color: 'var(--red)', fontFamily: 'Syne' }}
+          >
             View Risk →
           </span>
         </div>
       )}
 
-      {/* ── P&L Strip ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <PnLCard
-          label="Portfolio Value"
-          value={fmt$(portfolioValue)}
-          sub={ibkrOk ? (isPaper ? 'Paper · live IBKR' : 'Live · from IBKR') : 'IBKR disconnected'}
-        />
-        <PnLCard label="Cash Available" value={fmt$(cashBalance)} sub="Buying power" />
-        <PnLCard
-          label="Unrealized P&L"
-          value={fmt$(unrealizedPnl)}
-          sub="Open positions"
-          colorVar={pnlColor(unrealizedPnl)}
-        />
-        <PnLCard
-          label="Realized P&L"
-          value={fmt$(realizedPnl)}
-          sub="Session closed"
-          colorVar={pnlColor(realizedPnl)}
-        />
-      </div>
+      {/* ── Portfolio Hero Card ───────────────────────────────────── */}
+      <Card>
+        {/* Top row: Big number + PnL metrics */}
+        <div className="flex flex-wrap items-start justify-between gap-6">
 
-      {/* ── System health strip ───────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-        <HealthPill
-          ok={ibkrOk}
-          label="IBKR Gateway"
-          sub={ibkrOk ? (isPaper ? 'Paper' : 'Live') : 'Disconnected'}
-          onClick={() => navigate('/execution')}
-        />
-        <HealthPill
-          ok={(briefing?.date || regime?.date) ? true : null}
-          label="Macro Engine"
-          sub={(briefing?.date || regime?.date) ? fmtAgo(briefing?.date || regime?.date) : 'No data'}
-          onClick={() => navigate('/macro')}
-        />
-        <HealthPill ok={true} label="Screener" sub="Ready" onClick={() => navigate('/screener')} />
-        <HealthPill
-          ok={alerts.length === 0 && criticals.length === 0}
-          label="Risk Monitor"
-          sub={criticals.length > 0 ? `${criticals.length} critical` : alerts.length > 0 ? `${alerts.length} alerts` : 'All clear'}
-          badge={criticals.length || undefined}
-          badgeStyle={{ background: 'var(--red-bg)', color: 'var(--red)' }}
-          onClick={() => navigate('/risk')}
-        />
-        <HealthPill
-          ok={regimeKey != null}
-          label="Regime"
-          sub={regimeKey ?? 'Unknown'}
-          onClick={() => navigate('/macro')}
-        />
-      </div>
+          {/* Portfolio value */}
+          <div className="flex flex-col gap-2">
+            <SectionLabel>Portfolio Value</SectionLabel>
+            <div
+              className="text-[40px] font-black leading-none tracking-tight"
+              style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+            >
+              {fmt$(portfolioValue)}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span
+                className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                style={{
+                  background: ibkrOk ? 'var(--green-bg)'   : 'var(--surface-2)',
+                  color:      ibkrOk ? 'var(--green)'       : 'var(--text-3)',
+                  border:     `1px solid ${ibkrOk ? 'var(--green-border)' : 'var(--border)'}`,
+                  fontFamily: 'Syne',
+                }}
+              >
+                {ibkrOk ? (isPaper ? '● PAPER' : '● LIVE') : '○ DISCONNECTED'}
+              </span>
+              {regCfg && (
+                <span
+                  className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                  style={{
+                    color:      regCfg.colorVar,
+                    background: 'var(--surface-2)',
+                    border:     '1px solid var(--border)',
+                    fontFamily: 'Syne',
+                  }}
+                >
+                  {regimeKey}
+                </span>
+              )}
+              {pending.length > 0 && (
+                <button
+                  onClick={() => navigate('/portfolio')}
+                  className="flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-md transition-opacity hover:opacity-75"
+                  style={{
+                    background: 'var(--amber-bg)',
+                    border:     '1px solid var(--amber-border)',
+                    color:      'var(--amber)',
+                    fontFamily: 'Syne',
+                  }}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--amber)' }} />
+                  {pending.length} awaiting approval
+                </button>
+              )}
+            </div>
+          </div>
 
-      {/* ── Regime card ───────────────────────────────────────────── */}
+          {/* PnL metrics */}
+          <div className="flex flex-wrap gap-8 pt-1">
+            <Metric label="Cash" value={fmt$(cashBalance)} sub="Buying power" />
+            <Metric
+              label="Unrealized P&L"
+              value={fmt$(unrealizedPnl)}
+              sub="Open positions"
+              color={pnlColor(unrealizedPnl)}
+            />
+            <Metric
+              label="Realized P&L"
+              value={fmt$(realizedPnl)}
+              sub="Session closed"
+              color={pnlColor(realizedPnl)}
+            />
+            {positions.length > 0 && (
+              <Metric label="Positions" value={positions.length} sub="Open" />
+            )}
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div className="my-4" style={{ borderTop: '1px solid var(--border)' }} />
+
+        {/* System Status Ribbon */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          <SectionLabel>Systems</SectionLabel>
+          <StatusChip
+            ok={ibkrOk}
+            label="IBKR"
+            sub={ibkrOk ? (isPaper ? 'paper' : 'live') : 'disconnected'}
+            onClick={() => navigate('/execution')}
+          />
+          <StatusChip
+            ok={(briefing?.date || regime?.date) ? true : null}
+            label="Macro"
+            sub={fmtAgo(briefing?.date || regime?.date)}
+            onClick={() => navigate('/macro')}
+          />
+          <StatusChip
+            ok={true}
+            label="Screener"
+            sub="ready"
+            onClick={() => navigate('/screener')}
+          />
+          <StatusChip
+            ok={riskClear}
+            label="Risk"
+            sub={
+              criticals.length > 0
+                ? `${criticals.length} critical`
+                : alerts.length > 0
+                ? `${alerts.length} alerts`
+                : 'clear'
+            }
+            badge={criticals.length || undefined}
+            onClick={() => navigate('/risk')}
+          />
+          <StatusChip
+            ok={regimeKey != null}
+            label="Regime"
+            sub={regimeKey?.toLowerCase() ?? 'unknown'}
+            onClick={() => navigate('/macro')}
+          />
+        </div>
+      </Card>
+
+      {/* ── Regime Card ───────────────────────────────────────────── */}
       {regCfg ? (
         <div
-          className={`rounded-lg border p-5 ${regCfg.cls}`}
+          className={`rounded-xl px-5 py-4 ${regCfg.cls}`}
           style={{ borderWidth: '1px' }}
         >
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <span className={`w-3 h-3 rounded-full ${regCfg.dotCls}`} />
+
+            <div className="flex items-center gap-3">
+              <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${regCfg.dotCls}`} />
               <div>
-                <div className="section-label mb-0.5">Market Regime</div>
+                <SectionLabel>Market Regime</SectionLabel>
                 <div
-                  className="text-[22px] font-black tracking-tight leading-none"
+                  className="text-[20px] font-black tracking-tight leading-tight mt-0.5"
                   style={{ color: regCfg.colorVar, fontFamily: 'Syne' }}
                 >
                   {regimeKey}
@@ -352,7 +491,7 @@ export default function Dashboard() {
               </div>
               {regime?.regime_confidence != null && (
                 <div
-                  className="text-sm px-3 py-1 rounded-md font-data"
+                  className="text-[11px] px-3 py-1 rounded-lg ml-1"
                   style={{
                     background: 'var(--accent-muted)',
                     color:      'var(--accent)',
@@ -365,15 +504,15 @@ export default function Dashboard() {
               )}
             </div>
 
-            <div className="flex gap-8">
+            <div className="flex gap-6">
               {SUB_SCORES.map(({ key, label }) => (
-                <SubScore key={key} label={label} value={regime?.[key] ?? briefing?.[key]} />
+                <ScorePill key={key} label={label} value={regime?.[key] ?? briefing?.[key]} />
               ))}
             </div>
 
             <button
               onClick={() => navigate('/macro')}
-              className="text-[11px] font-bold tracking-wide transition-opacity hover:opacity-70"
+              className="text-[11px] font-bold tracking-wide transition-opacity hover:opacity-70 flex-shrink-0"
               style={{ color: regCfg.colorVar, fontFamily: 'Syne' }}
             >
               Full Macro →
@@ -381,109 +520,85 @@ export default function Dashboard() {
           </div>
         </div>
       ) : (
-        <div
-          className="rounded-lg p-5"
-          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
-        >
-          <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+        <Card>
+          <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>
             No regime data — run macro agent.
-          </span>
-        </div>
+          </p>
+        </Card>
       )}
 
-      {/* ── Equity curve + Pending approvals ──────────────────────── */}
+      {/* ── Equity Curve + PM Activity ────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-        {/* Equity curve */}
-        <div
-          className="lg:col-span-3 rounded-lg p-5"
-          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="section-label">Portfolio Equity Curve</div>
-            <span className="text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
-              30-day NAV · account snapshots
-            </span>
-          </div>
-          <EquityCurveChart data={equityCurve} height={180} />
-        </div>
 
-        {/* Pending approvals (supervised mode only) / PM Decisions link */}
-        <div
-          className="lg:col-span-2 rounded-lg p-5"
-          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <div className="section-label">{pending.length > 0 ? 'Awaiting Approval' : 'PM Decisions'}</div>
-              {pending.length > 0 && (
-                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm font-data"
-                  style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}>
-                  {pending.length}
-                </span>
-              )}
-            </div>
-            <button
-                onClick={() => navigate(pending.length > 0 ? '/portfolio' : '/orchestrator')}
-                className="text-[11px] font-bold transition-opacity hover:opacity-70"
-                style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
-              >
-                See All →
-              </button>
-          </div>
+        {/* Equity curve */}
+        <Card className="lg:col-span-3">
+          <CardHeader
+            label="Equity Curve"
+            title="30-Day NAV"
+            action="Portfolio →"
+            onAction={() => navigate('/portfolio')}
+          />
+          <EquityCurveChart data={equityCurve} height={200} />
+        </Card>
+
+        {/* PM Activity / Pending Approvals */}
+        <Card className="lg:col-span-2">
+          <CardHeader
+            label={pending.length > 0 ? 'Awaiting Approval' : 'PM Activity'}
+            title={
+              pending.length > 0
+                ? <span style={{ color: 'var(--amber)' }}>{pending.length} pending decision{pending.length !== 1 ? 's' : ''}</span>
+                : 'Recent decisions'
+            }
+            action="See All →"
+            onAction={() => navigate(pending.length > 0 ? '/portfolio' : '/orchestrator')}
+          />
 
           {pending.length === 0 ? (
             pmDecisions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-2 cursor-pointer"
-                style={{ height: 160, color: 'var(--text-3)' }}
+              <EmptyState
+                icon="smart_toy"
+                label="No decisions yet"
+                sub="View audit log →"
                 onClick={() => navigate('/orchestrator')}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--border-2)' }}>smart_toy</span>
-                <p className="text-[12px]">No decisions yet</p>
-                <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>View audit log →</p>
-              </div>
+              />
             ) : (
-              <div className="space-y-1.5">
+              <div className="space-y-0.5">
                 {pmDecisions.map((d, i) => {
-                  const statusColor = {
-                    SENT_TO_EXECUTION: 'var(--green)',
-                    BLOCKED:           'var(--red)',
-                    DEFERRED:          'var(--amber)',
-                    PENDING_HUMAN:     'var(--amber)',
-                    NO_ACTION:         'var(--text-3)',
-                    TRIGGERED_PIPELINE:'var(--accent)',
-                  }[d.execution_status] ?? 'var(--text-3)';
-                  const statusBg = {
-                    SENT_TO_EXECUTION: 'var(--green-bg)',
-                    BLOCKED:           'var(--red-bg)',
-                    DEFERRED:          'var(--amber-bg)',
-                    PENDING_HUMAN:     'var(--amber-bg)',
-                    NO_ACTION:         'var(--surface-2)',
-                    TRIGGERED_PIPELINE:'var(--accent-muted)',
-                  }[d.execution_status] ?? 'var(--surface-2)';
+                  const st = DECISION_STATUS_STYLE[d.execution_status] ?? { color: 'var(--text-3)', bg: 'var(--surface-2)' };
                   return (
                     <div
                       key={d.decision_id ?? i}
-                      className="flex items-center gap-2 px-3 py-2 rounded-md cursor-pointer transition-colors"
+                      className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-pointer transition-colors"
                       onClick={() => navigate('/orchestrator')}
                       onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
                       onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                     >
-                      <span className="font-bold text-[11px] font-data w-14 flex-shrink-0 truncate"
-                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}>
+                      <span
+                        className="font-bold text-[12px] w-14 flex-shrink-0 truncate"
+                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                      >
                         {d.ticker ?? '—'}
                       </span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm flex-shrink-0"
-                        style={{ background: 'var(--surface-2)', color: 'var(--text-2)', fontFamily: 'Syne', border: '1px solid var(--border)' }}>
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+                        style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)', fontFamily: 'Syne' }}
+                      >
                         {d.category}
                       </span>
-                      <span className="text-[10px] truncate flex-1 font-data" style={{ color: 'var(--text-2)' }}>
+                      <span className="text-[11px] truncate flex-1" style={{ color: 'var(--text-2)' }}>
                         {d.decision}
                       </span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm flex-shrink-0"
-                        style={{ background: statusBg, color: statusColor, fontFamily: 'Syne' }}>
-                        {d.execution_status?.replace('_', ' ')}
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+                        style={{ background: st.bg, color: st.color, fontFamily: 'Syne' }}
+                      >
+                        {d.execution_status?.replace(/_/g, ' ')}
                       </span>
-                      <span className="text-[10px] flex-shrink-0 font-data" style={{ color: 'var(--text-3)' }}>
+                      <span
+                        className="text-[10px] flex-shrink-0"
+                        style={{ color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                      >
                         {d.timestamp ? fmtAgo(d.timestamp) : ''}
                       </span>
                     </div>
@@ -496,127 +611,131 @@ export default function Dashboard() {
               {pending.slice(0, 3).map(item => {
                 const vs = VERDICT_STYLES[item.verdict] || VERDICT_STYLES.AVOID;
                 return (
-                  <div key={item.id} className="rounded-md p-3"
+                  <div
+                    key={item.id}
+                    className="rounded-xl p-4"
                     style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
                   >
-                    <div className="flex items-center gap-2 mb-2.5">
-                      <span className="font-bold text-sm font-data" style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <span
+                        className="font-bold text-[14px]"
+                        style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                      >
                         {item.ticker}
                       </span>
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
-                        style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}>
+                      <span
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                        style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}
+                      >
                         {item.verdict}
                       </span>
                       <ConvictionBadge score={item.conviction_score} />
                       {item.size_label && (
-                        <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-2)' }}>{item.size_label}</span>
+                        <span className="ml-auto text-[11px]" style={{ color: 'var(--text-2)' }}>
+                          {item.size_label}
+                        </span>
                       )}
                     </div>
-                    <div className="flex gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => setConfirm({ action: 'approve', id: item.id, ticker: item.ticker })}
-                        className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-opacity hover:opacity-80"
-                        style={{ background: 'var(--green-bg)', border: '1px solid var(--green-border)', color: 'var(--green)', fontFamily: 'Syne' }}
-                      >Approve</button>
+                        className="py-2 text-[11px] font-bold rounded-lg transition-opacity hover:opacity-85"
+                        style={{
+                          background: 'var(--green-bg)',
+                          border:     '1px solid var(--green-border)',
+                          color:      'var(--green)',
+                          fontFamily: 'Syne',
+                        }}
+                      >
+                        Approve
+                      </button>
                       <button
                         onClick={() => setConfirm({ action: 'reject', id: item.id, ticker: item.ticker })}
-                        className="flex-1 py-1.5 text-[11px] font-bold rounded-md transition-all"
+                        className="py-2 text-[11px] font-bold rounded-lg transition-all"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)', fontFamily: 'Syne' }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--red-border)'; e.currentTarget.style.color = 'var(--red)'; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-2)'; }}
-                      >Reject</button>
+                      >
+                        Reject
+                      </button>
                     </div>
                   </div>
                 );
               })}
             </div>
           )}
-        </div>
+        </Card>
       </div>
 
-      {/* ── Alerts + Recent Memos ──────────────────────────────────── */}
+      {/* ── Risk Alerts + Recent Research ─────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Risk alerts */}
-        <div
-          className="rounded-lg p-5"
-          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="section-label">Recent Risk Alerts</div>
-            <button
-              onClick={() => navigate('/risk')}
-              className="text-[11px] font-bold transition-opacity hover:opacity-70"
-              style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
-            >
-              See All →
-            </button>
-          </div>
+
+        {/* Risk Alerts */}
+        <Card>
+          <CardHeader
+            label="Risk Monitor"
+            title={
+              criticals.length > 0
+                ? <span style={{ color: 'var(--red)' }}>{criticals.length} Critical</span>
+                : alerts.length > 0
+                ? <span style={{ color: 'var(--amber)' }}>{alerts.length} Active</span>
+                : <span style={{ color: 'var(--green)' }}>All Clear</span>
+            }
+            action="See All →"
+            onAction={() => navigate('/risk')}
+          />
           {alerts.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2" style={{ height: 96 }}>
-              <span className="material-symbols-outlined" style={{ fontSize: '24px', color: 'var(--border-2)' }}>
-                shield
-              </span>
-              <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>No active alerts</p>
-            </div>
+            <EmptyState
+              icon="shield"
+              label="No active alerts"
+              iconColor={riskClear ? 'var(--green)' : 'var(--border-2)'}
+            />
           ) : (
             <div className="space-y-2">
               {alerts.map(a => <RiskAlert key={a.id} alert={a} compact />)}
             </div>
           )}
-        </div>
+        </Card>
 
-        {/* Research memos */}
-        <div
-          className="rounded-lg p-5"
-          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="section-label">Recent Research</div>
-            <button
-              onClick={() => navigate('/research')}
-              className="text-[11px] font-bold transition-opacity hover:opacity-70"
-              style={{ color: 'var(--accent)', fontFamily: 'Syne' }}
-            >
-              See All →
-            </button>
-          </div>
+        {/* Research Memos */}
+        <Card>
+          <CardHeader
+            label="Recent Research"
+            title={memoHistory.length > 0 ? `${memoHistory.length} memos` : 'No memos yet'}
+            action="See All →"
+            onAction={() => navigate('/research')}
+          />
           {memoHistory.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2" style={{ height: 96 }}>
-              <span className="material-symbols-outlined" style={{ fontSize: '24px', color: 'var(--border-2)' }}>
-                query_stats
-              </span>
-              <p className="text-[12px]" style={{ color: 'var(--text-3)' }}>No research memos yet</p>
-            </div>
+            <EmptyState icon="query_stats" label="No research memos yet" />
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-0.5">
               {memoHistory.map((memo, i) => {
                 const vs = VERDICT_STYLES[memo.verdict] || VERDICT_STYLES.AVOID;
                 return (
                   <div
                     key={memo.id ?? i}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-md cursor-pointer transition-colors"
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors"
                     onClick={() => navigate('/research')}
-                    onMouseEnter={e => {
-                      e.currentTarget.style.background = 'var(--surface-2)';
-                    }}
-                    onMouseLeave={e => {
-                      e.currentTarget.style.background = 'transparent';
-                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                   >
                     <span
-                      className="font-bold text-[13px] font-data w-16 flex-shrink-0"
+                      className="font-bold text-[13px] w-16 flex-shrink-0"
                       style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
                     >
                       {memo.ticker}
                     </span>
                     <span
-                      className="text-[10px] font-bold px-1.5 py-0.5 rounded-sm"
+                      className="text-[10px] font-bold px-1.5 py-0.5 rounded-md"
                       style={{ background: vs.bgVar, color: vs.colorVar, fontFamily: 'Syne' }}
                     >
                       {memo.verdict}
                     </span>
                     <ConvictionBadge score={memo.conviction_score} />
-                    <span className="ml-auto text-[10px] font-data" style={{ color: 'var(--text-3)' }}>
+                    <span
+                      className="ml-auto text-[11px] flex-shrink-0"
+                      style={{ color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                    >
                       {memo.date
                         ? new Date(memo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                         : ''}
@@ -626,7 +745,7 @@ export default function Dashboard() {
               })}
             </div>
           )}
-        </div>
+        </Card>
       </div>
     </div>
   );
