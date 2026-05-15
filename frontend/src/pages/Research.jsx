@@ -7,10 +7,18 @@ import MemoCard from '../components/MemoCard';
 import ConvictionBadge from '../components/ConvictionBadge';
 import { triggerResearch, getHistory, getLatestMemo } from '../api/research';
 
-const VERDICT_DOT = {
-  LONG: 'bg-green-500',
-  SHORT: 'bg-red-500',
-  AVOID: 'bg-gray-400',
+function SL({ children }) {
+  return (
+    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+      {children}
+    </div>
+  );
+}
+
+const VERDICT_DOT_COLOR = {
+  LONG:  'var(--green)',
+  SHORT: 'var(--red)',
+  AVOID: 'var(--text-3)',
 };
 
 export default function Research() {
@@ -91,109 +99,159 @@ export default function Research() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-5xl px-4 py-8 space-y-8">
-        {/* Page Title */}
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Research</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Generate an AI investment memo for any US ticker. Analysis takes 15–45 seconds.
-          </p>
-        </div>
-
-        {/* Search Bar */}
-        <form onSubmit={handleSearch} className="flex gap-3">
-          <input
-            ref={inputRef}
-            type="text"
-            value={tickerInput}
-            onChange={e => setTickerInput(e.target.value.toUpperCase())}
-            placeholder="Enter ticker (e.g. AAPL)"
-            maxLength={10}
-            disabled={loading}
-            className="flex-1 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-mono uppercase shadow-sm placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-          />
-          <button
-            type="submit"
-            disabled={loading || !tickerInput.trim()}
-            className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {loading ? 'Analyzing…' : 'Analyze'}
-          </button>
-        </form>
-
-        {/* Loading Banner */}
-        {loading && (
-          <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-            <svg className="h-4 w-4 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
-            <span>
-              Fetching SEC filings, transcripts, and news for{' '}
-              <strong>{tickerInput}</strong> and generating memo…
-              This usually takes 15–45 seconds.
-            </span>
-          </div>
-        )}
-
-        {/* Error Banner */}
-        {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </div>
-        )}
-
-        {/* Loading indicator for history-click memo fetch */}
-        {loadingMemo && (
-          <div className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
-            <svg className="h-4 w-4 animate-spin shrink-0 text-blue-500" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
-            Loading memo…
-          </div>
-        )}
-
-        {/* Active Memo */}
-        {activeMemo && !loading && !loadingMemo && (
-          <MemoCard memo={activeMemo} onStatusChange={handleStatusChange} />
-        )}
-
-        {/* History List */}
-        {history.length > 0 && (
-          <div>
-            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
-              Past Memos
-            </h2>
-            <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100 shadow-sm overflow-hidden">
-              {history.map(row => (
-                <button
-                  key={row.id ?? `${row.ticker}-${row.created_at}`}
-                  onClick={() => handleHistoryClick(row)}
-                  className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4 px-4 sm:px-5 py-3 text-left hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                    <span
-                      className={`h-2 w-2 rounded-full shrink-0 ${VERDICT_DOT[row.verdict] ?? 'bg-gray-400'}`}
-                    />
-                    <span className="font-mono font-semibold text-sm text-gray-900">
-                      {row.ticker}
-                    </span>
-                    <span className="text-xs text-gray-400">{row.date}</span>
-                  </div>
-                  <div className="flex w-full sm:w-auto items-center justify-between sm:justify-end gap-3">
-                    <ConvictionBadge score={row.conviction_score} />
-                    <span className="text-xs text-gray-400 uppercase tracking-wide w-16 text-right">
-                      {row.status}
-                    </span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+    <div className="p-6 space-y-6 max-w-5xl mx-auto">
+      {/* Page Title */}
+      <div>
+        <h1 style={{ color: 'var(--text)', fontFamily: 'Syne', fontWeight: 700 }} className="text-2xl">
+          Research
+        </h1>
+        <p className="mt-1 text-sm" style={{ color: 'var(--text-3)' }}>
+          Generate an AI investment memo for any US ticker. Analysis takes 15–45 seconds.
+        </p>
       </div>
+
+      {/* Search Bar */}
+      <form onSubmit={handleSearch} className="flex gap-3">
+        <input
+          ref={inputRef}
+          type="text"
+          value={tickerInput}
+          onChange={e => setTickerInput(e.target.value.toUpperCase())}
+          placeholder="Enter ticker (e.g. AAPL)"
+          maxLength={10}
+          disabled={loading}
+          style={{
+            background: 'var(--input-bg)',
+            border: '1px solid var(--border)',
+            color: 'var(--text)',
+            fontFamily: 'JetBrains Mono',
+            opacity: loading ? 0.5 : 1,
+          }}
+          className="flex-1 rounded-lg px-4 py-2.5 text-sm uppercase"
+          onFocus={e => { e.target.style.outline = 'none'; e.target.style.boxShadow = '0 0 0 2px var(--accent-ring)'; }}
+          onBlur={e => { e.target.style.boxShadow = 'none'; }}
+        />
+        <button
+          type="submit"
+          disabled={loading || !tickerInput.trim()}
+          style={{
+            background: 'var(--accent)',
+            color: '#000',
+            fontFamily: 'Syne',
+            opacity: (loading || !tickerInput.trim()) ? 0.5 : 1,
+          }}
+          className="rounded-lg px-5 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed"
+        >
+          {loading ? 'Analyzing…' : 'Analyze'}
+        </button>
+      </form>
+
+      {/* Loading Banner */}
+      {loading && (
+        <div
+          className="flex items-center gap-3 rounded-lg px-4 py-3 text-sm"
+          style={{
+            background: 'var(--blue-bg)',
+            border: '1px solid var(--blue-border)',
+            color: 'var(--blue)',
+          }}
+        >
+          <svg className="h-4 w-4 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          <span>
+            Fetching SEC filings, transcripts, and news for{' '}
+            <strong>{tickerInput}</strong> and generating memo…
+            This usually takes 15–45 seconds.
+          </span>
+        </div>
+      )}
+
+      {/* Error Banner */}
+      {error && (
+        <div
+          className="rounded-lg px-4 py-3 text-sm"
+          style={{
+            background: 'var(--red-bg)',
+            border: '1px solid var(--red-border)',
+            color: 'var(--red)',
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {/* Loading indicator for history-click memo fetch */}
+      {loadingMemo && (
+        <div
+          className="flex items-center gap-3 rounded-lg px-4 py-3 text-sm"
+          style={{
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            color: 'var(--text-2)',
+          }}
+        >
+          <svg className="h-4 w-4 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+          </svg>
+          Loading memo…
+        </div>
+      )}
+
+      {/* Active Memo */}
+      {activeMemo && !loading && !loadingMemo && (
+        <MemoCard memo={activeMemo} onStatusChange={handleStatusChange} />
+      )}
+
+      {/* History List */}
+      {history.length > 0 && (
+        <div className="space-y-3">
+          <SL>Past Memos</SL>
+          <div
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: '12px',
+              overflow: 'hidden',
+            }}
+          >
+            {history.map((row, i) => (
+              <button
+                key={row.id ?? `${row.ticker}-${row.created_at}`}
+                onClick={() => handleHistoryClick(row)}
+                style={{
+                  width: '100%',
+                  background: 'transparent',
+                  borderBottom: i < history.length - 1 ? '1px solid var(--border)' : 'none',
+                  cursor: 'pointer',
+                }}
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4 px-4 sm:px-5 py-3 text-left transition-colors"
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{ background: VERDICT_DOT_COLOR[row.verdict] ?? 'var(--text-3)' }}
+                  />
+                  <span style={{ fontFamily: 'JetBrains Mono', color: 'var(--text)', fontWeight: 700 }} className="text-sm">
+                    {row.ticker}
+                  </span>
+                  <span className="text-xs" style={{ color: 'var(--text-3)' }}>{row.date}</span>
+                </div>
+                <div className="flex w-full sm:w-auto items-center justify-between sm:justify-end gap-3">
+                  <ConvictionBadge score={row.conviction_score} />
+                  <span className="text-xs uppercase tracking-wide w-16 text-right" style={{ color: 'var(--text-3)' }}>
+                    {row.status}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

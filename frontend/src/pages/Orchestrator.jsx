@@ -2,45 +2,56 @@ import { useEffect, useState } from 'react';
 import { getPMStatus, getPMDecisions, overrideDecision, haltPM, resumePM, runPMCycle } from '../api/pm';
 import ConfirmDialog from '../components/ConfirmDialog';
 
-const CATEGORY_BADGE = {
-  NEW_ENTRY:    'bg-green-100 text-green-700',
-  EXIT_TRIM:    'bg-orange-100 text-orange-700',
-  REBALANCE:    'bg-blue-100 text-blue-700',
-  CRISIS:       'bg-red-100 text-red-700',
-  PRE_EARNINGS: 'bg-purple-100 text-purple-700',
+const CATEGORY_BADGE_STYLE = {
+  NEW_ENTRY:    { bg: 'var(--green-bg)',      color: 'var(--green)',   border: 'var(--green-border)' },
+  EXIT_TRIM:    { bg: 'var(--amber-bg)',      color: 'var(--amber)',   border: 'var(--amber-border)' },
+  REBALANCE:    { bg: 'var(--blue-bg)',       color: 'var(--blue)',    border: 'var(--blue-border)' },
+  CRISIS:       { bg: 'var(--red-bg)',        color: 'var(--red)',     border: 'var(--red-border)' },
+  PRE_EARNINGS: { bg: 'var(--accent-muted)',  color: 'var(--accent)',  border: 'var(--accent-ring)' },
 };
 
-const DECISION_BADGE = {
-  EXECUTE:            'bg-green-600 text-white',
-  MODIFY_SIZE:        'bg-green-100 text-green-700',
-  HOLD:               'bg-gray-100 text-gray-600',
-  NO_ACTION:          'bg-gray-100 text-gray-600',
-  DEFER:              'bg-yellow-100 text-yellow-700',
-  REJECT:             'bg-red-100 text-red-700',
-  WATCHLIST:          'bg-purple-100 text-purple-700',
-  TRIM:               'bg-orange-100 text-orange-700',
-  CLOSE:              'bg-red-600 text-white',
-  ADD:                'bg-green-100 text-green-700',
-  REDUCE_EXPOSURE:    'bg-orange-100 text-orange-700',
-  HALT_NEW_ENTRIES:   'bg-red-100 text-red-700',
-  LIQUIDATE_TO_TARGET:'bg-red-600 text-white',
-  MONITOR:            'bg-yellow-100 text-yellow-700',
-  REBALANCE:          'bg-blue-100 text-blue-700',
-  RAISE_CASH:         'bg-orange-100 text-orange-700',
-  DEPLOY_CASH:        'bg-green-100 text-green-700',
-  SIZE_UP:            'bg-green-600 text-white',
-  EXIT:               'bg-red-600 text-white',
+const DECISION_BADGE_STYLE = {
+  EXECUTE:             { bg: 'var(--green-bg)',    color: 'var(--green)' },
+  MODIFY_SIZE:         { bg: 'var(--green-bg)',    color: 'var(--green)' },
+  HOLD:                { bg: 'var(--surface-2)',   color: 'var(--text-2)' },
+  NO_ACTION:           { bg: 'var(--surface-2)',   color: 'var(--text-3)' },
+  DEFER:               { bg: 'var(--amber-bg)',    color: 'var(--amber)' },
+  REJECT:              { bg: 'var(--red-bg)',      color: 'var(--red)' },
+  WATCHLIST:           { bg: 'var(--accent-muted)',color: 'var(--accent)' },
+  TRIM:                { bg: 'var(--amber-bg)',    color: 'var(--amber)' },
+  CLOSE:               { bg: 'var(--red-bg)',      color: 'var(--red)' },
+  ADD:                 { bg: 'var(--green-bg)',    color: 'var(--green)' },
+  REDUCE_EXPOSURE:     { bg: 'var(--amber-bg)',    color: 'var(--amber)' },
+  HALT_NEW_ENTRIES:    { bg: 'var(--red-bg)',      color: 'var(--red)' },
+  LIQUIDATE_TO_TARGET: { bg: 'var(--red-bg)',      color: 'var(--red)' },
+  MONITOR:             { bg: 'var(--amber-bg)',    color: 'var(--amber)' },
+  REBALANCE:           { bg: 'var(--blue-bg)',     color: 'var(--blue)' },
+  RAISE_CASH:          { bg: 'var(--amber-bg)',    color: 'var(--amber)' },
+  DEPLOY_CASH:         { bg: 'var(--green-bg)',    color: 'var(--green)' },
+  SIZE_UP:             { bg: 'var(--green-bg)',    color: 'var(--green)' },
+  EXIT:                { bg: 'var(--red-bg)',      color: 'var(--red)' },
 };
 
-const EXEC_STATUS_BADGE = {
-  SENT_TO_EXECUTION: 'bg-green-100 text-green-700',
-  BLOCKED:           'bg-red-100 text-red-700',
-  DEFERRED:          'bg-yellow-100 text-yellow-700',
-  NO_ACTION:         'bg-gray-100 text-gray-500',
-  PENDING_HUMAN:     'bg-blue-100 text-blue-700',
+const EXEC_STATUS_STYLE = {
+  SENT_TO_EXECUTION: { bg: 'var(--green-bg)',  color: 'var(--green)' },
+  BLOCKED:           { bg: 'var(--red-bg)',    color: 'var(--red)' },
+  DEFERRED:          { bg: 'var(--amber-bg)',  color: 'var(--amber)' },
+  NO_ACTION:         { bg: 'var(--surface-2)', color: 'var(--text-3)' },
+  PENDING_HUMAN:     { bg: 'var(--blue-bg)',   color: 'var(--blue)' },
 };
+
+const FALLBACK_BADGE = { bg: 'var(--surface-2)', color: 'var(--text-3)', border: 'var(--border)' };
 
 const ALL_CATEGORIES = ['NEW_ENTRY', 'EXIT_TRIM', 'REBALANCE', 'CRISIS', 'PRE_EARNINGS'];
+
+const SL_LABEL = {
+  fontSize: '9px',
+  fontWeight: 700,
+  letterSpacing: '0.18em',
+  textTransform: 'uppercase',
+  color: 'var(--text-3)',
+  fontFamily: 'Syne',
+};
 
 function formatTime(ts) {
   if (!ts) return '—';
@@ -57,24 +68,27 @@ function formatDateTime(ts) {
 }
 
 function ConfidenceBar({ value }) {
-  if (value == null) return <span className="text-gray-400">—</span>;
+  if (value == null) return <span style={{ color: 'var(--text-3)' }}>—</span>;
   const pct = Math.round(value * 100);
-  const color = pct >= 70 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-400' : 'bg-red-400';
+  const barColor = pct >= 70 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
   return (
     <div className="flex items-center gap-2">
-      <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+      <div
+        className="w-16 rounded-full overflow-hidden"
+        style={{ height: '6px', background: 'var(--border)' }}
+      >
+        <div style={{ width: `${pct}%`, height: '100%', background: barColor }} />
       </div>
-      <span className="text-xs text-gray-600 font-mono">{pct}%</span>
+      <span style={{ fontSize: '12px', color: 'var(--text-2)', fontFamily: 'JetBrains Mono' }}>{pct}%</span>
     </div>
   );
 }
 
 const DEFER_OPTIONS = [
-  { label: '1 Day',    value: '1' },
-  { label: '3 Days',   value: '3' },
-  { label: '1 Week',   value: '7' },
-  { label: 'Custom…',  value: 'custom' },
+  { label: '1 Day',   value: '1' },
+  { label: '3 Days',  value: '3' },
+  { label: '1 Week',  value: '7' },
+  { label: 'Custom…', value: 'custom' },
 ];
 
 function DeferModal({ target, onConfirm, onCancel }) {
@@ -86,29 +100,47 @@ function DeferModal({ target, onConfirm, onCancel }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4">
-        <h2 className="text-base font-bold text-gray-900">Defer Decision</h2>
-        <p className="text-sm text-gray-500">
-          Set when to re-evaluate <span className="font-mono font-semibold">{target.ticker || 'this decision'}</span>.
-          The research scheduler will re-queue it automatically on that date.
+      <div
+        className="w-full max-w-md p-6 space-y-4 rounded-2xl"
+        style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+      >
+        <h2 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne' }}>
+          Defer Decision
+        </h2>
+        <p style={{ fontSize: '13px', color: 'var(--text-3)' }}>
+          Set when to re-evaluate{' '}
+          <span style={{ fontFamily: 'JetBrains Mono', fontWeight: 600, color: 'var(--text-2)' }}>
+            {target.ticker || 'this decision'}
+          </span>
+          . The research scheduler will re-queue it automatically on that date.
         </p>
 
         <div>
-          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Re-check in</label>
+          <label style={SL_LABEL}>Re-check in</label>
           <div className="flex gap-2 mt-1.5 flex-wrap">
-            {DEFER_OPTIONS.map(opt => (
-              <button
-                key={opt.value}
-                onClick={() => setDuration(opt.value)}
-                className={`text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors ${
-                  duration === opt.value
-                    ? 'bg-yellow-500 text-white border-yellow-500'
-                    : 'bg-white text-gray-600 border-gray-200 hover:border-yellow-300'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
+            {DEFER_OPTIONS.map(opt => {
+              const isSelected = duration === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() => setDuration(opt.value)}
+                  style={{
+                    fontSize: '12px',
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    fontFamily: 'Syne',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.15s',
+                    background: isSelected ? 'var(--amber-bg)' : 'var(--surface)',
+                    border: isSelected ? '1px solid var(--amber-border)' : '1px solid var(--border)',
+                    color: isSelected ? 'var(--amber)' : 'var(--text-2)',
+                  }}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
           </div>
           {duration === 'custom' && (
             <input
@@ -116,35 +148,83 @@ function DeferModal({ target, onConfirm, onCancel }) {
               value={customDate}
               onChange={e => setCustomDate(e.target.value)}
               min={new Date().toISOString().slice(0, 10)}
-              className="mt-2 w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              style={{
+                marginTop: '8px',
+                width: '100%',
+                fontSize: '13px',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                background: 'var(--input-bg)',
+                border: '1px solid var(--border)',
+                color: 'var(--text)',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
             />
           )}
         </div>
 
         <div>
-          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-            Reason / Condition <span className="text-gray-400 font-normal">(optional)</span>
+          <label style={SL_LABEL}>
+            Reason / Condition{' '}
+            <span style={{ color: 'var(--text-3)', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
+              (optional)
+            </span>
           </label>
           <textarea
             value={condition}
             onChange={e => setCondition(e.target.value)}
             placeholder="e.g. Wait for post-earnings price stabilization"
             rows={2}
-            className="mt-1.5 w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-yellow-400"
+            style={{
+              marginTop: '6px',
+              width: '100%',
+              fontSize: '13px',
+              borderRadius: '8px',
+              padding: '8px 12px',
+              background: 'var(--input-bg)',
+              border: '1px solid var(--border)',
+              color: 'var(--text)',
+              outline: 'none',
+              resize: 'none',
+              boxSizing: 'border-box',
+            }}
           />
         </div>
 
         <div className="flex justify-end gap-3 pt-1">
           <button
             onClick={onCancel}
-            className="text-sm px-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            style={{
+              fontSize: '13px',
+              padding: '8px 16px',
+              borderRadius: '8px',
+              background: 'transparent',
+              border: '1px solid var(--border)',
+              color: 'var(--text-2)',
+              cursor: 'pointer',
+              fontFamily: 'Syne',
+              transition: 'all 0.15s',
+            }}
           >
             Cancel
           </button>
           <button
             onClick={() => onConfirm({ defer_until: deferUntil, defer_condition: condition })}
             disabled={duration === 'custom' && !customDate}
-            className="text-sm px-4 py-2 rounded-lg bg-yellow-500 text-white font-semibold hover:bg-yellow-600 disabled:opacity-50 transition-colors"
+            style={{
+              fontSize: '13px',
+              padding: '8px 16px',
+              borderRadius: '8px',
+              background: 'var(--amber-bg)',
+              border: '1px solid var(--amber-border)',
+              color: 'var(--amber)',
+              fontWeight: 700,
+              cursor: 'pointer',
+              fontFamily: 'Syne',
+              opacity: duration === 'custom' && !customDate ? 0.5 : 1,
+              transition: 'all 0.15s',
+            }}
           >
             Defer
           </button>
@@ -302,8 +382,10 @@ export default function Orchestrator() {
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">AI Portfolio Manager</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne' }}>
+            AI Portfolio Manager
+          </h1>
+          <p style={{ fontSize: '13px', color: 'var(--text-3)', marginTop: '2px' }}>
             Claude-powered decision engine — runs every 5 minutes during market hours
           </p>
         </div>
@@ -312,7 +394,20 @@ export default function Orchestrator() {
             <button
               onClick={() => !actionPending && setShowResumeConfirm(true)}
               disabled={actionPending}
-              className="px-4 py-2 text-xs font-black tracking-widest rounded-lg border bg-yellow-50 text-yellow-700 border-yellow-300 hover:bg-yellow-100 transition-colors"
+              style={{
+                padding: '8px 16px',
+                fontSize: '11px',
+                fontWeight: 900,
+                letterSpacing: '0.12em',
+                borderRadius: '8px',
+                background: 'var(--amber-bg)',
+                border: '1px solid var(--amber-border)',
+                color: 'var(--amber)',
+                cursor: actionPending ? 'not-allowed' : 'pointer',
+                fontFamily: 'Syne',
+                transition: 'all 0.15s',
+                opacity: actionPending ? 0.6 : 1,
+              }}
             >
               HALTED — RESUME
             </button>
@@ -320,24 +415,67 @@ export default function Orchestrator() {
             <button
               onClick={() => !actionPending && setShowHaltConfirm(true)}
               disabled={actionPending}
-              className="px-4 py-2 text-xs font-black tracking-widest rounded-lg border bg-white text-gray-700 border-gray-300 hover:bg-red-50 hover:border-red-300 hover:text-red-700 transition-colors"
+              style={{
+                padding: '8px 16px',
+                fontSize: '11px',
+                fontWeight: 900,
+                letterSpacing: '0.12em',
+                borderRadius: '8px',
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-2)',
+                cursor: actionPending ? 'not-allowed' : 'pointer',
+                fontFamily: 'Syne',
+                transition: 'all 0.15s',
+                opacity: actionPending ? 0.6 : 1,
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'var(--red-bg)';
+                e.currentTarget.style.borderColor = 'var(--red-border)';
+                e.currentTarget.style.color = 'var(--red)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'var(--surface)';
+                e.currentTarget.style.borderColor = 'var(--border)';
+                e.currentTarget.style.color = 'var(--text-2)';
+              }}
             >
               HALT NEW ENTRIES
             </button>
           )}
-          <span className={`px-3 py-2 text-xs font-black tracking-widest rounded-lg border ${
-            isHalted
-              ? 'bg-yellow-50 text-yellow-700 border-yellow-300'
-              : mode === 'autonomous'
-              ? 'bg-blue-600 text-white border-blue-600'
-              : 'bg-white text-gray-700 border-gray-300'
-          }`}>
+          <span
+            style={{
+              padding: '8px 12px',
+              fontSize: '11px',
+              fontWeight: 900,
+              letterSpacing: '0.12em',
+              borderRadius: '8px',
+              fontFamily: 'Syne',
+              ...(isHalted
+                ? { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)' }
+                : mode === 'autonomous'
+                ? { background: 'var(--accent)', color: '#000', border: '1px solid var(--accent)' }
+                : { background: 'var(--surface)', color: 'var(--text-2)', border: '1px solid var(--border)' }),
+            }}
+          >
             {isHalted ? 'HALTED' : mode.toUpperCase()}
           </span>
           <button
             onClick={handleRunCycle}
             disabled={running}
-            className="px-4 py-2 text-sm font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            style={{
+              padding: '8px 16px',
+              fontSize: '13px',
+              fontWeight: 600,
+              borderRadius: '8px',
+              background: 'var(--accent)',
+              color: '#000',
+              border: 'none',
+              cursor: running ? 'not-allowed' : 'pointer',
+              fontFamily: 'Syne',
+              opacity: running ? 0.5 : 1,
+              transition: 'opacity 0.15s',
+            }}
           >
             {running ? 'Running…' : 'Run Cycle'}
           </button>
@@ -346,9 +484,16 @@ export default function Orchestrator() {
 
       {/* Halt Banner */}
       {isHalted && (
-        <div className="rounded-xl bg-yellow-50 border border-yellow-200 px-4 py-3 flex items-center gap-2">
-          <span className="text-yellow-500 font-bold">!</span>
-          <span className="text-sm text-yellow-700">
+        <div
+          className="rounded-xl px-4 py-3 flex items-center gap-2"
+          style={{
+            background: 'var(--amber-bg)',
+            border: '1px solid var(--amber-border)',
+            color: 'var(--amber)',
+          }}
+        >
+          <span style={{ fontWeight: 700 }}>!</span>
+          <span style={{ fontSize: '13px' }}>
             PM is <strong>halted</strong> — no new entries will be opened.
             {status?.halted_until && ` Auto-resumes: ${formatDateTime(status.halted_until)}.`}
             {' '}Existing positions are still being monitored.
@@ -359,50 +504,48 @@ export default function Orchestrator() {
       {/* Stats Strip */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {[
-          { label: 'Decisions', value: decisions.length, color: 'text-gray-900' },
-          { label: 'Executed', value: executedCount, color: 'text-green-600' },
-          { label: 'Deferred', value: deferredCount, color: 'text-yellow-600' },
-          { label: 'Rejected', value: rejectedCount, color: rejectedCount > 0 ? 'text-red-600' : 'text-gray-900' },
-          { label: 'Avg Confidence', value: avgConf ? `${Math.round(avgConf * 100)}%` : '—', color: 'text-blue-600' },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="bg-white rounded-xl border border-gray-200 p-4">
-            <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</div>
-            <div className={`text-2xl font-bold mt-1 ${color}`}>{value}</div>
+          { label: 'Decisions',      value: decisions.length,                                      valueColor: 'var(--text)' },
+          { label: 'Executed',       value: executedCount,                                          valueColor: 'var(--green)' },
+          { label: 'Deferred',       value: deferredCount,                                          valueColor: 'var(--amber)' },
+          { label: 'Rejected',       value: rejectedCount,                                          valueColor: rejectedCount > 0 ? 'var(--red)' : 'var(--text)' },
+          { label: 'Avg Confidence', value: avgConf ? `${Math.round(avgConf * 100)}%` : '—',        valueColor: 'var(--blue)' },
+        ].map(({ label, value, valueColor }) => (
+          <div
+            key={label}
+            className="rounded-xl p-4"
+            style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+          >
+            <div style={SL_LABEL}>{label}</div>
+            <div style={{ fontSize: '24px', fontWeight: 700, marginTop: '4px', color: valueColor, fontFamily: 'JetBrains Mono' }}>
+              {value}
+            </div>
           </div>
         ))}
       </div>
 
       {/* Portfolio State */}
       {status?.portfolio && (
-        <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 flex flex-wrap gap-6">
-          <div>
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Gross Exposure</span>
-            <div className="text-lg font-bold text-gray-900 mt-0.5">
-              {(status.portfolio.gross_exposure * 100).toFixed(1)}%
+        <div
+          className="rounded-xl px-5 py-4 flex flex-wrap gap-6"
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+        >
+          {[
+            { label: 'Gross Exposure', value: `${(status.portfolio.gross_exposure * 100).toFixed(1)}%` },
+            { label: 'Net Exposure',   value: `${(status.portfolio.net_exposure * 100).toFixed(1)}%` },
+            { label: 'Cash',           value: `${(status.portfolio.cash_pct * 100).toFixed(1)}%` },
+            { label: 'Open Positions', value: status.portfolio.position_count },
+          ].map(({ label, value }) => (
+            <div key={label}>
+              <div style={SL_LABEL}>{label}</div>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text)', marginTop: '2px', fontFamily: 'JetBrains Mono' }}>
+                {value}
+              </div>
             </div>
-          </div>
-          <div>
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Net Exposure</span>
-            <div className="text-lg font-bold text-gray-900 mt-0.5">
-              {(status.portfolio.net_exposure * 100).toFixed(1)}%
-            </div>
-          </div>
-          <div>
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Cash</span>
-            <div className="text-lg font-bold text-gray-900 mt-0.5">
-              {(status.portfolio.cash_pct * 100).toFixed(1)}%
-            </div>
-          </div>
-          <div>
-            <span className="text-xs text-gray-500 uppercase tracking-wide">Open Positions</span>
-            <div className="text-lg font-bold text-gray-900 mt-0.5">
-              {status.portfolio.position_count}
-            </div>
-          </div>
+          ))}
           {status.active_critical_alerts > 0 && (
             <div>
-              <span className="text-xs text-gray-500 uppercase tracking-wide">Critical Alerts</span>
-              <div className="text-lg font-bold text-red-600 mt-0.5">
+              <div style={SL_LABEL}>Critical Alerts</div>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--red)', marginTop: '2px', fontFamily: 'JetBrains Mono' }}>
                 {status.active_critical_alerts}
               </div>
             </div>
@@ -412,17 +555,28 @@ export default function Orchestrator() {
 
       {/* Category Filter */}
       <div className="flex flex-wrap gap-2">
-        <span className="text-xs font-medium text-gray-500 self-center mr-1">Filter:</span>
+        <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-3)', alignSelf: 'center', marginRight: '4px' }}>
+          Filter:
+        </span>
         {ALL_CATEGORIES.map(c => {
           const on = activeCategories.has(c);
-          const badge = CATEGORY_BADGE[c] || 'bg-gray-100 text-gray-600';
+          const st = CATEGORY_BADGE_STYLE[c] || FALLBACK_BADGE;
           return (
             <button
               key={c}
               onClick={() => toggleCategory(c)}
-              className={`text-xs px-2.5 py-1 rounded-full font-medium border transition-opacity ${
-                on ? badge + ' border-transparent' : 'bg-white text-gray-400 border-gray-200 opacity-50'
-              }`}
+              style={{
+                fontSize: '11px',
+                padding: '4px 10px',
+                borderRadius: '9999px',
+                fontWeight: 600,
+                fontFamily: 'Syne',
+                cursor: 'pointer',
+                transition: 'opacity 0.15s',
+                ...(on
+                  ? { background: st.bg, color: st.color, border: `1px solid ${st.border}` }
+                  : { background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-3)', opacity: 0.6 }),
+              }}
             >
               {c}
             </button>
@@ -431,39 +585,102 @@ export default function Orchestrator() {
       </div>
 
       {/* PM Decision Feed */}
-      <div className="bg-white rounded-xl border border-gray-200">
-        <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-gray-900">PM Decision Feed</p>
-          <p className="text-xs text-gray-400">{filtered.length} of {decisions.length} decisions</p>
+      <div className="rounded-xl" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <div
+          className="px-5 py-4 flex flex-wrap items-center justify-between gap-2"
+          style={{ borderBottom: '1px solid var(--border)' }}
+        >
+          <p style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text)', fontFamily: 'Syne' }}>
+            PM Decision Feed
+          </p>
+          <p style={{ ...SL_LABEL, letterSpacing: '0.08em' }}>{filtered.length} of {decisions.length} decisions</p>
         </div>
-        <div className="divide-y divide-gray-100">
+        <div>
           {filtered.length === 0 && (
-            <div className="px-5 py-8 text-sm text-gray-400 text-center">
+            <div
+              className="px-5 py-8 text-center"
+              style={{ fontSize: '13px', color: 'var(--text-3)' }}
+            >
               No decisions yet — run a PM cycle or wait for the next scheduled cycle
             </div>
           )}
-          {filtered.map(d => {
+          {filtered.map((d, idx) => {
             const isExpanded = expandedId === d.decision_id;
+            const catSt = CATEGORY_BADGE_STYLE[d.category] || FALLBACK_BADGE;
+            const decSt = DECISION_BADGE_STYLE[d.decision] || { bg: 'var(--surface-2)', color: 'var(--text-3)' };
+            const execSt = EXEC_STATUS_STYLE[d.execution_status] || { bg: 'var(--surface-2)', color: 'var(--text-3)' };
             return (
-              <div key={d.decision_id} className="px-5 py-4 hover:bg-gray-50 transition-colors">
+              <div
+                key={d.decision_id}
+                className="px-5 py-4 transition-colors"
+                style={{ borderTop: idx === 0 ? 'none' : '1px solid var(--border)' }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >
                 {/* Main row */}
                 <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
                   <div className="flex flex-wrap items-start gap-2 sm:gap-3 flex-1 min-w-0">
                     {/* Category */}
-                    <span className={`mt-0.5 shrink-0 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide ${CATEGORY_BADGE[d.category] || 'bg-gray-100 text-gray-600'}`}>
+                    <span
+                      style={{
+                        marginTop: '2px',
+                        flexShrink: 0,
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        fontFamily: 'Syne',
+                        background: catSt.bg,
+                        color: catSt.color,
+                        border: `1px solid ${catSt.border}`,
+                      }}
+                    >
                       {d.category}
                     </span>
                     {/* Ticker */}
-                    <span className="mt-0.5 shrink-0 font-mono text-sm font-bold text-gray-800 w-auto sm:w-16">
-                      {d.ticker || <span className="text-gray-400 font-normal text-xs">portfolio</span>}
+                    <span
+                      style={{
+                        marginTop: '2px',
+                        flexShrink: 0,
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: '13px',
+                        fontWeight: 700,
+                        color: 'var(--text)',
+                        minWidth: '4rem',
+                      }}
+                    >
+                      {d.ticker || <span style={{ color: 'var(--text-3)', fontWeight: 400, fontSize: '11px', fontFamily: 'Syne' }}>portfolio</span>}
                     </span>
-                    {/* Decision */}
-                    <span className={`mt-0.5 shrink-0 text-xs font-bold px-2 py-0.5 rounded ${DECISION_BADGE[d.decision] || 'bg-gray-100 text-gray-600'}`}>
+                    {/* Decision badge */}
+                    <span
+                      style={{
+                        marginTop: '2px',
+                        flexShrink: 0,
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontFamily: 'Syne',
+                        background: decSt.bg,
+                        color: decSt.color,
+                      }}
+                    >
                       {d.decision}
                     </span>
                     {/* Reasoning */}
                     <p
-                      className={`text-xs text-gray-600 leading-relaxed cursor-pointer basis-full md:basis-auto md:flex-1 min-w-0 ${isExpanded ? '' : 'line-clamp-3 md:line-clamp-2'}`}
+                      style={{
+                        fontSize: '12px',
+                        color: 'var(--text-2)',
+                        lineHeight: 1.6,
+                        cursor: 'pointer',
+                        flexBasis: '100%',
+                        minWidth: 0,
+                        ...(isExpanded ? {} : { overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }),
+                      }}
+                      className="md:flex-1 md:basis-auto"
                       onClick={() => setExpandedId(isExpanded ? null : d.decision_id)}
                     >
                       {d.reasoning || '—'}
@@ -471,38 +688,67 @@ export default function Orchestrator() {
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-4 w-full md:w-auto md:shrink-0">
                     <ConfidenceBar value={d.confidence} />
-                    <span className={`text-[10px] leading-tight font-semibold px-2 py-0.5 rounded text-center max-w-[11rem] ${EXEC_STATUS_BADGE[d.execution_status] || 'bg-gray-100 text-gray-500'}`}>
+                    <span
+                      style={{
+                        fontSize: '10px',
+                        lineHeight: 1.3,
+                        fontWeight: 600,
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        textAlign: 'center',
+                        maxWidth: '11rem',
+                        fontFamily: 'Syne',
+                        background: execSt.bg,
+                        color: execSt.color,
+                      }}
+                    >
                       {d.execution_status}
                     </span>
-                    <span className="text-xs text-gray-400 whitespace-nowrap">{formatTime(d.timestamp)}</span>
+                    <span style={{ fontSize: '11px', color: 'var(--text-3)', whiteSpace: 'nowrap', fontFamily: 'JetBrains Mono' }}>
+                      {formatTime(d.timestamp)}
+                    </span>
                   </div>
                 </div>
 
                 {/* Expanded details */}
                 {isExpanded && (
-                  <div className="mt-3 ml-0 space-y-2 border-t border-gray-100 pt-3">
+                  <div
+                    className="mt-3 space-y-2 pt-3"
+                    style={{ borderTop: '1px solid var(--border)' }}
+                  >
                     {d.risk_assessment && (
                       <div>
-                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Risk Assessment</span>
-                        <p className="text-xs text-gray-600 mt-0.5">{d.risk_assessment}</p>
+                        <span style={SL_LABEL}>Risk Assessment</span>
+                        <p style={{ fontSize: '12px', color: 'var(--text-2)', marginTop: '2px' }}>{d.risk_assessment}</p>
                       </div>
                     )}
                     {d.action_details && Object.keys(d.action_details).length > 0 && (
                       <div>
-                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Action Details</span>
-                        <pre className="text-xs text-gray-600 mt-0.5 font-mono bg-gray-50 rounded p-2 overflow-x-auto">
+                        <span style={SL_LABEL}>Action Details</span>
+                        <pre
+                          style={{
+                            fontSize: '12px',
+                            color: 'var(--text-2)',
+                            marginTop: '2px',
+                            fontFamily: 'JetBrains Mono',
+                            background: 'var(--surface-2)',
+                            borderRadius: '6px',
+                            padding: '8px',
+                            overflowX: 'auto',
+                          }}
+                        >
                           {JSON.stringify(d.action_details, null, 2)}
                         </pre>
                       </div>
                     )}
                     {d.context_snapshot && (
                       <div>
-                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Portfolio Context at Decision</span>
+                        <span style={SL_LABEL}>Portfolio Context at Decision</span>
                         <div className="flex flex-wrap gap-4 mt-1">
                           {Object.entries(d.context_snapshot).map(([k, v]) => (
                             <div key={k}>
-                              <span className="text-[10px] text-gray-400">{k}</span>
-                              <div className="text-xs font-mono text-gray-700">
+                              <span style={{ fontSize: '10px', color: 'var(--text-3)' }}>{k}</span>
+                              <div style={{ fontSize: '12px', fontFamily: 'JetBrains Mono', color: 'var(--text-2)' }}>
                                 {typeof v === 'number' && k.includes('exposure') ? `${(v * 100).toFixed(1)}%` : String(v)}
                               </div>
                             </div>
@@ -511,9 +757,25 @@ export default function Orchestrator() {
                       </div>
                     )}
                     {d.human_override && (
-                      <div className="bg-blue-50 rounded p-2">
-                        <span className="text-[10px] font-semibold text-blue-600 uppercase">Human Override: {d.human_override.override_type}</span>
-                        <p className="text-xs text-blue-700 mt-0.5">{d.human_override.reason}</p>
+                      <div
+                        className="rounded p-2"
+                        style={{ background: 'var(--blue-bg)', border: '1px solid var(--blue-border)' }}
+                      >
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            color: 'var(--blue)',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.08em',
+                            fontFamily: 'Syne',
+                          }}
+                        >
+                          Human Override: {d.human_override.override_type}
+                        </span>
+                        <p style={{ fontSize: '12px', color: 'var(--blue)', marginTop: '2px', opacity: 0.85 }}>
+                          {d.human_override.reason}
+                        </p>
                       </div>
                     )}
                     {/* Override buttons */}
@@ -521,7 +783,19 @@ export default function Orchestrator() {
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'BLOCK' })}
-                          className="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--red-border)',
+                            color: 'var(--red)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--red-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Block
                         </button>
@@ -531,19 +805,55 @@ export default function Orchestrator() {
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
-                          className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--green-border)',
+                            color: 'var(--green)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--green-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Force Execute
                         </button>
                         <button
                           onClick={() => setDeferTarget({ decision_id: d.decision_id, ticker: d.ticker })}
-                          className="text-xs px-3 py-1.5 rounded border border-yellow-300 text-yellow-700 hover:bg-yellow-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--amber-border)',
+                            color: 'var(--amber)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--amber-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Defer
                         </button>
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'BLOCK' })}
-                          className="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--red-border)',
+                            color: 'var(--red)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--red-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Block
                         </button>
@@ -553,13 +863,37 @@ export default function Orchestrator() {
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
-                          className="text-xs px-3 py-1.5 rounded border border-green-200 text-green-700 hover:bg-green-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--green-border)',
+                            color: 'var(--green)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--green-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Force Execute
                         </button>
                         <button
                           onClick={() => setDeferTarget({ decision_id: d.decision_id, ticker: d.ticker })}
-                          className="text-xs px-3 py-1.5 rounded border border-yellow-300 text-yellow-700 hover:bg-yellow-50 transition-colors"
+                          style={{
+                            fontSize: '12px',
+                            padding: '6px 12px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--amber-border)',
+                            color: 'var(--amber)',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            fontFamily: 'Syne',
+                            transition: 'background 0.15s',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'var(--amber-bg)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           Re-Defer
                         </button>

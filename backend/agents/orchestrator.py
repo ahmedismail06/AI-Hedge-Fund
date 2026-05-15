@@ -1555,7 +1555,7 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             resp = (
                 _get_client()
                 .table("pm_decisions")
-                .select("category, ticker, action_details, timestamp")
+                .select("category, ticker, decision, action_details, timestamp")
                 .order("timestamp", desc=True)
                 .limit(50)
                 .execute()
@@ -1564,6 +1564,7 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             for row in (resp.data or []):
                 cat = row.get("category")
                 ticker = row.get("ticker")
+                decision = row.get("decision")
                 ad = row.get("action_details") or {}
                 ts_str = row.get("timestamp")
 
@@ -1573,8 +1574,14 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if ticker and cat and ts_str:
                     try:
                         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        # 1-hour cooldown for re-evaluating the same ticker in the same category
-                        if (now - ts).total_seconds() < 3600:
+                        # HOLD decisions on EXIT_TRIM get a 4-hour cooldown — valuation triggers
+                        # (e.g. price >15% above DCF bull) are persistent conditions, so re-evaluating
+                        # every hour after a HOLD just produces the same answer repeatedly.
+                        if cat == "EXIT_TRIM" and decision == "HOLD":
+                            cooldown_secs = 14400
+                        else:
+                            cooldown_secs = 3600
+                        if (now - ts).total_seconds() < cooldown_secs:
                             processed_recent.add((ticker, cat))
                     except (ValueError, TypeError):
                         pass

@@ -10,12 +10,6 @@ const STOP_TIERS = {
   riskOff: { tier1: -5,  tier2: -10, tier3: -15 },
 };
 
-const VERDICT_COLORS = {
-  LONG:  'bg-green-100 text-green-700',
-  SHORT: 'bg-red-100 text-red-700',
-  AVOID: 'bg-gray-100 text-gray-600',
-};
-
 const fmt$ = (v) =>
   v == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(v);
 
@@ -30,47 +24,114 @@ function exportCSV(rows, filename) {
   URL.revokeObjectURL(url);
 }
 
+function SL({ children }) {
+  return (
+    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+      {children}
+    </div>
+  );
+}
+
+function Card({ children, className = '', style = {} }) {
+  return (
+    <div className={`rounded-xl p-5 ${className}`} style={{ background: 'var(--surface)', border: '1px solid var(--border)', ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function VerdictBadge({ verdict }) {
+  const styles = {
+    LONG:  { background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-border)' },
+    SHORT: { background: 'var(--red-bg)',   color: 'var(--red)',   border: '1px solid var(--red-border)' },
+    AVOID: { background: 'var(--surface-2)', color: 'var(--text-3)', border: '1px solid var(--border)' },
+  };
+  const s = styles[verdict] ?? styles.AVOID;
+  return (
+    <span style={{ ...s, fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '999px', fontFamily: 'Syne' }}>
+      {verdict}
+    </span>
+  );
+}
+
+function ConvictionBadge({ score }) {
+  const s = score >= 8
+    ? { background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-border)' }
+    : score >= 6
+    ? { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)' }
+    : { background: 'var(--red-bg)',   color: 'var(--red)',   border: '1px solid var(--red-border)' };
+  return (
+    <span style={{ ...s, fontSize: '11px', fontWeight: 600, padding: '2px 8px', borderRadius: '999px', fontFamily: 'Syne' }}>
+      Conviction {score?.toFixed(1)}/10
+    </span>
+  );
+}
+
 function PendingCard({ item, regime, onApprove, onReject }) {
   const isRiskOff = regime && (regime.regime === 'Risk-Off' || regime.regime === 'Stagflation');
   const tiers = isRiskOff ? STOP_TIERS.riskOff : STOP_TIERS.normal;
-  const cap = REGIME_CAPS[regime?.regime] ?? 100;
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+    <div className="rounded-xl p-5" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
       <div className="flex items-start justify-between gap-4 mb-4">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono font-bold text-xl text-gray-900">{item.ticker}</span>
-            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${VERDICT_COLORS[item.verdict] || 'bg-gray-100 text-gray-600'}`}>
-              {item.verdict}
+            <span style={{ fontFamily: 'JetBrains Mono', fontWeight: 700, fontSize: '20px', color: 'var(--text)' }}>
+              {item.ticker}
             </span>
-            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-              item.conviction_score >= 8 ? 'bg-green-100 text-green-700' :
-              item.conviction_score >= 6 ? 'bg-yellow-100 text-yellow-700' :
-              'bg-red-100 text-red-700'
-            }`}>
-              Conviction {item.conviction_score?.toFixed(1)}/10
-            </span>
+            <VerdictBadge verdict={item.verdict} />
+            <ConvictionBadge score={item.conviction_score} />
           </div>
           {item.size_label && (
-            <p className="text-sm text-gray-600 mt-1">
-              <strong>{item.size_label} position</strong> — {
-                { Large: '8%', Medium: '5%', Small: '2%', Micro: '1%' }[item.size_label] ?? ''
-              } of portfolio
-              {item.portfolio_value ? ` (~${fmt$(item.portfolio_value * ({ Large: 0.08, Medium: 0.05, Small: 0.02, Micro: 0.01 }[item.size_label] ?? 0))})` : ''}
+            <p className="text-sm mt-1" style={{ color: 'var(--text-2)' }}>
+              <strong style={{ color: 'var(--text)' }}>{item.size_label} position</strong> —{' '}
+              {({ Large: '8%', Medium: '5%', Small: '2%', Micro: '1%' })[item.size_label] ?? ''} of portfolio
+              {item.portfolio_value
+                ? ` (~${fmt$(item.portfolio_value * ({ Large: 0.08, Medium: 0.05, Small: 0.02, Micro: 0.01 }[item.size_label] ?? 0))})`
+                : ''}
             </p>
           )}
         </div>
         <div className="flex gap-2 flex-shrink-0">
           <button
             onClick={() => onApprove(item.id)}
-            className="px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+            style={{
+              padding: '6px 16px',
+              fontSize: '13px',
+              fontWeight: 600,
+              fontFamily: 'Syne',
+              background: 'var(--green-bg)',
+              color: 'var(--green)',
+              border: '1px solid var(--green-border)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+            }}
           >
             Approve
           </button>
           <button
             onClick={() => onReject(item.id)}
-            className="px-4 py-2 text-sm font-medium bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 transition-colors"
+            style={{
+              padding: '6px 16px',
+              fontSize: '13px',
+              fontWeight: 600,
+              fontFamily: 'Syne',
+              background: 'var(--surface-2)',
+              color: 'var(--text-2)',
+              border: '1px solid var(--border)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--red-bg)';
+              e.currentTarget.style.color = 'var(--red)';
+              e.currentTarget.style.borderColor = 'var(--red-border)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'var(--surface-2)';
+              e.currentTarget.style.color = 'var(--text-2)';
+              e.currentTarget.style.borderColor = 'var(--border)';
+            }}
           >
             Reject
           </button>
@@ -78,19 +139,33 @@ function PendingCard({ item, regime, onApprove, onReject }) {
       </div>
 
       {/* Stop-loss ladder */}
-      <div className="bg-gray-50 rounded-lg p-3 space-y-2">
-        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          Stop-Loss Protection {isRiskOff && <span className="text-yellow-600">(Tighter — {regime.regime} Mode)</span>}
-        </p>
+      <div className="rounded-lg p-3 space-y-2" style={{ background: 'var(--surface-2)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+          <SL>Stop-Loss Protection</SL>
+          {isRiskOff && (
+            <span style={{
+              fontSize: '11px', fontWeight: 600, fontFamily: 'Syne',
+              background: 'var(--amber-bg)', color: 'var(--amber)',
+              border: '1px solid var(--amber-border)',
+              padding: '1px 8px', borderRadius: '999px',
+            }}>
+              Tighter — {regime.regime} Mode
+            </span>
+          )}
+        </div>
         {[
           { label: 'Tier 1 — Position Stop', pct: tiers.tier1, desc: 'Auto-sell this position if price falls this much from entry' },
           { label: 'Tier 2 — Strategy Stop', pct: tiers.tier2, desc: 'Close all strategy positions if strategy P&L hits this level' },
           { label: 'Tier 3 — Portfolio Stop', pct: tiers.tier3, desc: 'Halt all trading if portfolio drawdown reaches this level' },
         ].map(({ label, pct, desc }) => (
           <div key={label} className="flex items-center gap-3 text-sm">
-            <span className="w-40 text-xs font-medium text-gray-600 flex-shrink-0">{label}</span>
-            <span className="font-bold text-red-600 w-10 text-right">{pct}%</span>
-            <span className="text-xs text-gray-400">{desc}</span>
+            <span style={{ width: '160px', fontSize: '11px', fontWeight: 500, color: 'var(--text-2)', flexShrink: 0, fontFamily: 'Syne' }}>
+              {label}
+            </span>
+            <span style={{ fontFamily: 'JetBrains Mono', fontWeight: 700, color: 'var(--red)', width: '40px', textAlign: 'right' }}>
+              {pct}%
+            </span>
+            <span style={{ fontSize: '11px', color: 'var(--text-3)' }}>{desc}</span>
           </div>
         ))}
       </div>
@@ -154,7 +229,6 @@ export default function Portfolio() {
         existing.entry_price = ((existing.entry_price || 0) * (existing.share_count || 0) + (p.entry_price || 0) * (p.share_count || 0)) / totalShares;
       }
       existing.share_count = totalShares;
-      // We'll recalculate P&L below for the whole group
     }
     return acc;
   }, {});
@@ -164,12 +238,9 @@ export default function Portfolio() {
     const entry = p.entry_price || 0;
     const current = p.current_price || entry;
     const shares = p.share_count || 0;
-
-    // Calculate P&L: (Current - Entry) * Shares for LONG, (Entry - Current) * Shares for SHORT
     const pnl = isLong ? (current - entry) * shares : (entry - current) * shares;
     const totalCost = entry * shares;
     const pnl_pct = totalCost > 0 ? pnl / totalCost : 0;
-
     return { ...p, pnl, pnl_pct };
   });
 
@@ -201,14 +272,24 @@ export default function Portfolio() {
       {/* Summary Strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: 'Open Positions', value: positions.length },
-          { label: 'Pending Approval', value: pending.length },
-          { label: 'Gross Exposure', value: exposure?.gross_exposure_pct != null ? `${exposure.gross_exposure_pct.toFixed(1)}%` : '—' },
-          { label: 'Unrealized P&L', value: fmt$(totalUnrealized) },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-white rounded-xl border border-gray-200 p-4">
-            <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</div>
-            <div className="text-2xl font-bold text-gray-900 mt-1">{value}</div>
+          { label: 'Open Positions', value: positions.length, mono: true },
+          { label: 'Pending Approval', value: pending.length, mono: true },
+          { label: 'Gross Exposure', value: exposure?.gross_exposure_pct != null ? `${exposure.gross_exposure_pct.toFixed(1)}%` : '—', mono: true },
+          { label: 'Unrealized P&L', value: fmt$(totalUnrealized), mono: true, pnl: totalUnrealized },
+        ].map(({ label, value, mono, pnl }) => (
+          <div key={label} className="rounded-xl p-4" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+            <SL>{label}</SL>
+            <div
+              className="text-2xl font-bold mt-1"
+              style={{
+                fontFamily: mono ? 'JetBrains Mono' : 'Syne',
+                color: pnl != null
+                  ? pnl >= 0 ? 'var(--green)' : 'var(--red)'
+                  : 'var(--text)',
+              }}
+            >
+              {value}
+            </div>
           </div>
         ))}
       </div>
@@ -223,17 +304,27 @@ export default function Portfolio() {
       )}
 
       {/* Tabs */}
-      <div className="bg-white rounded-xl border border-gray-200">
-        <div className="flex border-b border-gray-200 overflow-x-auto">
+      <div className="rounded-xl" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <div className="flex overflow-x-auto" style={{ borderBottom: '1px solid var(--border)' }}>
           {TABS.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`px-5 py-3 text-sm font-medium transition-colors ${
-                tab === t.key
-                  ? 'border-b-2 border-blue-600 text-blue-600'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
+              style={{
+                padding: '12px 20px',
+                fontSize: '13px',
+                fontWeight: 600,
+                fontFamily: 'Syne',
+                background: 'transparent',
+                border: 'none',
+                borderBottom: tab === t.key ? '2px solid var(--accent)' : '2px solid transparent',
+                color: tab === t.key ? 'var(--accent)' : 'var(--text-3)',
+                cursor: 'pointer',
+                transition: 'color 0.15s',
+                marginBottom: '-1px',
+              }}
+              onMouseEnter={e => { if (tab !== t.key) e.currentTarget.style.color = 'var(--text-2)'; }}
+              onMouseLeave={e => { if (tab !== t.key) e.currentTarget.style.color = 'var(--text-3)'; }}
             >
               {t.label}
             </button>
@@ -260,19 +351,33 @@ export default function Portfolio() {
               <div className="flex justify-end mb-3">
                 <button
                   onClick={() => exportCSV(displayedPositions, 'positions.csv')}
-                  className="text-xs px-3 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                  style={{
+                    fontSize: '12px',
+                    padding: '6px 12px',
+                    background: 'var(--surface-2)',
+                    color: 'var(--text-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    fontFamily: 'Syne',
+                    fontWeight: 600,
+                  }}
                 >
                   Export CSV
                 </button>
               </div>
               {displayedPositions.length === 0 ? (
-                <p className="text-sm text-gray-400 text-center py-8">No open positions</p>
+                <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>No open positions</p>
               ) : (
                 <div className="responsive-table-wrap">
                   <table className="responsive-table mobile-stack w-full text-left">
                     <thead>
-                      <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
-                        {positionHeaders.map(h => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
+                      <tr style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
+                        {positionHeaders.map(h => (
+                          <th key={h} className="px-4 py-2" style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: 'Syne' }}>
+                            {h}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -289,20 +394,32 @@ export default function Portfolio() {
               <div className="flex justify-end mb-3">
                 <button
                   onClick={() => exportCSV(closed, 'closed_trades.csv')}
-                  className="text-xs px-3 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                  style={{
+                    fontSize: '12px',
+                    padding: '6px 12px',
+                    background: 'var(--surface-2)',
+                    color: 'var(--text-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    fontFamily: 'Syne',
+                    fontWeight: 600,
+                  }}
                 >
                   Export CSV
                 </button>
               </div>
               {closed.length === 0 ? (
-                <p className="text-sm text-gray-400 text-center py-8">No closed trades yet</p>
+                <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>No closed trades yet</p>
               ) : (
                 <div className="responsive-table-wrap">
                   <table className="responsive-table mobile-stack w-full text-left">
                     <thead>
-                      <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
+                      <tr style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
                         {['Ticker', 'Direction', 'Shares', 'Entry', 'Exit', 'Realized P&L', 'Closed At'].map(h => (
-                          <th key={h} className="px-4 py-2 font-medium">{h}</th>
+                          <th key={h} className="px-4 py-2" style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: 'Syne' }}>
+                            {h}
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -310,20 +427,39 @@ export default function Portfolio() {
                       {closed.map((p, i) => {
                         const pnlPos = (p.pnl ?? 0) >= 0;
                         return (
-                          <tr key={p.id ?? i} className="border-b border-gray-100 text-sm">
-                            <td className="px-4 py-3 font-mono font-bold" data-label="Ticker">{p.ticker}</td>
+                          <tr
+                            key={p.id ?? i}
+                            style={{ borderBottom: '1px solid var(--border)', fontSize: '13px' }}
+                            onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-2)'}
+                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                          >
+                            <td className="px-4 py-3" data-label="Ticker" style={{ fontFamily: 'JetBrains Mono', fontWeight: 700, color: 'var(--text)' }}>
+                              {p.ticker}
+                            </td>
                             <td className="px-4 py-3" data-label="Direction">
-                              <span className={`text-xs px-1.5 py-0.5 rounded ${p.direction === 'LONG' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                              <span style={{
+                                fontSize: '11px', fontWeight: 600, fontFamily: 'Syne',
+                                padding: '2px 8px', borderRadius: '999px',
+                                background: p.direction === 'LONG' ? 'var(--blue-bg)' : 'var(--red-bg)',
+                                color: p.direction === 'LONG' ? 'var(--blue)' : 'var(--red)',
+                                border: p.direction === 'LONG' ? '1px solid var(--blue-border)' : '1px solid var(--red-border)',
+                              }}>
                                 {p.direction}
                               </span>
                             </td>
-                            <td className="px-4 py-3 text-gray-700" data-label="Shares">{p.share_count?.toLocaleString()}</td>
-                            <td className="px-4 py-3 text-gray-700" data-label="Entry">${p.entry_price?.toFixed(2)}</td>
-                            <td className="px-4 py-3 text-gray-700" data-label="Exit">${p.exit_price?.toFixed(2) ?? '—'}</td>
-                            <td className={`px-4 py-3 font-medium ${pnlPos ? 'text-green-600' : 'text-red-600'}`} data-label="Realized P&L">
+                            <td className="px-4 py-3" data-label="Shares" style={{ fontFamily: 'JetBrains Mono', color: 'var(--text-2)' }}>
+                              {p.share_count?.toLocaleString()}
+                            </td>
+                            <td className="px-4 py-3" data-label="Entry" style={{ fontFamily: 'JetBrains Mono', color: 'var(--text-2)' }}>
+                              ${p.entry_price?.toFixed(2)}
+                            </td>
+                            <td className="px-4 py-3" data-label="Exit" style={{ fontFamily: 'JetBrains Mono', color: 'var(--text-2)' }}>
+                              ${p.exit_price?.toFixed(2) ?? '—'}
+                            </td>
+                            <td className="px-4 py-3" data-label="Realized P&L" style={{ fontFamily: 'JetBrains Mono', fontWeight: 600, color: pnlPos ? 'var(--green)' : 'var(--red)' }}>
                               {p.pnl != null ? `${pnlPos ? '+' : ''}$${p.pnl.toFixed(2)}` : '—'}
                             </td>
-                            <td className="px-4 py-3 text-gray-400 text-xs" data-label="Closed At">
+                            <td className="px-4 py-3" data-label="Closed At" style={{ fontSize: '11px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>
                               {p.closed_at ? new Date(p.closed_at).toLocaleDateString() : '—'}
                             </td>
                           </tr>

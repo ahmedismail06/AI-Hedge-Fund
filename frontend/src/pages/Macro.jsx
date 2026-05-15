@@ -2,11 +2,52 @@ import { useState, useEffect, useCallback } from 'react';
 import { getBriefing, getRegime, getMacroHistory, getIndicators, runMacroAgent } from '../api/macro';
 import { LineChart, Line, Tooltip as RTooltip, ResponsiveContainer } from 'recharts';
 
-const REGIME_STYLES = {
-  'Risk-On':     { bg: 'bg-green-600',  text: 'text-green-600',  light: 'bg-green-50 border-green-200' },
-  'Risk-Off':    { bg: 'bg-red-600',    text: 'text-red-600',    light: 'bg-red-50 border-red-200' },
-  'Transitional':{ bg: 'bg-yellow-500', text: 'text-yellow-600', light: 'bg-yellow-50 border-yellow-200' },
-  'Stagflation': { bg: 'bg-orange-500', text: 'text-orange-600', light: 'bg-orange-50 border-orange-200' },
+/* ─── Helper components ──────────────────────────────────────────── */
+function SL({ children }) {
+  return (
+    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+      {children}
+    </div>
+  );
+}
+
+function Card({ children, className = '', style = {} }) {
+  return (
+    <div className={`rounded-xl p-5 ${className}`} style={{ background: 'var(--surface)', border: '1px solid var(--border)', ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function CardHeader({ label, title, action, onAction }) {
+  return (
+    <div className="flex items-start justify-between mb-4">
+      <div>
+        <SL>{label}</SL>
+        {title && <div className="text-[13px] font-semibold mt-0.5" style={{ color: 'var(--text)' }}>{title}</div>}
+      </div>
+      {action && (
+        <button onClick={onAction} className="text-[11px] font-bold transition-opacity hover:opacity-70" style={{ color: 'var(--accent)', fontFamily: 'Syne' }}>
+          {action}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ─── Regime config ──────────────────────────────────────────────── */
+const REGIME_BANNER_STYLE = {
+  'Risk-On':     { bg: 'rgba(0, 217, 138, 0.12)',  border: 'var(--regime-on-border)',  text: 'var(--regime-on-text)'  },
+  'Risk-Off':    { bg: 'rgba(255, 51, 71, 0.12)',   border: 'var(--regime-off-border)', text: 'var(--regime-off-text)' },
+  'Transitional':{ bg: 'rgba(74, 158, 255, 0.12)',  border: 'var(--regime-tr-border)',  text: 'var(--regime-tr-text)'  },
+  'Stagflation': { bg: 'rgba(255, 179, 0, 0.12)',   border: 'var(--regime-st-border)',  text: 'var(--regime-st-text)'  },
+};
+
+const REGIME_GUIDANCE_STYLE = {
+  'Risk-On':     { bg: 'var(--regime-on-bg)',  border: 'var(--regime-on-border)',  text: 'var(--regime-on-text)'  },
+  'Risk-Off':    { bg: 'var(--regime-off-bg)', border: 'var(--regime-off-border)', text: 'var(--regime-off-text)' },
+  'Transitional':{ bg: 'var(--regime-tr-bg)',  border: 'var(--regime-tr-border)',  text: 'var(--regime-tr-text)'  },
+  'Stagflation': { bg: 'var(--regime-st-bg)',  border: 'var(--regime-st-border)',  text: 'var(--regime-st-text)'  },
 };
 
 const REGIME_GUIDANCE = {
@@ -34,30 +75,33 @@ const INDICATOR_LABELS = {
   spx_200dma_pct:      { label: 'S&P 500 vs 200-Day Average', unit: '%', desc: 'How far the S&P 500 is above/below its 200-day moving average' },
 };
 
-function SubScoreBar({ label, value, desc }) {
+/* ─── SubScoreBar ────────────────────────────────────────────────── */
+function SubScoreBar({ label, value, desc, bannerText }) {
   const pct = Math.round(((value ?? 0) + 1) / 2 * 100); // map -1..+1 → 0..100%
   const isPos = (value ?? 0) >= 0;
-  const color = isPos ? '#10b981' : '#ef4444';
+  const fillColor = isPos ? 'var(--green)' : 'var(--red)';
+  const valueColor = isPos ? 'var(--green)' : 'var(--red)';
+
   return (
     <div className="min-w-0">
       <div className="flex justify-between items-baseline mb-1">
-        <span className="text-xs font-medium text-white/80">{label}</span>
-        <span className={`text-sm font-bold ${isPos ? 'text-green-300' : 'text-red-300'}`}>
+        <span className="text-xs font-medium" style={{ color: 'var(--text-2)', fontFamily: 'Syne' }}>{label}</span>
+        <span className="text-sm font-bold" style={{ color: valueColor, fontFamily: 'JetBrains Mono' }}>
           {value != null ? (value >= 0 ? '+' : '') + value.toFixed(2) : '—'}
         </span>
       </div>
-      <div className="relative h-2 rounded-full bg-white/20">
-        <div className="absolute top-0 left-1/2 w-0.5 h-full bg-white/40" />
+      <div className="relative h-2 rounded-full" style={{ background: 'var(--border)' }}>
+        <div className="absolute top-0 left-1/2 w-0.5 h-full" style={{ background: 'var(--text-3)' }} />
         <div
           className="absolute top-0 h-full rounded-full transition-all"
           style={{
-            backgroundColor: color,
+            backgroundColor: fillColor,
             width: `${Math.abs((value ?? 0)) * 50}%`,
             left: isPos ? '50%' : `calc(50% - ${Math.abs(value ?? 0) * 50}%)`,
           }}
         />
       </div>
-      {desc && <p className="text-xs text-white/60 mt-1">{desc}</p>}
+      {desc && <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>{desc}</p>}
     </div>
   );
 }
@@ -69,6 +113,7 @@ const SUB_SCORE_META = {
   stress_score:    { label: 'Financial Stress',         descs: { pos: 'High market stress', neg: 'Calm markets' } },
 };
 
+/* ─── Component ──────────────────────────────────────────────────── */
 export default function Macro() {
   const [regime, setRegime] = useState(null);
   const [briefing, setBriefing] = useState(null);
@@ -104,7 +149,8 @@ export default function Macro() {
   };
 
   const regimeKey = regime?.regime ?? briefing?.regime;
-  const styles = REGIME_STYLES[regimeKey] || REGIME_STYLES['Transitional'];
+  const bannerStyle = REGIME_BANNER_STYLE[regimeKey] || REGIME_BANNER_STYLE['Transitional'];
+  const guidanceStyle = REGIME_GUIDANCE_STYLE[regimeKey] || REGIME_GUIDANCE_STYLE['Transitional'];
   const guidance = REGIME_GUIDANCE[regimeKey];
 
   const fmtTime = (d) => {
@@ -118,33 +164,49 @@ export default function Macro() {
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
 
-      {/* Regime Banner */}
-      <div className={`rounded-2xl p-6 text-white ${styles.bg}`}>
+      {/* ── Regime Banner ── */}
+      <div
+        className="rounded-2xl p-6"
+        style={{ background: bannerStyle.bg, border: `1px solid ${bannerStyle.border}` }}
+      >
         <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
           <div>
-            <p className="text-white/70 text-sm font-medium uppercase tracking-widest mb-1">Current Market Regime</p>
-            <h1 className="text-4xl font-black">{regimeKey ?? 'Loading…'}</h1>
-            <div className="flex gap-4 mt-2 text-sm text-white/80">
-              {regime?.regime_confidence != null && <span>Confidence: <strong className="text-white">{regime.regime_confidence}/10</strong></span>}
-              {regime?.regime_score != null && <span>Score: <strong className="text-white">{regime.regime_score}/100</strong></span>}
+            <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne', marginBottom: '4px' }}>
+              Current Market Regime
+            </div>
+            <h1
+              className="text-4xl font-black"
+              style={{ color: bannerStyle.text, fontFamily: 'Syne' }}
+            >
+              {regimeKey ?? 'Loading…'}
+            </h1>
+            <div className="flex gap-4 mt-2 text-sm" style={{ color: 'var(--text-2)' }}>
+              {regime?.regime_confidence != null && (
+                <span>Confidence: <strong style={{ color: bannerStyle.text, fontFamily: 'JetBrains Mono' }}>{regime.regime_confidence}/10</strong></span>
+              )}
+              {regime?.regime_score != null && (
+                <span>Score: <strong style={{ color: bannerStyle.text, fontFamily: 'JetBrains Mono' }}>{regime.regime_score}/100</strong></span>
+              )}
             </div>
           </div>
           <div className="text-right">
-            <p className="text-white/60 text-xs">
+            <p className="text-xs" style={{ color: 'var(--text-3)' }}>
               {lastUpdated ? `Updated ${fmtTime(lastUpdated)}` : 'Loading…'}
             </p>
             <div className="flex gap-2 mt-2 justify-end">
               <button
                 onClick={() => load(true)}
                 disabled={loading}
-                className="px-3 py-1.5 text-xs bg-white/20 hover:bg-white/30 rounded-lg transition-colors"
+                className="px-3 py-1.5 text-xs rounded-lg transition-opacity hover:opacity-80 font-semibold"
+                style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)', fontFamily: 'Syne' }}
               >
                 {loading ? 'Refreshing…' : 'Refresh Data'}
               </button>
               <button
                 onClick={handleRun}
                 disabled={running}
-                className="px-3 py-1.5 text-xs bg-white/90 text-gray-900 font-semibold hover:bg-white rounded-lg transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-bold rounded-lg transition-opacity hover:opacity-80 disabled:opacity-50"
+                style={{ background: 'var(--accent)', color: '#000', fontFamily: 'Syne' }}
               >
                 {running ? 'Running…' : 'Run Macro Agent'}
               </button>
@@ -158,17 +220,23 @@ export default function Macro() {
             const desc = val != null
               ? (val >= 0 ? meta.descs.pos : meta.descs.neg)
               : '';
-            return <SubScoreBar key={key} label={meta.label} value={val} desc={desc} />;
+            return <SubScoreBar key={key} label={meta.label} value={val} desc={desc} bannerText={bannerStyle.text} />;
           })}
         </div>
       </div>
 
-      {/* Portfolio Guidance */}
+      {/* ── Portfolio Guidance ── */}
       {guidance && (
-        <div className={`rounded-xl border p-5 ${styles.light}`}>
-          <h2 className={`text-sm font-bold uppercase tracking-wide mb-3 ${styles.text}`}>
+        <div
+          className="rounded-xl p-5"
+          style={{ background: guidanceStyle.bg, border: `1px solid ${guidanceStyle.border}` }}
+        >
+          <div
+            className="text-sm font-bold uppercase tracking-wide mb-3"
+            style={{ color: guidanceStyle.text, fontFamily: 'Syne', letterSpacing: '0.1em' }}
+          >
             What This Regime Means for Your Portfolio
-          </h2>
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             {[
               { label: 'Gross Exposure Cap', value: guidance.gross },
@@ -177,58 +245,81 @@ export default function Macro() {
               { label: 'Guidance', value: guidance.note },
             ].map(({ label, value }) => (
               <div key={label}>
-                <p className="text-xs text-gray-500 font-medium mb-0.5">{label}</p>
-                <p className="text-gray-800 font-medium text-sm">{value}</p>
+                <p className="text-xs font-medium mb-0.5" style={{ color: 'var(--text-3)', fontFamily: 'Syne' }}>{label}</p>
+                <p className="font-medium text-sm" style={{ color: 'var(--text)' }}>{value}</p>
               </div>
             ))}
           </div>
+
           {briefing?.sector_tilts && Object.keys(briefing.sector_tilts).length > 0 && (
-            <div className="mt-4 pt-4 border-t border-current/10">
-              <p className="text-xs text-gray-500 font-medium mb-2">Sector Tilts</p>
+            <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
+              <p className="text-xs font-medium mb-2" style={{ color: 'var(--text-3)', fontFamily: 'Syne' }}>Sector Tilts</p>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(briefing.sector_tilts).map(([sector, tilt]) => (
-                  <span key={sector} className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-                    tilt > 0 ? 'bg-green-100 text-green-700' : tilt < 0 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
-                  }`}>
+                  <span
+                    key={sector}
+                    className="text-xs px-2.5 py-1 rounded-full font-medium"
+                    style={
+                      tilt > 0
+                        ? { background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-border)' }
+                        : tilt < 0
+                          ? { background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid var(--red-border)' }
+                          : { background: 'var(--surface-2)', color: 'var(--text-3)', border: '1px solid var(--border)' }
+                    }
+                  >
                     {sector} {tilt > 0 ? '▲' : tilt < 0 ? '▼' : ''}
                   </span>
                 ))}
               </div>
             </div>
           )}
+
           {briefing?.portfolio_guidance && (
-            <div className="mt-4 pt-4 border-t border-current/10">
-              <p className="text-xs text-gray-500 font-medium mb-1">AI Guidance Note</p>
-              <p className="text-sm text-gray-700 leading-relaxed">{briefing.portfolio_guidance}</p>
+            <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
+              <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-3)', fontFamily: 'Syne' }}>AI Guidance Note</p>
+              <p className="text-sm leading-relaxed" style={{ color: 'var(--text-2)' }}>{briefing.portfolio_guidance}</p>
             </div>
           )}
         </div>
       )}
 
-      {/* Regime History Sparkline */}
+      {/* ── Regime History Sparkline ── */}
       {history.length > 1 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h2 className="text-sm font-semibold text-gray-700 mb-3">Regime Score — Last 30 Briefings</h2>
+        <div className="rounded-xl p-5" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+          <div className="mb-3">
+            <SL>Regime Score History</SL>
+            <div className="text-[13px] font-semibold mt-0.5" style={{ color: 'var(--text)' }}>Last 30 Briefings</div>
+          </div>
           <ResponsiveContainer width="100%" height={80}>
             <LineChart data={history}>
-              <Line type="monotone" dataKey="regime_score" stroke="#6366f1" strokeWidth={2} dot={false} />
-              <RTooltip contentStyle={{ fontSize: 11, borderRadius: 6 }} formatter={(v) => [v, 'Regime Score']}
-                labelFormatter={(_, pl) => pl?.[0]?.payload?.date ?? ''} />
+              <Line type="monotone" dataKey="regime_score" stroke="var(--accent)" strokeWidth={2} dot={false} />
+              <RTooltip
+                contentStyle={{ fontSize: 11, borderRadius: 6, background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}
+                formatter={(v) => [v, 'Regime Score']}
+                labelFormatter={(_, pl) => pl?.[0]?.payload?.date ?? ''}
+              />
             </LineChart>
           </ResponsiveContainer>
           {history.length > 0 && (() => {
             const last = history[history.length - 1];
             const count = history.filter(h => h.regime === last?.regime).reverse().findIndex(h => h.regime !== last?.regime);
             const streak = count === -1 ? history.length : count;
-            return <p className="text-xs text-gray-400 mt-2">Regime has been <strong>{last?.regime}</strong> for at least {streak} consecutive sessions</p>;
+            return (
+              <p className="text-xs mt-2" style={{ color: 'var(--text-3)' }}>
+                Regime has been <strong style={{ color: 'var(--text-2)' }}>{last?.regime}</strong> for at least {streak} consecutive sessions
+              </p>
+            );
           })()}
         </div>
       )}
 
-      {/* Economic Indicators Grid */}
+      {/* ── Economic Indicators Grid ── */}
       {indicators && (
         <div>
-          <h2 className="text-base font-semibold text-gray-900 mb-3">Economic Indicators</h2>
+          <div className="mb-3">
+            <SL>Economic Indicators</SL>
+            <div className="text-base font-semibold mt-0.5" style={{ color: 'var(--text)', fontFamily: 'Syne' }}>Key Macro Data</div>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {Object.entries(indicators).map(([key, data]) => {
               const meta = INDICATOR_LABELS[key] || { label: key, unit: '', desc: '' };
@@ -237,24 +328,40 @@ export default function Macro() {
               const yoy = typeof data === 'object' ? data?.yoy_change : null;
               if (val == null) return null;
               return (
-                <div key={key} className="bg-white rounded-xl border border-gray-200 p-4" title={meta.desc}>
-                  <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">{meta.label}</div>
-                  <div className="text-2xl font-bold text-gray-900">
+                <div
+                  key={key}
+                  className="rounded-xl p-4"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+                  title={meta.desc}
+                >
+                  <SL>{meta.label}</SL>
+                  <div
+                    className="text-2xl font-bold mt-1"
+                    style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                  >
                     {typeof val === 'number' ? val.toFixed(2) : val}{meta.unit}
                   </div>
                   <div className="flex gap-3 mt-1">
                     {mom != null && (
-                      <span className={`text-xs font-medium ${mom >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      <span
+                        className="text-xs font-medium"
+                        style={{ color: mom >= 0 ? 'var(--green)' : 'var(--red)' }}
+                      >
                         {mom >= 0 ? '▲' : '▼'} {Math.abs(mom).toFixed(2)}% MoM
                       </span>
                     )}
                     {yoy != null && (
-                      <span className={`text-xs font-medium ${yoy >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      <span
+                        className="text-xs font-medium"
+                        style={{ color: yoy >= 0 ? 'var(--green)' : 'var(--red)' }}
+                      >
                         {yoy >= 0 ? '▲' : '▼'} {Math.abs(yoy).toFixed(2)}% YoY
                       </span>
                     )}
                   </div>
-                  {meta.desc && <p className="text-xs text-gray-400 mt-1 leading-snug">{meta.desc}</p>}
+                  {meta.desc && (
+                    <p className="text-xs mt-1 leading-snug" style={{ color: 'var(--text-3)' }}>{meta.desc}</p>
+                  )}
                 </div>
               );
             })}
@@ -262,29 +369,46 @@ export default function Macro() {
         </div>
       )}
 
-      {/* Upcoming Events */}
+      {/* ── Upcoming Events ── */}
       {briefing?.upcoming_events?.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h2 className="text-base font-semibold text-gray-900 mb-3">Upcoming Events</h2>
+        <div className="rounded-xl p-5" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+          <div className="mb-3">
+            <SL>Calendar</SL>
+            <div className="text-base font-semibold mt-0.5" style={{ color: 'var(--text)', fontFamily: 'Syne' }}>Upcoming Events</div>
+          </div>
           <div className="space-y-2">
             {briefing.upcoming_events.map((ev, i) => (
-              <div key={i} className="flex items-start gap-3 text-sm">
-                <span className="text-gray-400 w-24 flex-shrink-0 text-xs">{ev.date ?? '—'}</span>
-                <span className="text-gray-700">{ev.event ?? ev}</span>
+              <div
+                key={i}
+                className="flex items-start gap-3 text-sm py-1.5"
+                style={{ borderBottom: i < briefing.upcoming_events.length - 1 ? '1px solid var(--border)' : 'none' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                <span
+                  className="w-24 flex-shrink-0 text-xs"
+                  style={{ color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                >
+                  {ev.date ?? '—'}
+                </span>
+                <span style={{ color: 'var(--text-2)' }}>{ev.event ?? ev}</span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Key Themes from briefing */}
+      {/* ── Key Themes ── */}
       {briefing?.key_themes?.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h2 className="text-base font-semibold text-gray-900 mb-3">Key Market Themes</h2>
+        <div className="rounded-xl p-5" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+          <div className="mb-3">
+            <SL>Market Intelligence</SL>
+            <div className="text-base font-semibold mt-0.5" style={{ color: 'var(--text)', fontFamily: 'Syne' }}>Key Market Themes</div>
+          </div>
           <ul className="space-y-2">
             {briefing.key_themes.map((theme, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm text-gray-700">
-                <span className="text-blue-400 mt-0.5">•</span>
+              <li key={i} className="flex items-start gap-2 text-sm" style={{ color: 'var(--text-2)' }}>
+                <span className="mt-0.5" style={{ color: 'var(--accent)' }}>•</span>
                 {theme}
               </li>
             ))}

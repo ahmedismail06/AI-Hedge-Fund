@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { getAlerts, getCriticalAlerts, resolveAlert, getMetrics, getMetricsHistory, runRiskMonitor, runNightlyMetrics } from '../api/risk';
 import { getRegime } from '../api/macro';
 import RiskAlert from '../components/RiskAlert';
-import StatCard from '../components/StatCard';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 const STOP_TIERS = {
@@ -36,6 +35,43 @@ function fmtMetric(key, val) {
     return `${val >= 0 ? '+' : ''}${val.toFixed(2)}%`;
   }
   return val.toFixed ? val.toFixed(2) : String(val);
+}
+
+const STATUS_COLOR = { ok: 'var(--green)', warn: 'var(--amber)', critical: 'var(--red)', neutral: 'var(--text)' };
+
+function SL({ children }) {
+  return (
+    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+      {children}
+    </div>
+  );
+}
+
+function Card({ children, className = '', style = {} }) {
+  return (
+    <div className={`rounded-xl p-5 ${className}`} style={{ background: 'var(--surface)', border: '1px solid var(--border)', ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function MetricCard({ label, plainLabel, value, status }) {
+  return (
+    <div className="rounded-xl p-4" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+      <SL>{label}</SL>
+      {plainLabel && (
+        <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-3)', fontFamily: 'Syne' }}>
+          {plainLabel}
+        </div>
+      )}
+      <div
+        className="text-[22px] font-bold mt-1 leading-none"
+        style={{ color: STATUS_COLOR[status] ?? 'var(--text)', fontFamily: 'JetBrains Mono' }}
+      >
+        {value}
+      </div>
+    </div>
+  );
 }
 
 export default function Risk() {
@@ -106,35 +142,71 @@ export default function Risk() {
     .filter(a => showResolved || !a.resolved)
     .sort((a, b) => (sortOrder[a.severity] ?? 3) - (sortOrder[b.severity] ?? 3));
 
+  const criticalCount = criticals.length;
+  const warnCount = visibleAlerts.filter(a => a.severity === 'WARN').length;
+
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
 
       {/* CRITICAL Banner */}
       {criticals.length > 0 && (
-        <div className="rounded-xl bg-red-600 text-white p-4 shadow-lg">
+        <div className="rounded-xl p-4" style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)' }}>
           <div className="flex items-center gap-2 mb-2">
-            <span className="inline-block w-3 h-3 rounded-full bg-white animate-pulse" />
-            <span className="font-bold text-lg">CRITICAL ALERT ACTIVE — All new trade approvals are blocked</span>
+            <span
+              style={{
+                display: 'inline-block', width: '10px', height: '10px',
+                borderRadius: '50%', background: 'var(--red)',
+                animation: 'pulse 1.5s ease-in-out infinite',
+              }}
+            />
+            <span style={{ fontFamily: 'Syne', fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>
+              CRITICAL ALERT ACTIVE — All new trade approvals are blocked
+            </span>
           </div>
           {criticals.map((c, i) => (
-            <p key={i} className="text-sm text-red-100 ml-5">{c.message}</p>
+            <p key={i} className="ml-5 text-sm" style={{ color: 'var(--red)', opacity: 0.85 }}>{c.message}</p>
           ))}
         </div>
       )}
 
       {/* Alerts Section */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <Card>
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">Active Alerts</h2>
+            <SL>Risk Alerts</SL>
+            <div className="flex items-center gap-2 mt-1">
+              <span style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne' }}>
+                Active Alerts
+              </span>
+              {criticalCount > 0 && (
+                <span style={{
+                  fontSize: '11px', fontWeight: 600, fontFamily: 'Syne',
+                  background: 'var(--red-bg)', color: 'var(--red)',
+                  border: '1px solid var(--red-border)',
+                  padding: '1px 8px', borderRadius: '999px',
+                }}>
+                  {criticalCount} Critical
+                </span>
+              )}
+              {warnCount > 0 && (
+                <span style={{
+                  fontSize: '11px', fontWeight: 600, fontFamily: 'Syne',
+                  background: 'var(--amber-bg)', color: 'var(--amber)',
+                  border: '1px solid var(--amber-border)',
+                  padding: '1px 8px', borderRadius: '999px',
+                }}>
+                  {warnCount} Warn
+                </span>
+              )}
+            </div>
             {lastUpdated && (
-              <p className="text-xs text-gray-400 mt-0.5">
+              <p style={{ fontSize: '11px', color: 'var(--text-3)', marginTop: '2px', fontFamily: 'Syne' }}>
                 Updated {Math.round((Date.now() - lastUpdated) / 1000)}s ago
               </p>
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: 'var(--text-2)', cursor: 'pointer', fontFamily: 'Syne' }}>
               <input
                 type="checkbox"
                 checked={showResolved}
@@ -146,14 +218,38 @@ export default function Risk() {
             <button
               onClick={handleRunMonitor}
               disabled={runningMonitor}
-              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              style={{
+                padding: '6px 12px',
+                fontSize: '13px',
+                fontWeight: 600,
+                fontFamily: 'Syne',
+                background: 'var(--accent)',
+                color: '#000',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: runningMonitor ? 'not-allowed' : 'pointer',
+                opacity: runningMonitor ? 0.5 : 1,
+                transition: 'opacity 0.15s',
+              }}
             >
               {runningMonitor ? 'Running…' : 'Run Risk Check'}
             </button>
             <button
               onClick={handleRunMetrics}
               disabled={runningMetrics}
-              className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+              style={{
+                padding: '6px 12px',
+                fontSize: '13px',
+                fontWeight: 600,
+                fontFamily: 'Syne',
+                background: 'var(--surface-2)',
+                color: 'var(--text-2)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                cursor: runningMetrics ? 'not-allowed' : 'pointer',
+                opacity: runningMetrics ? 0.5 : 1,
+                transition: 'opacity 0.15s',
+              }}
             >
               {runningMetrics ? 'Running…' : 'Run Nightly Metrics'}
             </button>
@@ -161,7 +257,7 @@ export default function Risk() {
         </div>
 
         {visibleAlerts.length === 0 ? (
-          <p className="text-sm text-gray-400 py-4 text-center">No active alerts — system is healthy</p>
+          <p className="text-sm py-4 text-center" style={{ color: 'var(--text-3)' }}>No active alerts — system is healthy</p>
         ) : (
           <div className="space-y-2">
             {visibleAlerts.map(a => (
@@ -169,21 +265,25 @@ export default function Risk() {
             ))}
           </div>
         )}
-      </div>
+      </Card>
 
       {/* Performance Metrics */}
       <div>
-        <h2 className="text-base font-semibold text-gray-900 mb-3">Performance Metrics</h2>
+        <div className="mb-3">
+          <SL>Performance</SL>
+          <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne', marginTop: '4px' }}>
+            Performance Metrics
+          </div>
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {Object.entries(METRIC_META).map(([key, meta]) => {
             const val = metrics?.[key];
             return (
-              <StatCard
+              <MetricCard
                 key={key}
                 label={meta.label}
                 plainLabel={meta.plain}
                 value={fmtMetric(key, val)}
-                tooltip={meta.tip}
                 status={metricStatus(key, val)}
               />
             );
@@ -192,11 +292,21 @@ export default function Risk() {
       </div>
 
       {/* Stop-Loss Ladder */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <Card>
         <div className="flex items-center gap-3 mb-4">
-          <h2 className="text-base font-semibold text-gray-900">Stop-Loss Protection Ladder</h2>
+          <div>
+            <SL>Risk Controls</SL>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne', marginTop: '4px' }}>
+              Stop-Loss Protection Ladder
+            </div>
+          </div>
           {isRiskOff && (
-            <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full font-medium">
+            <span style={{
+              fontSize: '11px', fontWeight: 600, fontFamily: 'Syne',
+              background: 'var(--amber-bg)', color: 'var(--amber)',
+              border: '1px solid var(--amber-border)',
+              padding: '2px 10px', borderRadius: '999px',
+            }}>
               {regime.regime} Mode — Tighter Stops Active
             </span>
           )}
@@ -207,40 +317,69 @@ export default function Risk() {
             { tier: 'Tier 2 — Strategy Stop', pct: tiers.tier2, desc: 'Close all positions in this strategy if total strategy P&L falls this much.' },
             { tier: 'Tier 3 — Portfolio Stop', pct: tiers.tier3, desc: 'Halt all trading if the total portfolio falls this much.' },
           ].map(({ tier, pct, desc }) => (
-            <div key={tier} className="flex items-start gap-4 p-3 rounded-lg bg-gray-50">
-              <div className="flex-shrink-0 w-32">
-                <div className="text-xs font-semibold text-gray-700">{tier}</div>
-                <div className="text-2xl font-bold text-red-600 mt-0.5">{pct}%</div>
+            <div
+              key={tier}
+              className="flex items-start gap-4 p-3 rounded-lg"
+              style={{ background: 'var(--surface-2)' }}
+            >
+              <div style={{ flexShrink: 0, width: '128px' }}>
+                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-2)', fontFamily: 'Syne' }}>
+                  {tier}
+                </div>
+                <div style={{ fontFamily: 'JetBrains Mono', fontWeight: 700, fontSize: '22px', color: 'var(--red)', marginTop: '2px', lineHeight: 1 }}>
+                  {pct}%
+                </div>
               </div>
-              <div className="flex-1">
-                <div className="text-sm text-gray-600">{desc}</div>
-                <div className="mt-1.5 h-2 rounded-full bg-gray-200">
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '13px', color: 'var(--text-2)' }}>{desc}</div>
+                <div className="mt-1.5 h-2 rounded-full" style={{ background: 'var(--border)' }}>
                   <div
-                    className="h-full rounded-full bg-red-400"
-                    style={{ width: `${Math.abs(pct)}%` }}
+                    className="h-full rounded-full"
+                    style={{ width: `${Math.abs(pct)}%`, background: 'var(--red)' }}
                   />
                 </div>
               </div>
             </div>
           ))}
         </div>
-      </div>
+      </Card>
 
       {/* Metrics History Chart */}
       {history.length > 1 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h2 className="text-base font-semibold text-gray-900 mb-4">Sharpe Ratio — History</h2>
+        <Card>
+          <div className="mb-4">
+            <SL>History</SL>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', fontFamily: 'Syne', marginTop: '4px' }}>
+              Sharpe Ratio — History
+            </div>
+          </div>
           <ResponsiveContainer width="100%" height={140}>
             <BarChart data={history} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false}
-                tickFormatter={d => { try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { return d; } }} />
-              <YAxis tick={{ fontSize: 10, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
-              <RTooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-              <ReferenceLine y={1} stroke="#10b981" strokeDasharray="3 3" label={{ value: 'Good (1.0)', fontSize: 10, fill: '#10b981' }} />
-              <Bar dataKey="sharpe_ratio" name="Sharpe Ratio" fill="#6366f1" radius={[3, 3, 0, 0]} />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 10, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={d => { try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { return d; } }}
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <RTooltip
+                contentStyle={{ fontSize: 12, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}
+              />
+              <ReferenceLine
+                y={1}
+                stroke="var(--green)"
+                strokeDasharray="3 3"
+                label={{ value: 'Good (1.0)', fontSize: 10, fill: 'var(--green)' }}
+              />
+              <Bar dataKey="sharpe_ratio" name="Sharpe Ratio" fill="var(--accent)" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </Card>
       )}
     </div>
   );
