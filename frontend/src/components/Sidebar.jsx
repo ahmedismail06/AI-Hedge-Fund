@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { getPMStatus, haltPM, resumePM } from '../api/pm';
 import { getCriticalAlerts, getAlerts } from '../api/risk';
 import { getExecutionStatus } from '../api/execution';
 import { getPending } from '../api/portfolio';
 import { useSidebar } from '../context/SidebarContext';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 import ConfirmDialog from './ConfirmDialog';
 import RiskAlert from './RiskAlert';
 
@@ -23,6 +24,8 @@ const NAV_ITEMS = [
 export default function Sidebar() {
   const { collapsed, setCollapsed, mobileOpen, setMobileOpen } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { isAdmin, role, logout } = useAuth();
+  const navigate = useNavigate();
   const [status, setStatus]             = useState(null);
   const [showConfirm, setShowConfirm]   = useState(false);
   const [toggling, setToggling]         = useState(false);
@@ -224,16 +227,19 @@ export default function Sidebar() {
           {/* Mode badge */}
           {!collapsed && (
             <button
-              onClick={() => !toggling && setShowConfirm(true)}
-              disabled={toggling}
+              onClick={() => isAdmin && !toggling && setShowConfirm(true)}
+              disabled={toggling || !isAdmin}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               className="w-full rounded-md px-3 py-2 text-[10px] font-bold tracking-[0.12em] uppercase text-center transition-all"
-              style={
-                isHalted
+              style={{
+                cursor: !isAdmin ? 'default' : 'pointer',
+                opacity: !isAdmin ? 0.6 : 1,
+                ...(isHalted
                   ? { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)' }
                   : isAutonomous
                   ? { background: 'var(--accent-muted)', color: 'var(--accent)', border: '1px solid var(--accent-ring)' }
-                  : { background: 'transparent', color: 'var(--text-2)', border: '1px solid var(--border)' }
-              }
+                  : { background: 'transparent', color: 'var(--text-2)', border: '1px solid var(--border)' }),
+              }}
             >
               {modeLabel}
             </button>
@@ -293,7 +299,35 @@ export default function Sidebar() {
                 <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>settings</span>
               </a>
             )}
+
+            {/* Logout */}
+            <button
+              onClick={() => { logout(); navigate('/login'); }}
+              className="p-1.5 rounded-md transition-all flex-shrink-0"
+              style={{ color: 'var(--text-2)' }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--red)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--text-2)'}
+              title="Logout"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>logout</span>
+            </button>
           </div>
+
+          {/* Role badge */}
+          {!collapsed && (
+            <div className="text-center">
+              <span
+                className="text-[9px] font-bold tracking-[0.15em] uppercase px-2 py-0.5 rounded"
+                style={
+                  role === 'admin'
+                    ? { background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-border)' }
+                    : { background: 'var(--surface-2)', color: 'var(--text-3)', border: '1px solid var(--border)' }
+                }
+              >
+                {role === 'admin' ? 'Admin' : 'Guest'}
+              </span>
+            </div>
+          )}
         </div>
       </aside>
 

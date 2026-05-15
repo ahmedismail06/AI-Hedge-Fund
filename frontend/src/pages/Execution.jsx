@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { cancelOrder, getFills, getExecutionStatus, getOrders, runExecutionCycle } from '../api/execution';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { BarChart, Bar, ReferenceLine, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
@@ -110,6 +111,7 @@ function orderSide(o) {
 
 /* ─── Component ──────────────────────────────────────────────────── */
 export default function Execution() {
+  const { isAdmin } = useAuth();
   const [orders, setOrders] = useState([]);
   const [fills, setFills] = useState([]);
   const [execStatus, setExecStatus] = useState(null);
@@ -237,8 +239,9 @@ export default function Execution() {
           <span className="text-xs" style={{ color: 'var(--text-3)' }}>Auto-refreshing every 10s</span>
           <button
             onClick={handleRunCycle}
-            disabled={running}
-            className="px-4 py-2 text-sm font-bold rounded-lg disabled:opacity-50 transition-opacity hover:opacity-80"
+            disabled={running || !isAdmin}
+            title={!isAdmin ? 'Guest mode — read only' : undefined}
+            className="px-4 py-2 text-sm font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-opacity hover:opacity-80"
             style={{ background: 'var(--accent)', color: '#000', fontFamily: 'Syne' }}
           >
             {running ? 'Running…' : 'Run Cycle'}
@@ -413,7 +416,9 @@ export default function Execution() {
                     {['SUBMITTED', 'PARTIAL', 'PENDING'].includes(o.status) ? (
                       <button
                         onClick={() => setConfirm({ id: o.id, ticker: o.ticker })}
-                        className="text-xs px-3 py-1.5 rounded-lg font-medium transition-opacity hover:opacity-80"
+                        disabled={!isAdmin}
+                        title={!isAdmin ? 'Guest mode — read only' : undefined}
+                        className="text-xs px-3 py-1.5 rounded-lg font-medium transition-opacity hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{ color: 'var(--red)', background: 'var(--red-bg)', border: '1px solid var(--red-border)' }}
                       >
                         Cancel

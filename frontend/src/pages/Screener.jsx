@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getWatchlist, runScreener } from '../api/screener';
 import { triggerResearch } from '../api/research';
 import SectorFilterTabs from '../components/SectorFilterTabs';
@@ -48,6 +49,7 @@ function scoreColor(v) {
 }
 
 export default function Screener() {
+  const { isAdmin } = useAuth();
   const [watchlist, setWatchlist] = useState([]);
   const [lastRun, setLastRun] = useState(null);
   const [running, setRunning] = useState(false);
@@ -113,12 +115,13 @@ export default function Screener() {
         </div>
         <button
           onClick={handleRun}
-          disabled={running}
+          disabled={running || !isAdmin}
+          title={!isAdmin ? 'Guest mode — read only' : undefined}
           style={{
             background: 'var(--accent)',
             color: '#000',
             fontFamily: 'Syne',
-            opacity: running ? 0.7 : 1,
+            opacity: running || !isAdmin ? 0.7 : 1,
           }}
           className="px-4 py-2 text-sm font-medium rounded-lg disabled:cursor-not-allowed transition-colors flex items-center gap-2"
         >
@@ -315,7 +318,8 @@ export default function Screener() {
                         ) : item.beneish_flag !== 'EXCLUDED' ? (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleQueue(item.ticker); }}
-                            disabled={queuedTickers.has(item.ticker)}
+                            disabled={queuedTickers.has(item.ticker) || !isAdmin}
+                            title={!isAdmin ? 'Guest mode — read only' : undefined}
                             className="text-xs px-3 py-1.5 rounded-lg transition-colors font-medium"
                             style={
                               queuedTickers.has(item.ticker)
@@ -325,6 +329,15 @@ export default function Screener() {
                                     cursor: 'default',
                                     border: '1px solid var(--border)',
                                     fontFamily: 'Syne',
+                                  }
+                                : !isAdmin
+                                ? {
+                                    background: 'var(--surface-2)',
+                                    color: 'var(--text-3)',
+                                    cursor: 'not-allowed',
+                                    border: '1px solid var(--border)',
+                                    fontFamily: 'Syne',
+                                    opacity: 0.4,
                                   }
                                 : {
                                     background: 'var(--accent-muted)',

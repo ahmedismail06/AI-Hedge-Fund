@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getPMStatus, getPMDecisions, overrideDecision, haltPM, resumePM, runPMCycle } from '../api/pm';
 import ConfirmDialog from '../components/ConfirmDialog';
 
@@ -235,6 +236,7 @@ function DeferModal({ target, onConfirm, onCancel }) {
 }
 
 export default function Orchestrator() {
+  const { isAdmin } = useAuth();
   const [decisions, setDecisions] = useState([]);
   const [status, setStatus] = useState(null);
   const [running, setRunning] = useState(false);
@@ -392,8 +394,9 @@ export default function Orchestrator() {
         <div className="flex items-center gap-3 flex-wrap">
           {isHalted ? (
             <button
-              onClick={() => !actionPending && setShowResumeConfirm(true)}
-              disabled={actionPending}
+              onClick={() => isAdmin && !actionPending && setShowResumeConfirm(true)}
+              disabled={actionPending || !isAdmin}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               style={{
                 padding: '8px 16px',
                 fontSize: '11px',
@@ -403,18 +406,19 @@ export default function Orchestrator() {
                 background: 'var(--amber-bg)',
                 border: '1px solid var(--amber-border)',
                 color: 'var(--amber)',
-                cursor: actionPending ? 'not-allowed' : 'pointer',
+                cursor: actionPending || !isAdmin ? 'not-allowed' : 'pointer',
                 fontFamily: 'Syne',
                 transition: 'all 0.15s',
-                opacity: actionPending ? 0.6 : 1,
+                opacity: actionPending || !isAdmin ? 0.6 : 1,
               }}
             >
               HALTED — RESUME
             </button>
           ) : (
             <button
-              onClick={() => !actionPending && setShowHaltConfirm(true)}
-              disabled={actionPending}
+              onClick={() => isAdmin && !actionPending && setShowHaltConfirm(true)}
+              disabled={actionPending || !isAdmin}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               style={{
                 padding: '8px 16px',
                 fontSize: '11px',
@@ -424,12 +428,13 @@ export default function Orchestrator() {
                 background: 'var(--surface)',
                 border: '1px solid var(--border)',
                 color: 'var(--text-2)',
-                cursor: actionPending ? 'not-allowed' : 'pointer',
+                cursor: actionPending || !isAdmin ? 'not-allowed' : 'pointer',
                 fontFamily: 'Syne',
                 transition: 'all 0.15s',
-                opacity: actionPending ? 0.6 : 1,
+                opacity: actionPending || !isAdmin ? 0.6 : 1,
               }}
               onMouseEnter={e => {
+                if (!isAdmin) return;
                 e.currentTarget.style.background = 'var(--red-bg)';
                 e.currentTarget.style.borderColor = 'var(--red-border)';
                 e.currentTarget.style.color = 'var(--red)';
@@ -462,7 +467,8 @@ export default function Orchestrator() {
           </span>
           <button
             onClick={handleRunCycle}
-            disabled={running}
+            disabled={running || !isAdmin}
+            title={!isAdmin ? 'Guest mode — read only' : undefined}
             style={{
               padding: '8px 16px',
               fontSize: '13px',
@@ -471,9 +477,9 @@ export default function Orchestrator() {
               background: 'var(--accent)',
               color: '#000',
               border: 'none',
-              cursor: running ? 'not-allowed' : 'pointer',
+              cursor: running || !isAdmin ? 'not-allowed' : 'pointer',
               fontFamily: 'Syne',
-              opacity: running ? 0.5 : 1,
+              opacity: running || !isAdmin ? 0.5 : 1,
               transition: 'opacity 0.15s',
             }}
           >
@@ -778,8 +784,8 @@ export default function Orchestrator() {
                         </p>
                       </div>
                     )}
-                    {/* Override buttons */}
-                    {!d.human_override && d.execution_status === 'SENT_TO_EXECUTION' && (
+                    {/* Override buttons — admin only */}
+                    {isAdmin && !d.human_override && d.execution_status === 'SENT_TO_EXECUTION' && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'BLOCK' })}
@@ -801,7 +807,7 @@ export default function Orchestrator() {
                         </button>
                       </div>
                     )}
-                    {!d.human_override && d.execution_status === 'PENDING_HUMAN' && (
+                    {isAdmin && !d.human_override && d.execution_status === 'PENDING_HUMAN' && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}
@@ -859,7 +865,7 @@ export default function Orchestrator() {
                         </button>
                       </div>
                     )}
-                    {!d.human_override && d.execution_status === 'DEFERRED' && (
+                    {isAdmin && !d.human_override && d.execution_status === 'DEFERRED' && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         <button
                           onClick={() => setOverrideTarget({ decision_id: d.decision_id, action: 'FORCE_EXECUTE' })}

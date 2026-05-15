@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { getPositions, getPending, approveTrade, rejectTrade, getEquityCurve } from '../api/portfolio';
 import { getAlerts, getCriticalAlerts, getMetrics } from '../api/risk';
 import { getRegime, getBriefing } from '../api/macro';
@@ -207,6 +208,7 @@ function EmptyState({ icon, label, sub, onClick, iconColor }) {
 /* ══════════════════════════════════════════════════════════════════ */
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
   const [positions,   setPositions]   = useState([]);
   const [pending,     setPending]     = useState([]);
   const [alerts,      setAlerts]      = useState([]);
@@ -639,7 +641,9 @@ export default function Dashboard() {
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => setConfirm({ action: 'approve', id: item.id, ticker: item.ticker })}
-                        className="py-2 text-[11px] font-bold rounded-lg transition-opacity hover:opacity-85"
+                        disabled={!isAdmin}
+                        title={!isAdmin ? 'Guest mode — read only' : undefined}
+                        className="py-2 text-[11px] font-bold rounded-lg transition-opacity hover:opacity-85 disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{
                           background: 'var(--green-bg)',
                           border:     '1px solid var(--green-border)',
@@ -651,9 +655,11 @@ export default function Dashboard() {
                       </button>
                       <button
                         onClick={() => setConfirm({ action: 'reject', id: item.id, ticker: item.ticker })}
-                        className="py-2 text-[11px] font-bold rounded-lg transition-all"
+                        disabled={!isAdmin}
+                        title={!isAdmin ? 'Guest mode — read only' : undefined}
+                        className="py-2 text-[11px] font-bold rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)', fontFamily: 'Syne' }}
-                        onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--red-border)'; e.currentTarget.style.color = 'var(--red)'; }}
+                        onMouseEnter={e => { if (isAdmin) { e.currentTarget.style.borderColor = 'var(--red-border)'; e.currentTarget.style.color = 'var(--red)'; } }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-2)'; }}
                       >
                         Reject

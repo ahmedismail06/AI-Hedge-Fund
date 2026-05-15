@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getAlerts, getCriticalAlerts, resolveAlert, getMetrics, getMetricsHistory, runRiskMonitor, runNightlyMetrics } from '../api/risk';
 import { getRegime } from '../api/macro';
 import RiskAlert from '../components/RiskAlert';
@@ -75,6 +76,7 @@ function MetricCard({ label, plainLabel, value, status }) {
 }
 
 export default function Risk() {
+  const { isAdmin } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [criticals, setCriticals] = useState([]);
   const [metrics, setMetrics] = useState(null);
@@ -217,7 +219,8 @@ export default function Risk() {
             </label>
             <button
               onClick={handleRunMonitor}
-              disabled={runningMonitor}
+              disabled={runningMonitor || !isAdmin}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               style={{
                 padding: '6px 12px',
                 fontSize: '13px',
@@ -227,8 +230,8 @@ export default function Risk() {
                 color: '#000',
                 border: 'none',
                 borderRadius: '8px',
-                cursor: runningMonitor ? 'not-allowed' : 'pointer',
-                opacity: runningMonitor ? 0.5 : 1,
+                cursor: runningMonitor || !isAdmin ? 'not-allowed' : 'pointer',
+                opacity: runningMonitor || !isAdmin ? 0.5 : 1,
                 transition: 'opacity 0.15s',
               }}
             >
@@ -236,7 +239,8 @@ export default function Risk() {
             </button>
             <button
               onClick={handleRunMetrics}
-              disabled={runningMetrics}
+              disabled={runningMetrics || !isAdmin}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               style={{
                 padding: '6px 12px',
                 fontSize: '13px',
@@ -246,8 +250,8 @@ export default function Risk() {
                 color: 'var(--text-2)',
                 border: '1px solid var(--border)',
                 borderRadius: '8px',
-                cursor: runningMetrics ? 'not-allowed' : 'pointer',
-                opacity: runningMetrics ? 0.5 : 1,
+                cursor: runningMetrics || !isAdmin ? 'not-allowed' : 'pointer',
+                opacity: runningMetrics || !isAdmin ? 0.5 : 1,
                 transition: 'opacity 0.15s',
               }}
             >
@@ -261,7 +265,7 @@ export default function Risk() {
         ) : (
           <div className="space-y-2">
             {visibleAlerts.map(a => (
-              <RiskAlert key={a.id} alert={a} onResolve={handleResolve} />
+              <RiskAlert key={a.id} alert={a} onResolve={isAdmin ? handleResolve : undefined} />
             ))}
           </div>
         )}

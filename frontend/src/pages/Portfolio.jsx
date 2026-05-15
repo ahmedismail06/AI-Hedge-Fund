@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getPositions, getPending, getExposure, getHistory, approveTrade, rejectTrade } from '../api/portfolio';
 import { getRegime } from '../api/macro';
 import ExposureBar, { REGIME_CAPS } from '../components/ExposureBar';
@@ -67,7 +68,7 @@ function ConvictionBadge({ score }) {
   );
 }
 
-function PendingCard({ item, regime, onApprove, onReject }) {
+function PendingCard({ item, regime, onApprove, onReject, isAdmin }) {
   const isRiskOff = regime && (regime.regime === 'Risk-Off' || regime.regime === 'Stagflation');
   const tiers = isRiskOff ? STOP_TIERS.riskOff : STOP_TIERS.normal;
 
@@ -95,6 +96,8 @@ function PendingCard({ item, regime, onApprove, onReject }) {
         <div className="flex gap-2 flex-shrink-0">
           <button
             onClick={() => onApprove(item.id)}
+            disabled={!isAdmin}
+            title={!isAdmin ? 'Guest mode — read only' : undefined}
             style={{
               padding: '6px 16px',
               fontSize: '13px',
@@ -104,13 +107,16 @@ function PendingCard({ item, regime, onApprove, onReject }) {
               color: 'var(--green)',
               border: '1px solid var(--green-border)',
               borderRadius: '8px',
-              cursor: 'pointer',
+              cursor: !isAdmin ? 'not-allowed' : 'pointer',
+              opacity: !isAdmin ? 0.4 : 1,
             }}
           >
             Approve
           </button>
           <button
             onClick={() => onReject(item.id)}
+            disabled={!isAdmin}
+            title={!isAdmin ? 'Guest mode — read only' : undefined}
             style={{
               padding: '6px 16px',
               fontSize: '13px',
@@ -120,9 +126,11 @@ function PendingCard({ item, regime, onApprove, onReject }) {
               color: 'var(--text-2)',
               border: '1px solid var(--border)',
               borderRadius: '8px',
-              cursor: 'pointer',
+              cursor: !isAdmin ? 'not-allowed' : 'pointer',
+              opacity: !isAdmin ? 0.4 : 1,
             }}
             onMouseEnter={e => {
+              if (!isAdmin) return;
               e.currentTarget.style.background = 'var(--red-bg)';
               e.currentTarget.style.color = 'var(--red)';
               e.currentTarget.style.borderColor = 'var(--red-border)';
@@ -174,6 +182,7 @@ function PendingCard({ item, regime, onApprove, onReject }) {
 }
 
 export default function Portfolio() {
+  const { isAdmin } = useAuth();
   const [tab, setTab] = useState('active');
   const [pending, setPending] = useState([]);
   const [positions, setPositions] = useState([]);
@@ -339,6 +348,7 @@ export default function Portfolio() {
                   key={item.id}
                   item={item}
                   regime={regime}
+                  isAdmin={isAdmin}
                   onApprove={(id) => setConfirm({ action: 'approve', id, ticker: item.ticker })}
                   onReject={(id) => setConfirm({ action: 'reject', id, ticker: item.ticker })}
                 />

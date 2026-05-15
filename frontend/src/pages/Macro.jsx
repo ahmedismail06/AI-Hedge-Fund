@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { getBriefing, getRegime, getMacroHistory, getIndicators, runMacroAgent } from '../api/macro';
 import { LineChart, Line, Tooltip as RTooltip, ResponsiveContainer } from 'recharts';
 
@@ -115,6 +116,7 @@ const SUB_SCORE_META = {
 
 /* ─── Component ──────────────────────────────────────────────────── */
 export default function Macro() {
+  const { isAdmin } = useAuth();
   const [regime, setRegime] = useState(null);
   const [briefing, setBriefing] = useState(null);
   const [history, setHistory] = useState([]);
@@ -204,8 +206,9 @@ export default function Macro() {
               </button>
               <button
                 onClick={handleRun}
-                disabled={running}
-                className="px-3 py-1.5 text-xs font-bold rounded-lg transition-opacity hover:opacity-80 disabled:opacity-50"
+                disabled={running || !isAdmin}
+                title={!isAdmin ? 'Guest mode — read only' : undefined}
+                className="px-3 py-1.5 text-xs font-bold rounded-lg transition-opacity hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ background: 'var(--accent)', color: '#000', fontFamily: 'Syne' }}
               >
                 {running ? 'Running…' : 'Run Macro Agent'}

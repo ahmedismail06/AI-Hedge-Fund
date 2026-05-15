@@ -3,6 +3,7 @@
 // Below: scrollable history list of past memos
 
 import { useState, useEffect, useRef } from 'react';
+import { useAuth } from '../context/AuthContext';
 import MemoCard from '../components/MemoCard';
 import ConvictionBadge from '../components/ConvictionBadge';
 import { triggerResearch, getHistory, getLatestMemo } from '../api/research';
@@ -22,6 +23,7 @@ const VERDICT_DOT_COLOR = {
 };
 
 export default function Research() {
+  const { isAdmin } = useAuth();
   const [tickerInput, setTickerInput] = useState('');
   const [activeMemo, setActiveMemo] = useState(null);
   const [history, setHistory] = useState([]);
@@ -117,28 +119,30 @@ export default function Research() {
           type="text"
           value={tickerInput}
           onChange={e => setTickerInput(e.target.value.toUpperCase())}
-          placeholder="Enter ticker (e.g. AAPL)"
+          placeholder={isAdmin ? 'Enter ticker (e.g. AAPL)' : 'Guest mode — read only'}
           maxLength={10}
-          disabled={loading}
+          disabled={loading || !isAdmin}
           style={{
             background: 'var(--input-bg)',
             border: '1px solid var(--border)',
             color: 'var(--text)',
             fontFamily: 'JetBrains Mono',
-            opacity: loading ? 0.5 : 1,
+            opacity: loading || !isAdmin ? 0.5 : 1,
+            cursor: !isAdmin ? 'not-allowed' : 'text',
           }}
           className="flex-1 rounded-lg px-4 py-2.5 text-sm uppercase"
-          onFocus={e => { e.target.style.outline = 'none'; e.target.style.boxShadow = '0 0 0 2px var(--accent-ring)'; }}
+          onFocus={e => { if (isAdmin) { e.target.style.outline = 'none'; e.target.style.boxShadow = '0 0 0 2px var(--accent-ring)'; } }}
           onBlur={e => { e.target.style.boxShadow = 'none'; }}
         />
         <button
           type="submit"
-          disabled={loading || !tickerInput.trim()}
+          disabled={loading || !tickerInput.trim() || !isAdmin}
+          title={!isAdmin ? 'Guest mode — read only' : undefined}
           style={{
             background: 'var(--accent)',
             color: '#000',
             fontFamily: 'Syne',
-            opacity: (loading || !tickerInput.trim()) ? 0.5 : 1,
+            opacity: (loading || !tickerInput.trim() || !isAdmin) ? 0.5 : 1,
           }}
           className="rounded-lg px-5 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed"
         >
