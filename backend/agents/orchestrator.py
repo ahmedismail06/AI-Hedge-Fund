@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -1036,9 +1037,26 @@ def _call_claude(system_prompt: str, user_message: str) -> Dict[str, Any]:
 
             try:
                 return json.loads(text)
-            except json.JSONDecodeError as exc:
-                logger.error("_call_claude: JSON parse failed — %s | content: %s", exc, text[:500])
-                return {}
+            except json.JSONDecodeError:
+                pass
+
+            # Fix 1: Try to extract a JSON object embedded within prose
+            _match = re.search(r'\{.*\}', text, re.DOTALL)
+            if _match:
+                try:
+                    return json.loads(_match.group())
+                except json.JSONDecodeError:
+                    pass
+
+            # Fix 2: Claude returned prose with no JSON — send a correction turn
+            logger.warning("_call_claude: prose response on turn %d, requesting JSON retry | content: %s", turn, text[:200])
+            if turn < 7:
+                messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+                messages.append({"role": "user", "content": [{"type": "text", "text": "Output the JSON decision object only. No prose — just the raw JSON."}]})
+                continue
+
+            logger.error("_call_claude: JSON parse failed on final turn | content: %s", text[:500])
+            return {}
 
         if tool_uses:
             # Append assistant's full message (including any thinking blocks)
@@ -1915,6 +1933,7 @@ def run_pm_cycle(
             and last_ts is not None
             and _fingerprints_match(current_fp, last_fp)
             and (datetime.now(timezone.utc) - last_ts).total_seconds() < current_ttl
+            and pending_memo_count == 0
         ):
             logger.debug(
                 "PM cycle skipped — state unchanged (position=%d pending=%d alerts=%d regime=%s) within %d sec",
