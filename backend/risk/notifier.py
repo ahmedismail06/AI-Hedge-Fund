@@ -12,6 +12,7 @@ Slack delivery is handled by backend.notifications.events.notify_event().
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -27,6 +28,14 @@ _ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
 _PUSH_SEVERITIES = {"BREACH", "CRITICAL"}
 
+# Minimum seconds between DB writes for the same alert key (ticker:tier).
+# CRITICAL bypasses this entirely — always written.
+_COOLDOWN_WARN = 4 * 3600    # 4 hours
+_COOLDOWN_BREACH = 1 * 3600  # 1 hour
+
+# In-memory cooldown tracker: {alert_key: last_written_timestamp}
+_last_written: dict[str, float] = {}
+
 
 def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
     """
@@ -39,25 +48,54 @@ def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
     if not alerts:
         return
 
-    # ── 1. Upsert every alert to risk_alerts table ────────────────────────────
-    rows = [_alert_to_row(a) for a in alerts]
+    # ── 1. Deduplicate: skip alerts already written within the cooldown window ─
+    # CRITICAL bypasses cooldown — always written immediately.
+    # BREACH: 1-hour cooldown. WARN: 4-hour cooldown.
+    now = time.monotonic()
+    alerts_to_write: list[RiskAlert] = []
+    for a in alerts:
+        sev = _severity(a)
+        if sev == "CRITICAL":
+            alerts_to_write.append(a)
+            continue
+        key = f"{a.ticker or 'portfolio'}:{a.tier}"
+        cooldown = _COOLDOWN_BREACH if sev == "BREACH" else _COOLDOWN_WARN
+        last = _last_written.get(key, 0.0)
+        if now - last < cooldown:
+            logger.debug(
+                "alert suppressed (cooldown) — %s tier=%d severity=%s (%.0fs remaining)",
+                a.ticker or "portfolio", a.tier, sev, cooldown - (now - last),
+            )
+            continue
+        alerts_to_write.append(a)
+
+    if not alerts_to_write:
+        return
+
+    # ── 2. Upsert deduplicated alerts to risk_alerts table ────────────────────
+    rows = [_alert_to_row(a) for a in alerts_to_write]
     for row in rows:
         logger.info(
-            "writing alert → id=%s ticker=%s severity=%s tier=%d trigger=%r",
-            row["id"], row.get("ticker", "portfolio"), row["severity"], row["tier"], row["trigger"],
+            "writing alert → ticker=%s severity=%s tier=%d trigger=%r",
+            row.get("ticker") or "portfolio", row["severity"], row["tier"], row["trigger"],
         )
     try:
         db_resp = supabase_client.table("risk_alerts").upsert(rows, on_conflict="id").execute()
         logger.info(
-            "Supabase upsert OK — %d alert(s) written, rows_returned=%d",
-            len(rows), len(db_resp.data or []),
+            "Supabase upsert OK — %d alert(s) written",
+            len(rows),
         )
+        # Record write timestamps for deduplication
+        written_now = time.monotonic()
+        for a in alerts_to_write:
+            key = f"{a.ticker or 'portfolio'}:{a.tier}"
+            _last_written[key] = written_now
     except Exception as exc:
         logger.error("Supabase upsert FAILED for risk_alerts: %s", exc, exc_info=True)
         raise
 
-    # ── 2. Push BREACH / CRITICAL to Slack ────────────────────────────────────
-    push_alerts = [a for a in alerts if _severity(a) in _PUSH_SEVERITIES]
+    # ── 3. Push BREACH / CRITICAL to Slack ────────────────────────────────────
+    push_alerts = [a for a in alerts_to_write if _severity(a) in _PUSH_SEVERITIES]
     for a in push_alerts:
         sev = _severity(a)
         event_type = "RISK_CRITICAL" if sev == "CRITICAL" else "RISK_BREACH"
@@ -67,10 +105,10 @@ def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
             "regime": a.regime,
         })
 
-    # ── 3. Reactive PM cycle for CRITICAL alerts ──────────────────────────────
+    # ── 4. Reactive PM cycle for CRITICAL alerts ──────────────────────────────
     # Trigger an immediate PM decision cycle so CRISIS decisions aren't delayed
     # by up to 5 minutes waiting for the next scheduled poll.
-    critical_alerts = [a for a in alerts if _severity(a) == "CRITICAL"]
+    critical_alerts = [a for a in alerts_to_write if _severity(a) == "CRITICAL"]
     for a in critical_alerts:
         alert_id = str(a.alert_id) if hasattr(a, "alert_id") else None
         if not alert_id:
@@ -100,7 +138,7 @@ def dispatch_alerts(alerts: list[RiskAlert], supabase_client) -> None:
                 exc,
             )
 
-    # ── 3. Email stub ─────────────────────────────────────────────────────────
+    # ── 5. Email stub ─────────────────────────────────────────────────────────
     if _ALERT_EMAIL:
         logger.warning(
             "ALERT_EMAIL is set (%s) but SMTP is not yet implemented — "

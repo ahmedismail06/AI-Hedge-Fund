@@ -19,7 +19,6 @@ Each cycle:
 
 import logging
 import os
-import uuid
 from datetime import datetime, time, timezone
 
 import pytz
@@ -43,31 +42,17 @@ _MARKET_WEEKDAYS = {0, 1, 2, 3, 4}  # Mon–Fri
 
 def write_heartbeat(supabase_client) -> bool:
     """
-    Write a SYSTEM heartbeat row to risk_alerts to confirm table connectivity.
-    Call once at startup (from risk_agent.py lifespan or first cycle).
-    Returns True if write succeeded, False otherwise.
+    Confirm Supabase connectivity by performing a lightweight read on risk_alerts.
+    Logs success/failure without writing a row (avoids polluting the alerts table).
+    Returns True if the table is reachable, False otherwise.
     """
-    row = {
-        "id": str(uuid.uuid4()),
-        "ticker": None,
-        "tier": 1,
-        "severity": "WARN",
-        "trigger": "SYSTEM heartbeat — risk monitor started, Supabase connectivity confirmed",
-        "regime": "SYSTEM",
-        "resolved": True,
-        "resolved_at": datetime.now(timezone.utc).isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
     try:
-        resp = supabase_client.table("risk_alerts").insert(row).execute()
-        logger.info(
-            "risk_alerts heartbeat written OK (id=%s, rows_returned=%d)",
-            row["id"], len(resp.data or []),
-        )
+        supabase_client.table("risk_alerts").select("id").limit(1).execute()
+        logger.info("risk_alerts connectivity confirmed — risk monitor started")
         return True
     except Exception as exc:
         logger.error(
-            "risk_alerts heartbeat FAILED — Supabase write error: %s "
+            "risk_alerts connectivity check FAILED: %s "
             "(check SUPABASE_URL/SUPABASE_KEY and that risk_alerts table exists)",
             exc, exc_info=True,
         )
@@ -203,7 +188,7 @@ def _fetch_prices_ibkr(tickers: list[str]) -> dict[str, float]:
             symbol = item.contract.symbol if item.contract else None
             if symbol and symbol in wanted and item.marketPrice and item.marketPrice > 0:
                 result[symbol] = float(item.marketPrice)
-                logger.info("IBKR portfolio price: %s = $%.4f", symbol, item.marketPrice)
+                logger.debug("IBKR portfolio price: %s = $%.4f", symbol, item.marketPrice)
         return result
     except Exception as exc:
         logger.warning("IBKR portfolio price read failed: %s", exc)
@@ -241,7 +226,7 @@ def _fetch_prices_polygon(tickers: list[str]) -> dict[str, float]:
         price = last_trade or day_close
         if ticker and price:
             price_map[ticker] = float(price)
-            logger.info(
+            logger.debug(
                 "Polygon price: %s = $%.4f (source=%s)",
                 ticker, float(price), "lastTrade" if last_trade else "day.close",
             )
@@ -312,7 +297,7 @@ def _refresh_prices(
                 ep = float(entry_price)
                 pnl = (live_price - ep) / ep if ep else 0.0
                 pos["pnl_pct"] = pnl
-                logger.info(
+                logger.debug(
                     "pnl: %s entry=$%.4f live=$%.4f pnl_pct=%.2f%%",
                     ticker, ep, live_price, pnl * 100,
                 )

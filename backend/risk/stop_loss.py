@@ -97,7 +97,7 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
         drift_held = _drift_hold_active(pos)
         t1_thresh = _tier1_threshold(regime, drift_hold_active=drift_held)
 
-        logger.info(
+        logger.debug(
             "stop_check %s: pnl_pct=%.2f%% current=$%.4f entry=$%.4f stop=$%.4f "
             "tier1_thresh=%.1f%% drift_hold=%s",
             ticker,
