@@ -4,6 +4,7 @@ import { useState } from 'react';
 import ConvictionBadge from './ConvictionBadge';
 import ThesisBlock from './ThesisBlock';
 import { updateMemoStatus } from '../api/research';
+import { useAuth } from '../context/AuthContext';
 
 const VERDICT_COLORS = {
   LONG: 'bg-green-50 text-green-800 border-green-200',
@@ -21,6 +22,7 @@ function FinancialHealthRow({ label, value }) {
 }
 
 export default function MemoCard({ memo, onStatusChange }) {
+  const { isAdmin } = useAuth();
   const [status, setStatus] = useState(memo?.status ?? 'PENDING');
   const [loading, setLoading] = useState(null); // 'APPROVED' | 'REJECTED' | 'WATCHLIST'
 
@@ -142,21 +144,24 @@ export default function MemoCard({ memo, onStatusChange }) {
         ) : (
           <>
             <button
-              disabled={!memoId || !!loading || status === 'APPROVED'}
+              disabled={!isAdmin || !memoId || !!loading || status === 'APPROVED'}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               onClick={() => handleAction('APPROVED')}
               className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {loading === 'APPROVED' ? 'Approving…' : 'Approve'}
             </button>
             <button
-              disabled={!memoId || !!loading || status === 'REJECTED'}
+              disabled={!isAdmin || !memoId || !!loading || status === 'REJECTED'}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               onClick={() => handleAction('REJECTED')}
               className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {loading === 'REJECTED' ? 'Rejecting…' : 'Reject'}
             </button>
             <button
-              disabled={!memoId || !!loading || status === 'WATCHLIST'}
+              disabled={!isAdmin || !memoId || !!loading || status === 'WATCHLIST'}
+              title={!isAdmin ? 'Guest mode — read only' : undefined}
               onClick={() => handleAction('WATCHLIST')}
               className="rounded-md bg-yellow-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-yellow-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
