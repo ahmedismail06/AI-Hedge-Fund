@@ -10,7 +10,7 @@ Criteria:
              Kept sectors: SaaS, Healthcare (non-pharma), Industrials, Consumer,
              Real Estate (operating cos), Other.
   - ADV ≥ $500K (30-day Polygon OHLCV)
-  - Analyst count ≤ 5 (Financial Modeling Prep)
+  - Analyst count ≤ 10 (Financial Modeling Prep)
 
 Also provides fetch_ticker_data() — single coordinated fetch per ticker
 returning all data needed by factor scorers. Called once per ticker;
@@ -378,7 +378,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
         cand.analyst_count = count
         time.sleep(0.5)  # Proactive pacing to protect FMP 300 req/min
         
-        if count is not None and count > 8:
+        if count is not None and count > 10:
             return None
         return cand
 
@@ -391,7 +391,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
             if result is not None:
                 final.append(result)
 
-    logger.info("Final universe after analyst ≤ 8 filter: %d candidates", len(final))
+    logger.info("Final universe after analyst ≤ 10 filter: %d candidates", len(final))
 
     if final:
         _save_universe_cache(final)
@@ -493,8 +493,10 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
             if r1 is not None and r2 and r2 != 0:
                 rev_growth = (r1 - r2) / abs(r2)
 
-        # 1. Broken unit economics — sub-15% gross margin is irreparable at the product level
-        if gm is not None and gm < 0.15:
+        # 1. Broken unit economics — catches businesses literally selling below cost.
+        #    3% floor is deliberately low to pass legitimate low-margin models (distribution,
+        #    trucking, contract services) while still excluding negative-GM names.
+        if gm is not None and gm < 0.03:
             exclusions["BROKEN_UNIT_ECONOMICS"] += 1
             logger.info("%s: Excluded — BROKEN_UNIT_ECONOMICS (gm=%.3f)", ticker, gm)
             continue
