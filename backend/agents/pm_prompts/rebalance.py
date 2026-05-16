@@ -61,9 +61,13 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
 
 confidence_breakdown dimensions (each 0.0–1.0):
 - data_quality: how reliable is the exposure and macro data driving this assessment
-- thesis_quality: how clearly does the portfolio state deviate from regime guidance
-- timing: how well-timed is this rebalancing relative to market conditions
-- portfolio_fit: how appropriate is the target exposure given the current opportunity set
+- thesis_quality: how clearly does the portfolio state deviate from regime guidance — large, unambiguous deviation scores high; marginal or ambiguous deviation scores low
+- timing: analytical confidence in the rebalancing timing — consider regime clarity (confidence score), current stress signals, whether exposure drift is accelerating or stabilising, and proximity of known catalysts (earnings, macro events) that could shift the regime. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the rebalancing rationale itself).
+- portfolio_fit: how appropriate is the target exposure given the current opportunity set and regime tilt
+
+Set the overall `confidence` as a weighted average of the breakdown:
+  confidence = (thesis_quality × 0.35) + (data_quality × 0.30) + (timing × 0.20) + (portfolio_fit × 0.15)
+Round to 2 decimal places.
 
 For REBALANCE: adjustments is a list of {"ticker": str, "action": "TRIM|ADD", "pct_change": float, "reason": str}
 For RAISE_CASH: adjustments lists positions to close with reason

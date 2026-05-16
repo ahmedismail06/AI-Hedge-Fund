@@ -27,15 +27,21 @@ def test_empty_dict_returns_empty_dict():
     assert _normalize_universe({}) == {}
 
 
-def test_all_none_returns_neutral_for_all():
+def test_all_none_returns_none_for_all():
     result = _normalize_universe({"A": None, "B": None, "C": None})
-    assert result == {"A": 5.0, "B": 5.0, "C": 5.0}
+    assert result == {"A": None, "B": None, "C": None}
 
 
 def test_single_valid_value_returns_neutral_for_all():
-    """Only one non-None value → len(valid)=1 < 2 → all 5.0."""
+    """Only one non-None value → len(valid)=1 < 2 → all data get 5.0, missing stays None."""
     result = _normalize_universe({"A": 42.0, "B": None})
-    assert result == {"A": 5.0, "B": 5.0}
+    assert result == {"A": 5.0, "B": None}
+
+
+def test_single_ticker_sector_cohort_returns_neutral():
+    """Explicitly verify that a cohort with only one ticker returns 5.0."""
+    result = _normalize_universe({"ONLY_ONE": 123.45})
+    assert result == {"ONLY_ONE": 5.0}
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +108,9 @@ def test_tied_values_average_rank_is_correct():
 # None values get neutral amid ranked peers
 # ---------------------------------------------------------------------------
 
-def test_none_values_get_neutral_amid_ranked_peers():
+def test_none_values_stay_none_amid_ranked_peers():
     result = _normalize_universe({"HIGH": 100.0, "LOW": 0.0, "MISSING": None})
-    assert result["MISSING"] == 5.0
+    assert result["MISSING"] is None
     assert result["HIGH"] == 10.0
     assert result["LOW"] == 0.0
 

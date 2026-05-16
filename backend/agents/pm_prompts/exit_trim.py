@@ -61,9 +61,17 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
 
 confidence_breakdown dimensions (each 0.0–1.0):
 - data_quality: how complete is the position data, alerts, and original memo context
-- thesis_quality: how clearly intact or broken is the original variant perception
-- timing: how well-timed is the hold/trim/close/add decision given current price action
+- thesis_quality: how clearly intact or broken is the original variant perception. Use these anchors:
+  0.0–0.25 = thesis definitively broken (catalyst failed, fundamental assumption contradicted)
+  0.25–0.50 = unresolved binary — thesis is alive but outcome is a coin flip on a single upcoming event with no intermediate signals
+  0.50–0.75 = thesis intact and progressing — evidence accumulating toward the catalyst, intermediate signals supportive
+  0.75–1.00 = thesis confirmed and ahead of expectations — catalyst materialising or repricing clearly underway
+- timing: analytical/strategic timing quality of this decision — consider price action vs. recent range, stop proximity, days to next catalyst, and whether the stock is trending or mean-reverting. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the analytical decision itself).
 - portfolio_fit: how well does this decision fit the current portfolio exposure and regime
+
+Set the overall `confidence` as a weighted average of the breakdown:
+  confidence = (thesis_quality × 0.40) + (data_quality × 0.25) + (timing × 0.20) + (portfolio_fit × 0.15)
+Round to 2 decimal places.
 """
 
 

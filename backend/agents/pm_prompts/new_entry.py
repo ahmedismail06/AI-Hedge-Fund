@@ -84,9 +84,17 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
 
 confidence_breakdown dimensions (each 0.0–1.0):
 - data_quality: how complete and fresh is the research memo (recent filings, transcript, news)
-- thesis_quality: how compelling is the variant perception and repricing catalyst
-- timing: how well-timed is the entry (technical setup, macro, earnings proximity)
+- thesis_quality: how compelling is the variant perception and repricing catalyst. Use these anchors:
+  0.0–0.25 = weak or generic thesis, no clear variant perception
+  0.25–0.50 = thesis present but binary / high uncertainty on a single event
+  0.50–0.75 = differentiated variant perception with identifiable catalyst and supporting evidence
+  0.75–1.00 = strong variant perception, catalyst imminent or already partially confirming
+- timing: analytical/strategic entry timing quality — consider technical setup, earnings proximity, macro regime clarity, and whether the catalyst window is open. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the entry rationale itself).
 - portfolio_fit: how well does this position fit current exposure, regime, and concentration limits
+
+Set the overall `confidence` as a weighted average of the breakdown:
+  confidence = (thesis_quality × 0.40) + (data_quality × 0.25) + (timing × 0.20) + (portfolio_fit × 0.15)
+Round to 2 decimal places.
 
 For DEFER: populate defer_until (ISO date YYYY-MM-DD or integer days) and defer_condition (what you're waiting for).
 For REJECT: populate reject_reason with the specific thesis failure.

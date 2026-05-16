@@ -481,11 +481,8 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
         len(filtered),
         {r: c for r, c in exclusions.items() if c > 0},
     )
-    # Diagnostic: first 5 remaining tickers with their ROE values
-    sample = [
-        f"{c.ticker}(ROE={'%.3f' % roe_map[c.ticker] if roe_map.get(c.ticker) is not None else 'None'})"
-        for c in filtered[:5]
-    ]
+    # Diagnostic: first 5 remaining tickers
+    sample = [c.ticker for c in filtered[:5]]
     logger.info("First 5 remaining: %s", sample)
 
     return filtered
