@@ -550,7 +550,7 @@ def _check_hard_blocks(
     """
     blocks = {
         "position_cap_ok": True,
-        "market_hours_ok": True,
+        "market_hours_ok": _is_market_hours(),
         "gross_exposure_ok": True,
         "daily_loss_ok": True,
     }
@@ -2170,20 +2170,24 @@ def run_pm_cycle(
                             execution_status = "QUEUED_FOR_OPEN"
 
                     elif category in ("EXIT_TRIM", "PRE_EARNINGS", "POSITION_UPDATE"):
-                        # Writing or CLEARING exit_action is a pure DB operation —
-                        # no market-hours dependency.
+                        # Writing or CLEARING exit_action is a pure DB operation — arm it
+                        # now so the execution agent picks it up at market open.
                         execution_status = _route_decision(
                             decision_data, record_template,
                             auto_approve=(mode == "autonomous"),
                         )
+                        if execution_status == "SENT_TO_EXECUTION":
+                            execution_status = "QUEUED_FOR_OPEN"
 
                     elif category == "REBALANCE" and final_decision in ("REBALANCE", "RAISE_CASH"):
-                        # Trimming open positions is a pure DB write — route now so the
+                        # Trimming open positions is a pure DB write — arm it now so the
                         # execution agent can act at market open.
                         execution_status = _route_decision(
                             decision_data, record_template,
                             auto_approve=(mode == "autonomous"),
                         )
+                        if execution_status == "SENT_TO_EXECUTION":
+                            execution_status = "QUEUED_FOR_OPEN"
 
                 record_template["execution_status"] = execution_status
 
