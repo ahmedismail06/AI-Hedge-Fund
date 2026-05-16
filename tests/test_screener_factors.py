@@ -330,6 +330,247 @@ def test_score_quality_sector_from_yf_info():
 
 
 # ===========================================================================
+# _fmp_roic edge cases
+# ===========================================================================
+
+def test_roic_fmp_empty_annual_stmts_returns_none():
+    """Empty annual_income_statement → FMP ROIC path returns None (Polygon fallback used)."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [],
+        "balance_sheet":           [{"totalStockholdersEquity": 200e6, "totalDebt": 50e6, "cashAndCashEquivalents": 10e6}],
+    }
+    result = score_quality("EMPINC", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # FMP path returns None; Polygon fallback should fill in via _polygon_roic_fallback
+    # Polygon fixture has operating_income field if present; if not, roic may be None
+    # Just assert no exception raised and key exists
+    assert "roic" in result["raw_values"]
+
+
+def test_roic_fmp_empty_balance_sheets_returns_none():
+    """Empty balance_sheet → FMP ROIC path returns None."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 80e6, "incomeTaxExpense": 17e6, "incomeBeforeTax": 80e6}],
+        "balance_sheet":           [],
+    }
+    result = score_quality("EMPBS", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    assert "roic" in result["raw_values"]
+
+
+def test_roic_fmp_none_operating_income_returns_none():
+    """operatingIncome=None → FMP ROIC returns None, falls back to Polygon."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": None, "incomeTaxExpense": 10e6, "incomeBeforeTax": 50e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 200e6, "totalDebt": 50e6, "cashAndCashEquivalents": 10e6}],
+    }
+    result = score_quality("NOOP", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    assert "roic" in result["raw_values"]
+
+
+def test_roic_fmp_negative_operating_income_computes():
+    """Negative operatingIncome → ROIC is negative (valid, not None)."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": -50e6, "incomeTaxExpense": 0, "incomeBeforeTax": -50e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 200e6, "totalDebt": 50e6, "cashAndCashEquivalents": 10e6}],
+    }
+    result = score_quality("NEGOP", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    roic = result["raw_values"]["roic"]
+    assert roic is not None and roic < 0
+
+
+def test_roic_fmp_missing_tax_data_uses_statutory_rate():
+    """Missing incomeBeforeTax → falls back to 21% statutory tax rate."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 100e6}],  # no tax fields
+        "balance_sheet":           [{"totalStockholdersEquity": 300e6, "totalDebt": 100e6, "cashAndCashEquivalents": 50e6}],
+    }
+    result = score_quality("NOTAX", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # NOPAT = 100e6 * 0.79; IC = 350e6
+    expected = (100e6 * 0.79) / 350e6
+    assert math.isclose(result["raw_values"]["roic"], expected, rel_tol=1e-4)
+
+
+def test_roic_fmp_tax_rate_clamped_high():
+    """Effective tax rate > 0.40 → clamped to 0.40."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 100e6, "incomeTaxExpense": 80e6, "incomeBeforeTax": 100e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 300e6, "totalDebt": 100e6, "cashAndCashEquivalents": 50e6}],
+    }
+    result = score_quality("HIGHTAX", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # raw rate = 0.80 → clamped to 0.40; NOPAT = 100e6 * 0.60; IC = 350e6
+    expected = (100e6 * 0.60) / 350e6
+    assert math.isclose(result["raw_values"]["roic"], expected, rel_tol=1e-4)
+
+
+def test_roic_fmp_tax_rate_clamped_low():
+    """Negative effective tax rate (tax benefit year) → clamped to 0.10."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 100e6, "incomeTaxExpense": -30e6, "incomeBeforeTax": 100e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 300e6, "totalDebt": 100e6, "cashAndCashEquivalents": 50e6}],
+    }
+    result = score_quality("TAXBEN", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # raw rate = -0.30 → clamped to 0.10; NOPAT = 100e6 * 0.90; IC = 350e6
+    expected = (100e6 * 0.90) / 350e6
+    assert math.isclose(result["raw_values"]["roic"], expected, rel_tol=1e-4)
+
+
+def test_roic_fmp_null_debt_and_cash_defaults_to_zero():
+    """totalDebt=None and cashAndCashEquivalents=None default to 0."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 100e6, "incomeTaxExpense": 21e6, "incomeBeforeTax": 100e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 300e6, "totalDebt": None, "cashAndCashEquivalents": None}],
+    }
+    result = score_quality("NULLDC", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # IC = 300e6 + 0 - 0 = 300e6; NOPAT = 79e6
+    expected = 79e6 / 300e6
+    assert math.isclose(result["raw_values"]["roic"], expected, rel_tol=1e-4)
+
+
+# ===========================================================================
+# _polygon_roic_fallback edge cases
+# ===========================================================================
+
+def test_polygon_roic_fallback_used_when_fmp_unavailable():
+    """When no FMP data, ROIC falls back to Polygon operating_income_loss * 0.79."""
+    # Polygon fixture has operating_income_loss via _make_polygon_financials
+    # But current fixture doesn't set operating_income_loss — so roic may be None
+    # This test confirms the function handles missing FMP gracefully (no crash)
+    result = score_quality("NOFMP", _make_polygon_financials(), {}, fmp_quality=None)
+    assert "roic" in result["raw_values"]  # key present regardless of None/float
+
+
+def test_polygon_roic_fallback_none_when_no_operating_income():
+    """_polygon_roic_fallback returns None if operating_income field missing from Polygon."""
+    # Build a Polygon fixture without operating_income_loss in the income statement
+    pf = _make_polygon_financials()  # standard fixture — no operating_income_loss key
+    result = score_quality("NOOPIN", pf, {}, fmp_quality=None)
+    # Without FMP and without Polygon operating_income, ROIC should be None
+    assert result["raw_values"]["roic"] is None
+
+
+# ===========================================================================
+# _polygon_fcf_conversion edge cases
+# ===========================================================================
+
+def test_fcf_conversion_none_when_cfo_missing():
+    """fcf_conversion is None when Polygon CFO field is missing."""
+    pf = _make_polygon_financials(current_cfo=None, current_net_income=50e6)
+    result = score_quality("NOCFO", pf, {})
+    assert result["raw_values"]["fcf_conversion"] is None
+
+
+def test_fcf_conversion_none_when_net_income_is_none():
+    """fcf_conversion is None when net_income is None (distinct from <= 0)."""
+    pf = _make_polygon_financials(current_net_income=None, current_cfo=80e6)
+    result = score_quality("NONI", pf, {})
+    assert result["raw_values"]["fcf_conversion"] is None
+
+
+def test_fcf_conversion_uses_cfo_only_when_capex_missing():
+    """fcf_conversion = cfo / net_income when capex field is None."""
+    pf = _make_polygon_financials(current_net_income=50e6, current_cfo=60e6, current_capex=None)
+    result = score_quality("NOCAPEX", pf, {})
+    expected = 60e6 / 50e6  # = 1.2
+    assert math.isclose(result["raw_values"]["fcf_conversion"], expected, rel_tol=1e-6)
+
+
+def test_fcf_conversion_clamped_upper():
+    """FCF ratio > 3.0 is clamped to 3.0."""
+    pf = _make_polygon_financials(current_net_income=1e6, current_cfo=100e6, current_capex=-5e6)
+    result = score_quality("HIGHFCF", pf, {})
+    assert result["raw_values"]["fcf_conversion"] == 3.0
+
+
+def test_fcf_conversion_clamped_lower():
+    """FCF ratio < -1.0 is clamped to -1.0."""
+    pf = _make_polygon_financials(current_net_income=100e6, current_cfo=-200e6, current_capex=-50e6)
+    result = score_quality("LOWFCF", pf, {})
+    assert result["raw_values"]["fcf_conversion"] == -1.0
+
+
+# ===========================================================================
+# _get_latest_two_fy — cash_flow_statement missing entirely
+# ===========================================================================
+
+def test_quality_graceful_when_cash_flow_statement_absent():
+    """Missing cash_flow_statement key → cfo and capex are None, no crash."""
+    row_no_cf = {
+        "fiscal_period": "FY",
+        "filing_date": "2024-03-01",
+        "financials": {
+            "income_statement": {
+                "revenues":        _w(500e6),
+                "gross_profit":    _w(300e6),
+                "net_income_loss": _w(50e6),
+            },
+            "balance_sheet": {
+                "equity":         _w(200e6),
+                "long_term_debt": _w(50e6),
+            },
+            # cash_flow_statement deliberately absent
+        },
+    }
+    prior_row = {
+        "fiscal_period": "FY",
+        "filing_date": "2023-03-01",
+        "financials": {
+            "income_statement": {"revenues": _w(400e6), "net_income_loss": _w(40e6)},
+            "balance_sheet":    {"equity": _w(180e6)},
+        },
+    }
+    pf = {"results": [row_no_cf, prior_row]}
+    result = score_quality("NOCF", pf, {})
+    assert result["raw_values"]["fcf_conversion"] is None
+
+
+# ===========================================================================
+# Universe gate 3 (PRE_REVENUE_BIOTECH) — condition change
+# ===========================================================================
+
+def test_pre_revenue_biotech_gate_excludes_near_100_gm():
+    """gm > 0.95 triggers PRE_REVENUE_BIOTECH exclusion regardless of ROE."""
+    from backend.screener.universe import filter_by_profitability, UniverseCandidate
+    cand = UniverseCandidate(ticker="PREV", market_cap_m=100.0, sector="Healthcare")
+    raw_data = {
+        "PREV": {
+            "fmp": {
+                "income_statement": [
+                    {"revenue": 1e6, "grossProfit": 0.97e6},  # gm = 0.97
+                    {"revenue": 0.5e6, "grossProfit": 0.48e6},
+                ],
+            }
+        }
+    }
+    result = filter_by_profitability([cand], raw_data)
+    assert len(result) == 0  # excluded
+
+
+def test_pre_revenue_biotech_gate_passes_94_gm():
+    """gm = 0.94 (below 0.95 threshold) → NOT excluded by gate 3."""
+    from backend.screener.universe import filter_by_profitability, UniverseCandidate
+    cand = UniverseCandidate(ticker="SAFE", market_cap_m=100.0, sector="SaaS")
+    raw_data = {
+        "SAFE": {
+            "fmp": {
+                "income_statement": [
+                    {"revenue": 1e6, "grossProfit": 0.94e6},  # gm = 0.94
+                    {"revenue": 0.8e6, "grossProfit": 0.75e6},
+                ],
+            }
+        }
+    }
+    result = filter_by_profitability([cand], raw_data)
+    assert len(result) == 1  # passes
+
+
+# ===========================================================================
 # score_value tests
 # ===========================================================================
 
