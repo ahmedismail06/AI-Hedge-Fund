@@ -4,8 +4,8 @@ Composite Scorer — combines factor scores into a single composite (0–10).
 Pipeline:
   1. Filter EXCLUDED tickers (Beneish hard gate) — set score to 0.0, keep for audit
   2. Normalize raw factor values to 0–10 via percentile rank
-     - Quality + Momentum: universe-wide normalization
-     - Value: sector-relative normalization (within SaaS / Healthcare / Industrials)
+     - Quality + Value: sector-relative normalization
+     - Momentum: universe-wide normalization
   3. Compute weighted sub-scores per factor
   4. Compute composite = Quality×w + Value×w + Momentum×w (regime-adjusted weights)
   5. Apply discrete adjustments: FLAGGED penalty, insider bonus, regime caps
@@ -39,11 +39,12 @@ _DEFAULT_REGIME = "Risk-On"
 
 # Quality sub-metric weights (must sum to 1.0)
 _QUALITY_SUB_WEIGHTS = {
-    "gross_margin":       0.20,
-    "revenue_growth_yoy": 0.20,
-    "roe":                0.20,
-    "debt_to_equity":     0.20,  # inverted (lower = better)
-    "eps_beat_rate":      0.20,
+    "gross_margin":       0.15,
+    "revenue_growth_yoy": 0.15,
+    "roic":               0.25,  # replaces roe; primary return metric
+    "debt_to_equity":     0.15,  # inverted (lower = better)
+    "fcf_conversion":     0.20,  # Sloan accruals quality signal
+    "eps_beat_rate":      0.10,
 }
 
 # Value sub-metric weights (must sum to 1.0)
@@ -236,29 +237,41 @@ def compute_composite(
         for sub in _MOMENTUM_SUB_WEIGHTS:
             momentum_raw[sub][ticker] = rv.get(sub)
 
-    # ── Step 3: Normalize — Quality (universe-wide) ───────────────────────────
+    # ── Step 3: Normalize — Quality (sector-relative) ────────────────────────
     quality_normalized: dict[str, dict[str, float]] = {}  # {ticker: {sub: score}}
     for sub in _QUALITY_SUB_WEIGHTS:
-        higher_is_better = (sub != "debt_to_equity")  # D/E inverted
-        norm = _normalize_universe(quality_raw[sub], higher_is_better=higher_is_better)
-        for ticker, score in norm.items():
-            quality_normalized.setdefault(ticker, {})[sub] = score
+        higher_is_better = (sub != "debt_to_equity")  # D/E inverted; all others higher=better
+        sector_groups: dict[str, list[str]] = {}
+        for ticker in eligible:
+            s = sectors.get(ticker) or "Unknown"
+            sector_groups.setdefault(s, []).append(ticker)
+        for sector_tickers in sector_groups.values():
+            sub_values = {t: quality_raw[sub].get(t) for t in sector_tickers}
+            norm = _normalize_universe(sub_values, higher_is_better=higher_is_better)
+            for ticker, score in norm.items():
+                quality_normalized.setdefault(ticker, {})[sub] = score
 
     # Apply discrete quality adjustments before factor score computation
     for ticker in eligible:
         q_norm = quality_normalized.get(ticker, {})
         q_raw = raw_factor_results.get(ticker, {}).get("quality", {}).get("raw_values", {})
-        
+
         # If eps_beat_rate is null, score it as 4.0 (slight negative)
         if q_raw.get("eps_beat_rate") is None:
             q_norm["eps_beat_rate"] = 4.0
-            
-        # If gross_margin > 0.98 and ROE < 0, apply pre-revenue penalty (2.0)
-        roe = q_raw.get("roe")
-        gm = q_raw.get("gross_margin")
-        if gm is not None and gm > 0.98 and roe is not None and roe < 0:
+
+        # Pre-revenue penalty: near-100% GM with no revenue growth or negative ROIC
+        # Note: roic=None alone does NOT trigger this — net-cash companies legitimately
+        # have invested_capital <= 0 and return None from ROIC computation.
+        roic_val = q_raw.get("roic")
+        gm_val = q_raw.get("gross_margin")
+        rev_growth_val = q_raw.get("revenue_growth_yoy")
+        if gm_val is not None and gm_val > 0.98 and (
+            rev_growth_val is None
+            or (roic_val is not None and roic_val < 0)
+        ):
             q_norm["gross_margin"] = 2.0
-            logger.debug("%s: High GM (>0.98) with negative ROE -> gross_margin penalty 2.0", ticker)
+            logger.debug("%s: Pre-revenue signature (gm>0.98) -> gross_margin penalty 2.0", ticker)
 
     # ── Step 4: Normalize — Value (sector-relative) ────────────────────────────
     value_normalized: dict[str, dict[str, float]] = {}
@@ -337,14 +350,8 @@ def compute_composite(
             if cash_runway is not None and cash_runway < 18:
                 composite = min(composite, 5.0)
 
-        if regime == "Stagflation":
-            gross_margin = raw_factor_results.get(ticker, {}).get("quality", {}).get("raw_values", {}).get("gross_margin")
-            if gross_margin is not None and gross_margin < 0.40:
-                composite -= 0.5
-            cand_sector = cand.sector if cand else None
-            if cand_sector == "Industrials":
-                # book-to-bill proxy not available from current data sources; skip
-                pass
+        # Stagflation: sector-relative quality normalization already penalises low-margin
+        # cohorts continuously. book-to-bill proxy unavailable; no further adjustment.
 
         composite = max(0.0, min(10.0, round(composite, 3)))
 

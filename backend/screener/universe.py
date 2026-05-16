@@ -48,6 +48,18 @@ _CACHE_TTL_HOURS = 24
 # Manual sector overrides: ticker → sector string
 SECTOR_OVERRIDES: Dict[str, str] = {}
 
+# Gate 1 — BROKEN_UNIT_ECONOMICS: hard GM floor by sector.
+# Excludes companies selling below cost. Calibrated to each sector's structural margin profile
+# so legitimate low-margin businesses (trucking, distribution) are not penalised.
+_GM_FLOOR_BROKEN: Dict[str, float] = {
+    "SaaS":        0.15,  # sub-15% in software/hardware is irreparable at the product level
+    "Healthcare":  0.10,  # allows medical distributors (15–25% GM) while catching broken cases
+    "Industrials": 0.05,  # allows trucking (5–12% GM) and contract services (8–15% GM)
+    "Consumer":    0.05,  # allows electronics retail (5–15% GM) and wholesale distribution
+    "Real Estate": 0.05,  # operating cos have varied revenue recognition
+    "Other":       0.05,  # conservative catch-all
+}
+
 # SIC ranges excluded from the universe (inclusive on both ends).
 # Order matters only for readability — all ranges are checked.
 _EXCLUDED_SIC_RANGES = [
@@ -399,56 +411,24 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     return final
 
 
-def _polygon_roe(polygon_financials: dict) -> Optional[float]:
-    """
-    Compute ROE from Polygon annual financials.
-    Mirrors the logic in quality.py so the pre-filter uses the same data source
-    as the scorer when FMP income/balance data is unavailable.
-    """
-    results = polygon_financials.get("results", [])
-    fy_rows = [r for r in results if r.get("fiscal_period") == "FY"]
-    fy_rows.sort(key=lambda r: r.get("filing_date", ""), reverse=True)
-    if not fy_rows:
-        return None
-    fin = fy_rows[0].get("financials", {})
-    inc = fin.get("income_statement", {})
-    bs  = fin.get("balance_sheet", {})
-
-    def _v(stmt: dict, key: str) -> Optional[float]:
-        val = stmt.get(key, {})
-        return val.get("value") if isinstance(val, dict) else val
-
-    net_income = _v(inc, "net_income_loss")
-    equity     = _v(bs,  "equity")
-    if net_income is not None and equity and equity != 0:
-        return net_income / equity
-    return None
-
-
 def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dict[str, dict]) -> List[UniverseCandidate]:
     """
-    Exclude tickers that fail institutional-quality profitability gates.
-    Runs after data fetch but before scoring.
+    Exclude tickers that fail data quality gates. Runs after data fetch but before scoring.
 
     Gates (in order):
-      1. BROKEN_UNIT_ECONOMICS  — gm < 0.15 (product-level economics irreparable)
-      2. NO_PROFITABILITY_PATH  — roe < -0.20 AND rev_growth < 0 AND gm < 0.30
-      3. PRE_REVENUE_BIOTECH    — roe is None AND gm > 0.95 (pre-revenue signal)
+      1. BROKEN_UNIT_ECONOMICS     — gm < _GM_FLOOR_BROKEN[sector] (sector-calibrated)
+      3. PRE_REVENUE_BIOTECH       — gm > 0.95 (near-100% GM = placeholder before first revenue)
       4. INSUFFICIENT_QUALITY_DATA — gm is None AND rev_growth is None
 
-    ROE source priority (for gate 2):
-      1. FMP income_statement + balance_sheet (fetch_quality_fmp_batch output)
-      2. Polygon annual financials (always fetched in fetch_ticker_data)
+    Gate 2 (NO_PROFITABILITY_PATH) removed — ROIC and FCF conversion in the quality
+    factor now handle deteriorating economics continuously through scoring.
     """
     filtered: List[UniverseCandidate] = []
     exclusions = {
         "BROKEN_UNIT_ECONOMICS": 0,
-        "NO_PROFITABILITY_PATH": 0,
         "PRE_REVENUE_BIOTECH": 0,
-        "INSUFFICIENT_QUALITY_DATA": 0
+        "INSUFFICIENT_QUALITY_DATA": 0,
     }
-    # Track per-ticker ROE for diagnostic log
-    roe_map: dict[str, Optional[float]] = {}
 
     for cand in universe:
         ticker = cand.ticker
@@ -456,26 +436,6 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
 
         fmp_quality = data.get("fmp", {})
         fmp_inc = fmp_quality.get("income_statement", [])
-        fmp_bs = fmp_quality.get("balance_sheet", [])
-
-        # ROE — FMP primary, Polygon fallback
-        roe: Optional[float] = None
-        roe_source = "none"
-        if fmp_inc and fmp_bs:
-            net_inc = fmp_inc[0].get("netIncome")
-            equity  = fmp_bs[0].get("totalStockholdersEquity")
-            if net_inc is not None and equity and equity != 0:
-                roe = net_inc / equity
-                roe_source = "fmp"
-
-        if roe is None:
-            polygon_roe = _polygon_roe(data.get("polygon_financials", {}))
-            if polygon_roe is not None:
-                roe = polygon_roe
-                roe_source = "polygon"
-
-        roe_map[ticker] = roe
-        logger.debug("%s: ROE=%.3f (source=%s)", ticker, roe if roe is not None else float("nan"), roe_source)
 
         # Gross Margin check
         gm: Optional[float] = None
@@ -485,7 +445,7 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
             if rev and rev != 0 and gp is not None:
                 gm = gp / rev
 
-        # Revenue Growth check
+        # Revenue Growth check (used only for gate 4)
         rev_growth: Optional[float] = None
         if len(fmp_inc) >= 2:
             r1 = fmp_inc[0].get("revenue")
@@ -493,27 +453,15 @@ def filter_by_profitability(universe: List[UniverseCandidate], raw_data_map: Dic
             if r1 is not None and r2 and r2 != 0:
                 rev_growth = (r1 - r2) / abs(r2)
 
-        # 1. Broken unit economics — catches businesses literally selling below cost.
-        #    3% floor is deliberately low to pass legitimate low-margin models (distribution,
-        #    trucking, contract services) while still excluding negative-GM names.
-        if gm is not None and gm < 0.03:
+        # 1. Broken unit economics — sector-calibrated GM floor
+        gm_floor = _GM_FLOOR_BROKEN.get(cand.sector, _GM_FLOOR_BROKEN["Other"])
+        if gm is not None and gm < gm_floor:
             exclusions["BROKEN_UNIT_ECONOMICS"] += 1
-            logger.info("%s: Excluded — BROKEN_UNIT_ECONOMICS (gm=%.3f)", ticker, gm)
+            logger.info("%s: Excluded — BROKEN_UNIT_ECONOMICS (gm=%.3f, floor=%.2f, sector=%s)", ticker, gm, gm_floor, cand.sector)
             continue
 
-        # 2. No profitability path — must fail all three simultaneously to exclude
-        if (roe is not None and roe < -0.20
-                and rev_growth is not None and rev_growth < 0.0
-                and gm is not None and gm < 0.30):
-            exclusions["NO_PROFITABILITY_PATH"] += 1
-            logger.info(
-                "%s: Excluded — NO_PROFITABILITY_PATH (roe=%.3f, rev_growth=%.3f, gm=%.3f)",
-                ticker, roe, rev_growth, gm,
-            )
-            continue
-
-        # 3. Pre-revenue biotech signature
-        if roe is None and gm is not None and gm > 0.95:
+        # 3. Pre-revenue biotech signature — near-100% GM is a service placeholder
+        if gm is not None and gm > 0.95:
             exclusions["PRE_REVENUE_BIOTECH"] += 1
             logger.info("%s: Excluded — PRE_REVENUE_BIOTECH (gm=%.3f)", ticker, gm)
             continue

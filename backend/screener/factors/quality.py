@@ -2,16 +2,17 @@
 Quality Factor Scorer (50% weight in composite).
 
 Returns raw values for each sub-metric. Normalization (0–10 percentile rank)
-is deferred to scorer.py so rankings are relative across the full universe.
+is deferred to scorer.py so rankings are sector-relative across the universe.
 
 Sub-components:
-  gross_margin       27.5% — FMP income-statement (primary), Polygon fallback
-  revenue_growth_yoy 25%   — Polygon FY (primary), FMP annual fallback
-  roe                22.5% — Polygon: net_income / equity
-  debt_to_equity     25%   — FMP balance-sheet-statement (lower = better)
-  eps_beat_rate      —     — computed and returned in raw_values but NOT scored
+  gross_margin       15% — FMP income-statement (primary), Polygon fallback
+  revenue_growth_yoy 15% — Polygon FY (primary), FMP annual fallback
+  roic               25% — NOPAT / Invested Capital; FMP primary, Polygon fallback
+  debt_to_equity     15% — FMP balance-sheet-statement (lower = better)
+  fcf_conversion     20% — OCF − CapEx / Net Income (Sloan accruals quality)
+  eps_beat_rate      10% — fraction of quarters beating consensus estimate
 
-Sector-specific bonuses are applied in scorer.py after normalization.
+Sector-specific normalization is applied in scorer.py after this returns.
 """
 
 import logging
@@ -43,14 +44,18 @@ def _get_latest_two_fy(polygon_financials: dict) -> tuple[dict, dict]:
         fin = row.get("financials", {})
         inc = fin.get("income_statement", {})
         bs  = fin.get("balance_sheet", {})
+        cf  = fin.get("cash_flow_statement", {})
         return {
-            "revenue":      _v(inc, "revenues"),
-            "gross_profit": _v(inc, "gross_profit"),
-            "cogs":         _v(inc, "cost_of_revenue"),
-            "net_income":   _v(inc, "net_income_loss"),
-            "equity":       _v(bs,  "equity"),
-            "total_debt":   _v(bs,  "long_term_debt"),
-            "current_debt": _v(bs,  "current_portion_of_long_term_debt"),
+            "revenue":          _v(inc, "revenues"),
+            "gross_profit":     _v(inc, "gross_profit"),
+            "cogs":             _v(inc, "cost_of_revenue"),
+            "net_income":       _v(inc, "net_income_loss"),
+            "operating_income": _v(inc, "operating_income_loss"),
+            "equity":           _v(bs,  "equity"),
+            "total_debt":       _v(bs,  "long_term_debt"),
+            "current_debt":     _v(bs,  "current_portion_of_long_term_debt"),
+            "cfo":              _v(cf,  "net_cash_flow_from_operating_activities"),
+            "capex":            _v(cf,  "capital_expenditure"),
         }
 
     return extract(fy_rows[0]), extract(fy_rows[1])
@@ -148,6 +153,79 @@ def _fmp_revenue_growth_annual(annual_stmts: list[dict]) -> Optional[float]:
     return (rev1 - rev2) / abs(rev2)
 
 
+def _fmp_roic(
+    annual_stmts: list[dict],
+    balance_sheets: list[dict],
+) -> Optional[float]:
+    """
+    ROIC = NOPAT / Invested Capital using FMP annual statements.
+    NOPAT = operatingIncome × (1 − effective_tax_rate)
+    Invested Capital = equity + totalDebt − cash
+    Returns None if data is missing or invested_capital <= 0.
+    """
+    if not annual_stmts or not balance_sheets:
+        return None
+    stmt = annual_stmts[0]
+    bs   = balance_sheets[0]
+
+    op_income = stmt.get("operatingIncome")
+    if op_income is None:
+        return None
+
+    pre_tax = stmt.get("incomeBeforeTax")
+    tax_exp = stmt.get("incomeTaxExpense")
+    if pre_tax and pre_tax != 0 and tax_exp is not None:
+        raw_rate = tax_exp / pre_tax
+        tax_rate = max(0.10, min(0.40, raw_rate))
+    else:
+        tax_rate = 0.21
+
+    nopat = op_income * (1 - tax_rate)
+
+    equity = bs.get("totalStockholdersEquity")
+    if equity is None:
+        return None
+    debt   = bs.get("totalDebt") or 0
+    cash   = bs.get("cashAndCashEquivalents") or 0
+    invested_capital = equity + debt - cash
+    if invested_capital <= 0:
+        return None
+
+    return nopat / invested_capital
+
+
+def _polygon_roic_fallback(cur: dict) -> Optional[float]:
+    """
+    Approximate ROIC from Polygon FY data when FMP path returns None.
+    Uses 21% statutory tax rate since Polygon doesn't expose effective rate here.
+    """
+    op_income = cur.get("operating_income")
+    equity    = cur.get("equity")
+    if op_income is None or equity is None:
+        return None
+    debt         = (cur.get("total_debt") or 0) + (cur.get("current_debt") or 0)
+    invested_capital = equity + debt
+    if invested_capital <= 0:
+        return None
+    nopat = op_income * 0.79  # 1 - 0.21 statutory
+    return nopat / invested_capital
+
+
+def _polygon_fcf_conversion(cur: dict, net_income: Optional[float]) -> Optional[float]:
+    """
+    FCF Conversion = (OCF − CapEx) / Net Income.
+    Higher = more of net income is backed by cash (Sloan accruals quality signal).
+    Returns None if net_income <= 0 or OCF missing; clamped to [−1.0, 3.0].
+    """
+    cfo = cur.get("cfo")
+    if cfo is None or net_income is None or net_income <= 0:
+        return None
+    capex = cur.get("capex")
+    fcf = cfo - abs(capex) if capex is not None else cfo
+    ratio = fcf / net_income
+    return max(-1.0, min(3.0, ratio))
+
+
 # ── Main scorer ───────────────────────────────────────────────────────────────
 
 def score_quality(
@@ -175,14 +253,15 @@ def score_quality(
             "raw_values": {
                 "gross_margin":        float | None,   # 0–1 (e.g. 0.65)
                 "revenue_growth_yoy":  float | None,   # e.g. 0.15 = 15% growth
-                "roe":                 float | None,   # e.g. 0.18
+                "roic":                float | None,   # NOPAT / Invested Capital
                 "debt_to_equity":      float | None,   # lower = better
+                "fcf_conversion":      float | None,   # (OCF − CapEx) / Net Income, clamped [−1, 3]
                 "eps_beat_rate":       float | None,   # 0–1
             },
             "pre_revenue_flag": bool,  # True if company has no revenue
             "sector": str | None,
         }
-    Normalization is NOT done here — deferred to scorer.py.
+    Normalization is NOT done here — deferred to scorer.py (sector-relative).
     """
     cur, prior = _get_latest_two_fy(polygon_financials)
 
@@ -211,10 +290,13 @@ def score_quality(
     if revenue_growth_yoy is None:
         revenue_growth_yoy = _fmp_revenue_growth_annual(fmp_annual)
 
-    # ── ROE ───────────────────────────────────────────────────────────────────
-    roe: Optional[float] = None
-    if cur.get("net_income") is not None and cur.get("equity") and cur["equity"] != 0:
-        roe = cur["net_income"] / cur["equity"]
+    # ── ROIC ─────────────────────────────────────────────────────────────────
+    roic: Optional[float] = _fmp_roic(fmp_annual, fmp_bs)
+    if roic is None:
+        roic = _polygon_roic_fallback(cur)
+
+    # ── FCF Conversion ────────────────────────────────────────────────────────
+    fcf_conversion: Optional[float] = _polygon_fcf_conversion(cur, cur.get("net_income"))
 
     # ── Debt-to-Equity ────────────────────────────────────────────────────────
     # Primary: FMP balance sheet (pre-computed ratio fields missing for most names)
@@ -227,18 +309,20 @@ def score_quality(
     raw_values = {
         "gross_margin":       gross_margin,
         "revenue_growth_yoy": revenue_growth_yoy,
-        "roe":                roe,
+        "roic":               roic,
         "debt_to_equity":     debt_to_equity,
+        "fcf_conversion":     fcf_conversion,
         "eps_beat_rate":      eps_beat_rate,
     }
 
     logger.debug(
-        "%s quality raw: gm=%s rg=%s roe=%s d/e=%s beat=%s pre_rev=%s",
+        "%s quality raw: gm=%s rg=%s roic=%s d/e=%s fcf_conv=%s beat=%s pre_rev=%s",
         ticker,
         f"{gross_margin:.3f}" if gross_margin is not None else "None",
         f"{revenue_growth_yoy:.3f}" if revenue_growth_yoy is not None else "None",
-        f"{roe:.3f}" if roe is not None else "None",
+        f"{roic:.3f}" if roic is not None else "None",
         f"{debt_to_equity:.3f}" if debt_to_equity is not None else "None",
+        f"{fcf_conversion:.3f}" if fcf_conversion is not None else "None",
         f"{eps_beat_rate:.3f}" if eps_beat_rate is not None else "None",
         pre_revenue,
     )
