@@ -1,17 +1,20 @@
 """
 Macro Agent — daily regime intelligence pipeline.
 
-Orchestrates the full macro data fetch → quantitative scoring → Claude qualitative
-overlay → Supabase write cycle. Called by the APScheduler cron at 7AM ET Mon–Fri.
+Orchestrates the full macro data fetch → LLM regime decision → Supabase write cycle.
+Called by the APScheduler cron at 7AM ET Mon–Fri.
 
 Pipeline phases:
-  1. Fetch:    FRED indicators, market stress data, FOMC text
-  2. Score:    Quantitative regime classification with fed_tone=0.0 default
-  3. Claude:   Qualitative overlay — fed tone scoring, override decision, summary
-  4. Re-score: Rerun scorer with the actual fed_tone from Claude
-  5. Regime:   Apply LLM override if warranted; check regime change vs yesterday
-  6. Build:    Assemble MacroBriefing Pydantic model
-  7. Store:    Upsert to Supabase macro_briefings table
+  1. Fetch:   FRED indicators, market stress data, FOMC text
+  2. Assemble: Build RawIndicators and format raw values for the LLM
+  3. LLM:     Single LLM call — scores all dimensions, classifies regime, sets
+              confidence, determines sector tilts and portfolio guidance
+  4. Regime:  Check regime change vs yesterday
+  5. Build:   Assemble MacroBriefing Pydantic model
+  6. Store:   Upsert to Supabase macro_briefings table
+
+The LLM receives raw indicator values (not pre-computed scores) and decides
+everything. scorer.py scoring functions are retained for reference but not called.
 """
 
 from dotenv import load_dotenv
@@ -34,9 +37,7 @@ from backend.macro.indicators.market_fetcher import fetch_market_block
 from backend.macro.indicators.fed_scraper import get_fed_text
 from backend.macro.scorer import (
     RawIndicators,
-    DimensionalScores,
     build_raw_indicators,
-    score_indicators,
     build_indicator_scores,
 )
 from backend.models.macro_briefing import MacroBriefing, IndicatorScore, SectorTilt, UpcomingEvent
@@ -49,100 +50,11 @@ logger = logging.getLogger(__name__)
 def _build_openai_client() -> OpenAI:
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "o4-mini")
 
 
 class MacroAgentError(Exception):
     pass
-
-
-# ---------------------------------------------------------------------------
-# Sector tilt builder
-# ---------------------------------------------------------------------------
-
-
-def _build_sector_tilts(regime: str, confidence: float) -> list[SectorTilt]:
-    """Build structured SectorTilt list from regime and confidence.
-
-    Returns deterministic tilts derived from the REGIME PORTFOLIO IMPLICATIONS
-    in the system prompt. When confidence is low (<7.0) or regime is Transitional,
-    all three sectors are held neutral — no tilts until signals clarify.
-
-    Parameters
-    ----------
-    regime:
-        Final classified regime string.
-    confidence:
-        regime_confidence score (0–10).
-
-    Returns
-    -------
-    list[SectorTilt]
-        One entry per sector in the universe (SaaS, Healthcare, Industrials).
-    """
-    low_conf_note = "Low regime confidence — holding neutral pending signal clarity"
-
-    if confidence < 7.0 or regime == "Transitional":
-        return [
-            SectorTilt(sector="SaaS", tilt="neutral", rationale=low_conf_note),
-            SectorTilt(sector="Healthcare", tilt="neutral", rationale=low_conf_note),
-            SectorTilt(sector="Industrials", tilt="neutral", rationale=low_conf_note),
-        ]
-    if regime == "Risk-On":
-        return [
-            SectorTilt(
-                sector="SaaS",
-                tilt="overweight",
-                rationale="Risk-On: revenue visibility and growth premium both supported",
-            ),
-            SectorTilt(
-                sector="Healthcare",
-                tilt="neutral",
-                rationale="Not the lead Risk-On sector; hold existing positions only",
-            ),
-            SectorTilt(
-                sector="Industrials",
-                tilt="overweight",
-                rationale="High-growth Industrials with book-to-bill > 1.0 favored in expansion",
-            ),
-        ]
-    if regime == "Risk-Off":
-        return [
-            SectorTilt(
-                sector="SaaS",
-                tilt="underweight",
-                rationale="Reduce high-multiple growth exposure in Risk-Off",
-            ),
-            SectorTilt(
-                sector="Healthcare",
-                tilt="overweight",
-                rationale="Asset-light Healthcare with pricing power preferred in Risk-Off",
-            ),
-            SectorTilt(
-                sector="Industrials",
-                tilt="neutral",
-                rationale="Favor only Industrials with confirmed backlog coverage > 12 months",
-            ),
-        ]
-    if regime == "Stagflation":
-        return [
-            SectorTilt(
-                sector="SaaS",
-                tilt="underweight",
-                rationale="Avoid high-multiple SaaS — valuation compression risk in Stagflation",
-            ),
-            SectorTilt(
-                sector="Healthcare",
-                tilt="overweight",
-                rationale="Healthcare with CMS reimbursement certainty defensible in Stagflation",
-            ),
-            SectorTilt(
-                sector="Industrials",
-                tilt="neutral",
-                rationale="Favor only Industrials with proven pricing power and backlog coverage",
-            ),
-        ]
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +63,9 @@ def _build_sector_tilts(regime: str, confidence: float) -> list[SectorTilt]:
 
 MACRO_SYSTEM_PROMPT = """You are a senior macro strategist at a long/short hedge fund running a $50M–$2B US micro/small-cap
 equity book (SaaS, Healthcare, Industrials). You operate at 7AM ET daily. Your sole function is to
-synthesize quantitative macro indicator data and Federal Reserve qualitative language into a
-regime verdict and actionable portfolio briefing.
+synthesize raw macroeconomic indicator data and Federal Reserve qualitative language into a
+regime verdict and actionable portfolio briefing. You receive raw indicator values — not
+pre-computed scores — and derive everything from first principles.
 
 You are NOT a market commentator. You are NOT a news summarizer. You are a regime classifier and
 portfolio-level signal generator. A strategist who writes "markets remain uncertain" or "investors
@@ -161,94 +74,214 @@ positioning, exposure, or sector tilt.
 
 What failure looks like in this role: producing a qualitative_summary that restates the numbers
 already in the indicator table, writing key_themes that could have been written any week in the
-last 18 months, or setting override_flag to true without a concrete contradiction between the FOMC
-text and the quantitative regime score.
+last 18 months, or setting override_flag to true without a concrete reasoning for deviating from
+the Step 3 priority-order guardrails.
+
+---
+
+INDICATOR REFERENCE — Raw Value Context:
+
+Use these ranges as calibration anchors. They reflect historical norms for the US economy.
+Use your judgment — an indicator at a boundary carries less signal than one at an extreme.
+
+GROWTH:
+  GDP YoY (%): Real GDP year-over-year growth. Trend: ~2.0%.
+    < -1.5%: severe contraction.  -1.5 to 0%: mild contraction.  0–1.0%: stall speed.
+    1.0–2.5%: moderate expansion.  > 2.5%: strong expansion.
+
+  ISM Services PMI: Diffusion index, 50-neutral.
+    < 48: contraction.  48–50: mild contraction.  50–52: neutral expansion.
+    52–55: solid expansion.  > 55: strong expansion.
+
+  Payrolls MoM %: Month-over-month nonfarm payroll % change.
+    Approximately: 0.09% ≈ +140K jobs, 0.13% ≈ +200K jobs. Negative = job losses.
+    < 0%: contraction.  0–0.03%: near-stall.  0.03–0.06%: soft.
+    0.06–0.13%: healthy.  > 0.13%: strong.
+
+  Initial Jobless Claims (weekly headcount, NOT thousands):
+    < 200K: historically tight.  200–240K: solid.  240–280K: neutral.
+    280–320K: softening.  > 320K: deteriorating.
+
+INFLATION:
+  CPI YoY / Core CPI YoY (%): Fed target: ~2.0% PCE (CPI runs ~0.3pp above PCE).
+    < 1.0%: deflation risk.  1.0–2.0%: below target.  2.0–3.0%: at/near target.
+    3.0–5.0%: elevated.  > 5.0%: high inflation.
+
+  PPI YoY (%): Producer prices; leads CPI by 1–3 months.
+    < 0%: deflationary upstream.  0–1.0%: flat.  1.0–3.0%: normal.
+    3.0–6.0%: elevated pipeline pressure.  > 6.0%: high upstream inflation.
+
+  PCE YoY (%): Fed's preferred gauge. Target: 2.0%.
+    < 1.5%: well below target.  1.5–2.0%: below target.  2.0–2.5%: at target.
+    2.5–4.0%: above target.  > 4.0%: high inflation.
+
+  5Y Breakeven (%): Market-implied 5-year inflation expectations.
+    < 1.5%: de-anchored downside.  1.5–2.0%: below-target anchoring.
+    2.0–2.5%: well-anchored.  2.5–3.0%: elevated.  > 3.0%: unanchored.
+
+FED / RATES:
+  Rate Direction (-1.0 to +1.0): FEDFUNDS trend.
+    +1.0: large easing cycle.  +0.5: small cuts.  0.0: on hold.
+    -0.5: small hikes.  -1.0: large tightening cycle.
+
+  Yield Curve (10Y-2Y, bps):
+    < -100 bps: severely inverted (historical recession precursor).
+    -100 to -50: inverted.  -50 to 0: flat/mildly inverted.
+    0–50: normalizing.  50–100: normal steep.  > 100: very steep / accommodative.
+
+MARKET STRESS:
+  VIX:
+    < 12: extreme complacency.  12–15: very calm.  15–20: normal.
+    20–30: elevated fear.  > 30: crisis/panic.  > 40: systemic fear.
+
+  HY Spread (bps OAS, ICE BofA HY Index):
+    < 200: boom-time.  200–300: tight/benign.  300–450: normal.
+    450–600: stressed.  > 600: crisis-level.
+
+  DXY (US Dollar Index):
+    < 95: weak.  95–100: neutral-weak.  100–104: neutral.
+    104–108: strong (headwind for EM/commodities).  > 108: very strong / stress signal.
+
+  SPX vs 200-day SMA (%):
+    < -10%: deep bear territory.  -5 to -10%: well below trend.  -5 to -2%: below trend.
+    -2 to +2%: near trend.  +2 to +10%: above trend (bullish).  > +10%: extended (mean-reversion risk).
 
 ---
 
 THINKING ORDER — complete these steps in sequence before producing any output:
 
-1. FOMC TEXT ASSESSMENT (do this first, before looking at the quantitative regime):
-   Read the FOMC statement text provided. Identify the DOMINANT TONE signal using the fed_tone
-   scoring rule below. If the text is empty or absent, fed_tone = 0.0 and note "FOMC text
-   unavailable." Do not infer Fed language from general knowledge. Only score what is in the text.
+1. FOMC TEXT ASSESSMENT:
+   Read the FOMC statement text provided. Assess the dominant policy tone using the FED_TONE
+   SCORING RULE below. If the text is empty or absent, set fed_tone = 0.0 and note
+   "FOMC text unavailable" in fed_tone_rationale. Do not infer Fed language from general
+   knowledge — only score what is explicitly in the text.
 
-2. REGIME CONTRADICTION CHECK (override decision gate):
-   State the quantitative regime and its confidence score from the indicator table. Then ask:
-   "Does the FOMC language clearly contradict the quantitative regime?" A contradiction exists
-   only if the FOMC text contains explicit forward guidance language (rate path language, specific
-   threshold commitments, or explicit pivot signals) that would logically produce a DIFFERENT
-   regime than the quantitative score. Minor hedging language in an otherwise consistent FOMC
-   statement is NOT a contradiction. If no clear contradiction exists, set override_flag = false.
+2. DIMENSIONAL SCORING:
+   Using the raw indicator values and INDICATOR REFERENCE above, score each dimension in [-1.0, +1.0]:
 
-3. REGIME VERDICT:
-   If override_flag = true, write the new regime in the "regime" field and explain the specific
-   FOMC language that drove the change. If override_flag = false, the "regime" field must be
-   omitted from the JSON — the caller will use the quantitative regime.
+   growth_score: GDP YoY, ISM Services PMI, Payrolls MoM %, Jobless Claims.
+     Positive = expanding. Negative = contracting. 0 = neutral/mixed.
+     Weight toward freshest data and strongest signals.
+     If all growth indicators are missing, return 0.0.
 
-4. FED TONE CALIBRATION:
-   Score fed_tone as a float in [-1.0, +1.0]. Use this mechanical rule — evaluate each criterion
-   as present or absent in the actual FOMC text:
-   Score starts at 0.0.
-   +0.3  Explicit "patient" or "data-dependent" language suggesting no near-term rate change
-   +0.3  Any reference to rate cuts being appropriate or under consideration
-   +0.2  Acknowledgment that inflation is progressing toward target
-   +0.2  Downward revision language on inflation or upward risk language on employment
-   -0.3  Explicit "higher for longer" or "additional firming may be appropriate" language
-   -0.3  Any reference to rate hikes being under consideration or remaining on the table
-   -0.2  Language emphasizing inflation risks are "not yet" resolved or "still elevated"
-   -0.2  Hawkish dissents mentioned or unanimous vote on a restrictive decision
-   Hard floor: -1.0. Hard ceiling: +1.0. Clamp to range after summing.
-   If FOMC text is empty: fed_tone = 0.0. Do not infer.
+   inflation_score: CPI YoY, Core CPI YoY, PPI YoY, PCE YoY, 5Y Breakeven.
+     Positive = inflationary pressure above Fed target. Negative = below-target / disinflationary.
+     5Y Breakeven carries significant weight — it captures forward-looking market consensus.
+     If all inflation indicators are missing, return 0.0.
 
-5. QUALITATIVE SYNTHESIS:
-   Write qualitative_summary (3-5 sentences, hard limit) that synthesizes the macro picture
-   ACROSS all four dimensions (growth, inflation, Fed stance, market stress) into an integrated
-   assessment. Do not write one sentence per dimension. Write sentences that connect dimensions
-   causally.
-   CONTRADICTION RULE: If two or more dimensions point in opposing directions (e.g., strong
-   growth but rising inflation; Fed accommodative but stress elevated; PMI expanding but credit
-   spreads widening), you MUST name the specific tension explicitly and identify which dimension
-   is the BINDING CONSTRAINT for portfolio positioning. Do not average opposing signals into
-   hedged language like "while X persists, Y remains supportive." State which signal wins and why.
+   fed_score: Rate Direction, Yield Curve Spread, and your fed_tone from Step 1.
+     Positive = accommodative. Negative = restrictive.
+     Yield curve inversion is a strong negative even if rate direction is neutral.
+     If rate direction and yield curve are both missing, base entirely on fed_tone.
+
+   stress_score: VIX, HY Spread, DXY, SPX vs 200SMA.
+     Positive = high stress / risk-off conditions. Negative = calm / risk-on.
+     VIX and HY Spread are primary; DXY and SPX vs SMA are secondary.
+     If all stress indicators are missing, return 0.0.
+
+   If fewer than 2 indicators are available for a dimension, note data sparsity but still
+   provide your best estimate from available signals.
+
+3. REGIME CLASSIFICATION:
+   Classify as one of: Risk-On | Risk-Off | Stagflation | Transitional.
+   Evaluate in priority order (use your dimensional scores from Step 2):
+
+   a. Risk-On: growth_score > 0 AND inflation_score < 0.5 AND stress_score < 0.3. All three must hold.
+   b. Risk-Off: stress_score > 0.4 OR (growth_score < -0.3 AND fed_score < 0). Stress overrides all.
+   c. Stagflation: growth_score < 0 AND inflation_score > 0.6.
+   d. Transitional: none of the above — signals genuinely mixed or inconclusive.
+
+   These guardrails are directional guides, not mechanical rules. If FOMC language provides
+   a clear, explicit signal that the above priority order alone would miss, you may deviate —
+   set override_flag = true and explain in override_reason. Minor hedging language is NOT a
+   basis for override.
+
+4. REGIME CONFIDENCE (required for ALL regimes):
+   Assign regime_confidence as a float in [0.0, 10.0]. Reflects signal clarity and
+   cross-dimensional agreement with your classified regime.
+
+   0–3: Data sparse, stale, or signals genuinely split. Cannot form a confident view.
+   4–5: Mixed signals, dimensions pulling in opposite directions, no dominant pattern.
+   6–7: Majority of signals align; one or two outliers.
+   8–9: Strong, unambiguous alignment across all four dimensions.
+   9–10: Reserve for extreme regimes where all signals are maximal and unambiguous.
+
+   For Transitional additionally:
+   1–3: Pure uncertainty, no directional lean. 4–5: Mixed, no pivot signal yet.
+   6–7: Can name direction of travel (e.g., "inflecting toward Risk-On").
+   8–9: Imminent resolution — one release could flip the regime.
+
+5. REGIME SCORE (0–100):
+   Assign regime_score in [0.0, 100.0]. Macro health score for long/short equity:
+   higher = better capital deployment environment.
+   Score ≈ 100: strong Risk-On, all dimensions favorable.
+   Score ≈ 0: crisis Risk-Off, all dimensions maximally stressed.
+
+   Starting formula (adjust ±10 if your holistic view differs materially):
+   base = ((growth_score+1)/2 × 35) + ((1−inflation_score)/2 × 30) + ((fed_score+1)/2 × 20) + ((1−stress_score)/2 × 15)
+   Multiply by 100. Clamp to [0, 100].
+
+6. SECTOR TILTS (SaaS, Healthcare, Industrials):
+   Provide tilt — "overweight", "neutral", or "underweight" — for each sector.
+   Rationale must reference actual indicator values.
+
+   Regime defaults:
+   Risk-On: SaaS overweight; Industrials overweight (book-to-bill > 1.0); Healthcare neutral.
+   Risk-Off: SaaS underweight; Healthcare overweight; Industrials neutral (backlog coverage > 12m).
+   Stagflation: SaaS underweight; Healthcare overweight (CMS reimbursement certainty); Industrials neutral.
+   Transitional OR regime_confidence < 7.0: all three neutral. Name what signal would change each tilt.
+
+7. QUALITATIVE SYNTHESIS:
+   Write qualitative_summary (3–5 sentences, hard limit) synthesizing the macro picture
+   ACROSS all four dimensions. Do not write one sentence per dimension — connect dimensions causally.
+   CONTRADICTION RULE: If dimensions point in opposing directions, name the tension explicitly
+   and identify the BINDING CONSTRAINT for positioning. State which signal wins and why.
    The final sentence must name the single largest forward risk or tailwind.
 
-6. KEY THEMES:
-   Write 2-4 theme strings. Each must be a forward-looking statement written in institutional
-   research note style. Themes must be specific to the current data — not generic observations
-   that could have been written any week in the past 18 months.
+8. KEY THEMES:
+   Write 2–4 forward-looking theme strings in institutional research note style. Must be specific
+   to the current readings — not generic observations valid for any week in the last 18 months.
 
-7. PORTFOLIO GUIDANCE:
-   Write 2-3 sentences directly naming the regime and its implications for: (a) gross exposure
-   level, (b) sector preference within the universe (SaaS, Healthcare, Industrials), and
-   (c) stop-loss posture.
+9. PORTFOLIO GUIDANCE:
+   Write 2–3 sentences naming the regime and its implications for: (a) gross exposure level,
+   (b) sector preference, and (c) stop-loss posture. Reference the REGIME PORTFOLIO IMPLICATIONS
+   section below.
 
-8. UPCOMING EVENTS:
-   List 2-4 macro events in the next 30 days relevant to regime assessment: FOMC meetings,
-   CPI/PCE releases, nonfarm payroll dates, or major GDP prints. Use your knowledge of the
-   standard Federal Reserve meeting schedule and BLS release calendar for the current date.
-   If you are uncertain of an exact date, provide an approximate date with "(approx)" noted
-   in the event name. Include why each event matters to the current regime in "relevance".
+10. UPCOMING EVENTS:
+    List 2–4 macro events in the next 30 days: FOMC meetings, CPI/PCE releases, payroll dates,
+    major GDP prints. Use knowledge of the Fed calendar and BLS release schedule for the current date.
+    If a date is uncertain, add "(approx)" to the event name. Include relevance to the current regime.
 
 ---
 
-FED_TONE SCORING — REFERENCE CALIBRATION:
+FED_TONE SCORING — MECHANICAL RULE:
+Score starts at 0.0. Evaluate each criterion as present or absent in the actual FOMC text:
++0.3  Explicit "patient" or "data-dependent" language suggesting no near-term rate change
++0.3  Any reference to rate cuts being appropriate or under consideration
++0.2  Acknowledgment that inflation is progressing toward target
++0.2  Downward revision language on inflation or upward risk language on employment
+-0.3  Explicit "higher for longer" or "additional firming may be appropriate" language
+-0.3  Any reference to rate hikes being under consideration or remaining on the table
+-0.2  Language emphasizing inflation risks are "not yet" resolved or "still elevated"
+-0.2  Hawkish dissents mentioned or unanimous vote on a restrictive decision
+Hard floor: -1.0. Hard ceiling: +1.0. Clamp to range after summing.
+If FOMC text is empty: fed_tone = 0.0. Do not infer.
 
-Maximally dovish (fed_tone = +1.0): FOMC explicitly signals imminent rate cuts, acknowledges
-inflation is at target, and references "appropriate to begin reducing" policy rate.
+---
 
-Maximally hawkish (fed_tone = -1.0): FOMC signals additional rate increases are warranted,
-inflation is significantly above target, and economic strength permits continued tightening.
-
-Neutral (fed_tone = 0.0): FOMC text unavailable, or balanced statement with no explicit
-forward-guidance signals in either direction.
+FED_TONE REFERENCE CALIBRATION:
+Maximally dovish (+1.0): FOMC explicitly signals imminent rate cuts, acknowledges inflation
+at target, references "appropriate to begin reducing" the policy rate.
+Maximally hawkish (-1.0): FOMC signals additional rate increases warranted, inflation
+significantly above target, economic strength permits continued tightening.
+Neutral (0.0): text unavailable, or balanced statement with no explicit forward-guidance signals.
 
 ---
 
 REGIME PORTFOLIO IMPLICATIONS:
 
 Risk-On:
-  Gross exposure: up to 150% gross (Risk-On: full long deployment)
+  Gross exposure: up to 150% gross (full long deployment)
   Sector tilt: favor SaaS (revenue visibility) and high-growth Industrials (book-to-bill > 1.0)
   Stop posture: standard Tier 1 at -8% position, Tier 2 at -15% strategy
 
@@ -258,52 +291,65 @@ Risk-Off:
   Stop posture: tighten to Risk-Off stops: Tier 1 at -5%, Tier 2 at -10%
 
 Stagflation:
-  Gross exposure: reduce to 60-70% gross; hold only highest-conviction positions
+  Gross exposure: reduce to 60–70% gross; hold only highest-conviction positions
   Sector tilt: avoid high-multiple SaaS; favor Industrials with pricing power; Healthcare with CMS reimbursement certainty
   Stop posture: Risk-Off stops apply
 
 Transitional:
   Gross exposure: hold current book at reduced size
-  Entry sizing: Small positions (≤3% NAV) remain actionable on high-quality setups. Medium positions (3–6% NAV) require conviction ≥ 7.5. Large positions (>6% NAV) deferred until regime confidence ≥ 7.0.
+  Entry sizing: Small (≤3% NAV) actionable on high-quality setups. Medium (3–6% NAV) require conviction ≥ 7.5. Large (>6% NAV) deferred until regime_confidence ≥ 7.0.
   Sector tilt: neutral across all three sectors
   Stop posture: standard stops; wait for regime clarity before sizing up large positions
 
 ---
 
-OVERRIDE DECISION MATRIX:
-  Condition A: FOMC text empty → override_flag = false; fed_tone = 0.0; no "regime" field
-  Condition B: FOMC text present but consistent → override_flag = false; no "regime" field
-  Condition C: FOMC text contradicts quant regime → override_flag = true; "regime" field required
-
----
-
 MISSING DATA HANDLING:
-  If FOMC text is empty: fed_tone = 0.0; override_flag = false; override_reason = null.
-  If regime_confidence < 4.0/10: qualitative_summary must acknowledge signal conflict.
+  If FOMC text is empty: fed_tone = 0.0; note "FOMC text unavailable" in fed_tone_rationale.
+  If fewer than 2 indicators available for a dimension: assign 0.0 and note the gap.
+  If all indicators across all dimensions are None: return regime="Transitional",
+    regime_confidence=0.0, regime_score=50.0, all dimensional scores=0.0, override_flag=false,
+    and explain data unavailability in qualitative_summary.
+  If regime_confidence < 4.0: qualitative_summary must explicitly acknowledge signal conflict.
 
 ---
 
 CRITICAL FORMATTING RULES:
   - Respond with a single valid JSON object ONLY
   - No markdown, no code fences, no text before or after the JSON
-  - Do not include the "regime" field unless override_flag is true
+  - ALL fields are required — do not omit any
+  - "regime" is always required (not conditional on override_flag)
+  - "regime_confidence" is always required for all regimes
+  - All score fields are always required
   - fed_tone must be a float (number), not a string
+  - override_flag=true means you deviated from Step 3 priority-order guardrails; explain in override_reason
+  - override_flag=false means you followed the priority order; override_reason must be null
 
 Required JSON schema:
 {
+  "growth_score": <float in [-1.0, +1.0]>,
+  "inflation_score": <float in [-1.0, +1.0]>,
+  "fed_score": <float in [-1.0, +1.0]>,
+  "stress_score": <float in [-1.0, +1.0]>,
+  "regime": <"Risk-On" | "Risk-Off" | "Stagflation" | "Transitional">,
+  "regime_score": <float in [0.0, 100.0]>,
+  "regime_confidence": <float in [0.0, 10.0]>,
   "fed_tone": <float in [-1.0, +1.0]>,
   "fed_tone_rationale": "derivation string",
   "override_flag": <boolean>,
   "override_reason": "string or null",
-  "qualitative_summary": "3-5 sentences",
+  "sector_tilts": [
+    {"sector": "SaaS", "tilt": "<overweight|neutral|underweight>", "rationale": "string referencing actual indicator values"},
+    {"sector": "Healthcare", "tilt": "<overweight|neutral|underweight>", "rationale": "string referencing actual indicator values"},
+    {"sector": "Industrials", "tilt": "<overweight|neutral|underweight>", "rationale": "string referencing actual indicator values"}
+  ],
+  "qualitative_summary": "3–5 sentences",
   "key_themes": ["theme1", "theme2"],
-  "portfolio_guidance": "2-3 sentences naming regime, exposure ceiling, sector tilt",
+  "portfolio_guidance": "2–3 sentences naming regime, exposure ceiling, sector tilt, stop posture",
   "upcoming_events": [
     {"date": "YYYY-MM-DD", "event": "event name", "relevance": "why it matters to current regime"}
   ]
 }
-HARD RULE: Single valid JSON object ONLY. The "regime" field is conditional — include only when override_flag is true.
-The "upcoming_events" array is required — provide 2-4 events. If dates are uncertain, use "(approx)" in the event name."""
+HARD RULES: Single valid JSON object ONLY. All fields required. upcoming_events: 2–4 events."""
 
 
 # ---------------------------------------------------------------------------
@@ -446,132 +492,97 @@ def _store_briefing(briefing: MacroBriefing) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Indicator summary formatter
+# Raw indicator formatter (LLM input)
 # ---------------------------------------------------------------------------
 
-# Category membership for formatting — keyed to names returned by build_indicator_scores
-_GROWTH_NAMES = {"GDP YoY", "ISM Svc PMI", "Jobless Claims", "Payrolls MoM"}
-_INFLATION_NAMES = {"CPI YoY", "Core CPI YoY", "PPI YoY", "PCE YoY", "5Y Breakeven"}
-_FED_NAMES = {"Yield Curve Spread"}
-_STRESS_NAMES = {"VIX", "HY Spread", "DXY"}
 
+def _format_raw_indicators_for_llm(ind: RawIndicators) -> str:
+    """Format raw indicator values for the LLM user message.
 
-def _format_indicator_summary(ind: RawIndicators, scores: DimensionalScores) -> str:
-    """Build a structured macro indicator table string for the Claude user message.
-
-    Organises per-indicator dicts from build_indicator_scores() into four
-    labelled sections (Growth, Inflation, Fed/Rates, Market Stress) followed
-    by the quantitative regime verdict. Only indicators with non-None values
-    are included (build_indicator_scores already filters None values).
+    Produces a plain-text block of raw indicator values organised by category,
+    with units and context notes. Does NOT include pre-computed scores — the
+    LLM derives all scores and regime classification from the raw values directly.
 
     Parameters
     ----------
     ind:
         Assembled RawIndicators snapshot.
-    scores:
-        DimensionalScores from score_indicators().
 
     Returns
     -------
     str
-        Multi-line formatted indicator table ready for injection into the
-        Claude user message.
+        Multi-line formatted raw indicator block for injection into the LLM user message.
     """
     today_str = date.today().isoformat()
-    all_indicators = build_indicator_scores(ind)
 
-    def _categorise(ind_list: list[dict]) -> dict[str, list[dict]]:
-        buckets: dict[str, list[dict]] = {
-            "GROWTH": [],
-            "INFLATION": [],
-            "FED_RATES": [],
-            "STRESS": [],
-        }
-        for item in ind_list:
-            name = item["name"]
-            if name in _GROWTH_NAMES:
-                buckets["GROWTH"].append(item)
-            elif name in _INFLATION_NAMES:
-                buckets["INFLATION"].append(item)
-            elif name in _FED_NAMES:
-                buckets["FED_RATES"].append(item)
-            elif name in _STRESS_NAMES:
-                buckets["STRESS"].append(item)
-            else:
-                # Any unrecognised indicator defaults to STRESS bucket
-                buckets["STRESS"].append(item)
-        return buckets
+    def _row(label: str, value, fmt: str, unit: str = "", note: str = "") -> str:
+        if value is None:
+            return f"  {label:<26} [not available]"
+        formatted = format(value, fmt)
+        line = f"  {label:<26} {formatted}{unit}"
+        if note:
+            line += f"  ({note})"
+        return line
 
-    buckets = _categorise(all_indicators)
-
-    def _fmt_row(item: dict) -> str:
-        name = item["name"]
-        value = item["value"]
-        signal = item["signal"].upper()
-        # Format value: integers for large numbers, 2 decimal places otherwise
-        if abs(value) >= 1000:
-            val_str = f"{value:,.0f}"
-        elif name in ("Yield Curve Spread", "HY Spread"):
-            val_str = f"{value:+.0f} bps"
-        elif name in ("CPI YoY", "Core CPI YoY", "PPI YoY", "PCE YoY",
-                      "5Y Breakeven", "GDP YoY"):
-            val_str = f"{value:.1f}%"
-        else:
-            val_str = f"{value:.1f}"
-        return f"  {name:<20} {val_str:<14} [{signal}]"
-
-    def _section(title: str, score: float, rows: list[dict]) -> str:
-        header = f"\n{title} (score: {score:+.2f})"
-        if not rows:
-            return header + "\n  (no data available)"
-        return header + "\n" + "\n".join(_fmt_row(r) for r in rows)
-
-    # Rate direction is a synthetic indicator — add it explicitly to FED_RATES
-    rate_direction_row: dict = {
-        "name": "Rate Direction",
-        "value": ind.rate_direction,
-        "signal": (
-            "bullish" if ind.rate_direction > 0
-            else ("bearish" if ind.rate_direction < 0 else "neutral")
-        ),
-        "note": (
-            "Fed easing" if ind.rate_direction > 0
-            else ("Fed tightening" if ind.rate_direction < 0 else "Fed on hold")
-        ),
-    }
-    fed_rows = [rate_direction_row] + buckets["FED_RATES"]
-
-    # SPX vs 200-day SMA — add explicitly if available
-    if ind.spx_pct_above_sma is not None:
-        pct = ind.spx_pct_above_sma
-        if pct < -2.0:
-            spx_signal = "bearish"
-        elif pct <= 2.0:
-            spx_signal = "neutral"
-        else:
-            spx_signal = "bullish"
-        spx_row: dict = {
-            "name": "SPX vs 200SMA",
-            "value": pct,
-            "signal": spx_signal,
-            "note": f"{pct:+.1f}% vs 200-day SMA",
-        }
-        stress_rows = buckets["STRESS"] + [spx_row]
-    else:
-        stress_rows = buckets["STRESS"]
+    rd = ind.rate_direction
+    rd_label = "easing" if rd > 0 else ("tightening" if rd < 0 else "on hold")
 
     lines = [
-        f"MACRO INDICATOR SUMMARY — {today_str}",
-        "=====================================",
+        f"MACRO INDICATORS — {today_str}",
+        "=" * 42,
+        "",
+        "GROWTH:",
+        _row("GDP YoY", ind.gdp_yoy, ".2f", "%"),
+        _row("ISM Services PMI", ind.ism_svc, ".1f", "", "50 = neutral"),
+        _row("Payrolls MoM %", ind.payrolls_mom_pct, "+.3f", "%",
+             "approx: 0.09% ≈ +140K jobs"),
+        _row("Jobless Claims", ind.jobless_claims, ",.0f", "", "weekly headcount"),
+        "",
+        "INFLATION:",
+        _row("CPI YoY", ind.cpi_yoy, ".2f", "%"),
+        _row("Core CPI YoY", ind.core_cpi_yoy, ".2f", "%"),
+        _row("PPI YoY", ind.ppi_yoy, ".2f", "%"),
+        _row("PCE YoY", ind.pce_yoy, ".2f", "%", "Fed target: 2.0%"),
+        _row("5Y Breakeven", ind.breakeven_5y, ".2f", "%", "market inflation expectations"),
+        "",
+        "FED / RATES:",
+        f"  {'Rate Direction':<26} {rd:+.1f}  ({rd_label}; -1=tightening, +1=easing)",
+        _row("Yield Curve (10Y-2Y)", ind.yield_curve_spread, "+.0f", " bps",
+             "negative = inverted"),
+        "",
+        "MARKET STRESS:",
+        _row("VIX", ind.vix, ".1f", "", "< 15 calm, > 20 elevated, > 30 crisis"),
+        _row("HY Spread", ind.hy_spread, ".0f", " bps", "< 300 normal, > 450 stressed"),
+        _row("DXY", ind.dxy, ".1f", "", "> 104 strong dollar"),
+        _row("SPX vs 200SMA", ind.spx_pct_above_sma, "+.1f", "%",
+             "above/below 200-day moving avg"),
     ]
-    lines.append(_section("GROWTH", scores.growth_score, buckets["GROWTH"]))
-    lines.append(_section("INFLATION", scores.inflation_score, buckets["INFLATION"]))
-    lines.append(_section("FED / RATES", scores.fed_score, fed_rows))
-    lines.append(_section("MARKET STRESS", scores.stress_score, stress_rows))
+
+    # Explicit missing-indicator summary so the LLM knows what's absent
+    missing = [
+        name for name, val in [
+            ("GDP YoY", ind.gdp_yoy),
+            ("ISM Services PMI", ind.ism_svc),
+            ("Payrolls MoM %", ind.payrolls_mom_pct),
+            ("Jobless Claims", ind.jobless_claims),
+            ("CPI YoY", ind.cpi_yoy),
+            ("Core CPI YoY", ind.core_cpi_yoy),
+            ("PPI YoY", ind.ppi_yoy),
+            ("PCE YoY", ind.pce_yoy),
+            ("5Y Breakeven", ind.breakeven_5y),
+            ("Yield Curve Spread", ind.yield_curve_spread),
+            ("VIX", ind.vix),
+            ("HY Spread", ind.hy_spread),
+            ("DXY", ind.dxy),
+            ("SPX vs 200SMA", ind.spx_pct_above_sma),
+        ]
+        if val is None
+    ]
+    lines.append("")
     lines.append(
-        f"\nQUANTITATIVE REGIME: {scores.regime} "
-        f"(score: {scores.regime_score:.1f}/100, confidence: {scores.regime_confidence:.1f}/10)"
+        f"MISSING INDICATORS: {', '.join(missing)}" if missing else "MISSING INDICATORS: none"
     )
+
     return "\n".join(lines)
 
 
@@ -580,60 +591,67 @@ def _format_indicator_summary(ind: RawIndicators, scores: DimensionalScores) -> 
 # ---------------------------------------------------------------------------
 
 
-def _call_llm(
-    indicator_summary: str,
-    fomc_text: str,
-    quant_regime: str,
-    scores: DimensionalScores,
-) -> dict:
-    """Call Claude to produce qualitative macro overlay.
+_VALID_REGIMES = {"Risk-On", "Risk-Off", "Stagflation", "Transitional"}
+_VALID_TILTS = {"overweight", "neutral", "underweight"}
 
-    Combines the structured indicator table with the FOMC statement text into
-    a single user message, then parses the JSON response.
+_LLM_REQUIRED_KEYS = {
+    "growth_score", "inflation_score", "fed_score", "stress_score",
+    "regime", "regime_score", "regime_confidence",
+    "fed_tone", "override_flag",
+    "qualitative_summary", "key_themes", "portfolio_guidance",
+    "sector_tilts", "upcoming_events",
+}
+
+
+def _call_llm(raw_indicator_block: str, fomc_text: str) -> dict:
+    """Call the LLM to classify the macro regime and produce a full briefing.
+
+    The LLM receives raw indicator values (no pre-computed scores) and decides
+    everything: dimensional scores, regime, confidence, sector tilts, portfolio
+    guidance, and all qualitative fields.
 
     Parameters
     ----------
-    indicator_summary:
-        Formatted indicator table string from _format_indicator_summary().
+    raw_indicator_block:
+        Formatted raw indicator table from _format_raw_indicators_for_llm().
     fomc_text:
         Raw FOMC statement text, or "" if unavailable.
-    quant_regime:
-        Quantitative regime classification string — included in user message
-        as context for the override decision gate.
-    scores:
-        DimensionalScores — used to surface regime_confidence to Claude.
 
     Returns
     -------
     dict
-        Parsed JSON with at minimum: fed_tone, override_flag,
-        qualitative_summary, key_themes, portfolio_guidance.
+        Validated and clamped parsed JSON with all required keys.
 
     Raises
     ------
     MacroAgentError
-        If JSON parsing fails or required keys are missing from the response.
+        If JSON parsing fails, required keys are missing, or values are invalid.
     """
     fomc_section = (
         f"FOMC STATEMENT TEXT:\n{fomc_text.strip()}"
         if fomc_text.strip()
-        else "FOMC STATEMENT TEXT:\n[EMPTY — no statement available. Per system prompt rules: fed_tone MUST be 0.0. Do not infer or score.]"
+        else (
+            "FOMC STATEMENT TEXT:\n"
+            "[EMPTY — no statement available. Per system prompt: fed_tone MUST be 0.0. "
+            "Do not infer or score Fed language.]"
+        )
     )
 
     user_message = (
-        f"{indicator_summary}\n\n"
+        f"{raw_indicator_block}\n\n"
         f"---\n\n"
         f"{fomc_section}\n\n"
         f"---\n\n"
-        f"TASK: Analyze the above data. The quantitative model has classified the regime as "
-        f'"{quant_regime}" with confidence {scores.regime_confidence:.1f}/10. '
-        f"Follow the THINKING ORDER in your system prompt. "
+        f"TASK: Analyze the raw macro indicators and FOMC statement above. "
+        f"Follow the THINKING ORDER in your system prompt — score each dimension, "
+        f"classify the regime, set confidence and regime_score, determine sector tilts, "
+        f"and produce the complete qualitative briefing. "
         f"Respond with a single valid JSON object only."
     )
 
     logger.info(
-        "_call_llm: sending request (indicator_summary_len=%d, fomc_text_len=%d)",
-        len(indicator_summary),
+        "_call_llm: sending request (raw_block_len=%d, fomc_text_len=%d)",
+        len(raw_indicator_block),
         len(fomc_text),
     )
 
@@ -641,7 +659,7 @@ def _call_llm(
     # client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     # response = client.messages.create(
     #     model="claude-sonnet-4-6",
-    #     max_tokens=1500,
+    #     max_tokens=3000,
     #     temperature=0.3,
     #     system=MACRO_SYSTEM_PROMPT,
     #     messages=[{"role": "user", "content": user_message}],
@@ -650,10 +668,9 @@ def _call_llm(
     openai_client = _build_openai_client()
     response = openai_client.chat.completions.create(
         model=OPENAI_MODEL,
-        max_tokens=1500,
-        temperature=0.3,
+        max_completion_tokens=16000,
         messages=[
-            {"role": "system", "content": MACRO_SYSTEM_PROMPT},
+            {"role": "developer", "content": MACRO_SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
     )
@@ -662,7 +679,6 @@ def _call_llm(
 
     # Parse JSON — primary attempt then regex fallback
     cleaned = raw.strip()
-    # Strip markdown code fences if present
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     cleaned = cleaned.strip()
@@ -678,39 +694,80 @@ def _call_llm(
                 parsed = json.loads(match.group())
             except json.JSONDecodeError as exc2:
                 raise MacroAgentError(
-                    f"Claude response JSON parse failed (regex fallback also failed): {exc2}\n"
+                    f"LLM response JSON parse failed (regex fallback also failed): {exc2}\n"
                     f"Raw response (first 500 chars): {raw[:500]}"
                 ) from exc2
         else:
             raise MacroAgentError(
-                f"Claude response contains no JSON object.\n"
+                f"LLM response contains no JSON object.\n"
                 f"Raw response (first 500 chars): {raw[:500]}"
             )
 
     # Validate required keys
-    required = {
-        "fed_tone",
-        "override_flag",
-        "qualitative_summary",
-        "key_themes",
-        "portfolio_guidance",
-    }
-    missing = required - set(parsed.keys())
-    if missing:
+    missing_keys = _LLM_REQUIRED_KEYS - set(parsed.keys())
+    if missing_keys:
         raise MacroAgentError(
-            f"Claude response missing required keys: {missing}. "
+            f"LLM response missing required keys: {missing_keys}. "
             f"Present keys: {set(parsed.keys())}"
         )
 
-    # If override_flag is True, "regime" must be present
-    if bool(parsed.get("override_flag", False)) and "regime" not in parsed:
+    # Validate and clamp dimensional scores to [-1.0, +1.0]
+    for field in ("growth_score", "inflation_score", "fed_score", "stress_score"):
+        try:
+            parsed[field] = max(-1.0, min(1.0, float(parsed[field])))
+        except (TypeError, ValueError) as exc:
+            raise MacroAgentError(f"LLM returned non-numeric {field}: {parsed[field]}") from exc
+
+    # Clamp regime_score to [0.0, 100.0]
+    try:
+        parsed["regime_score"] = max(0.0, min(100.0, float(parsed["regime_score"])))
+    except (TypeError, ValueError) as exc:
+        raise MacroAgentError(f"LLM returned non-numeric regime_score: {parsed['regime_score']}") from exc
+
+    # Clamp regime_confidence to [0.0, 10.0]
+    try:
+        parsed["regime_confidence"] = max(0.0, min(10.0, float(parsed["regime_confidence"])))
+    except (TypeError, ValueError) as exc:
+        raise MacroAgentError(f"LLM returned non-numeric regime_confidence: {parsed['regime_confidence']}") from exc
+
+    # Validate regime value
+    if parsed.get("regime") not in _VALID_REGIMES:
         raise MacroAgentError(
-            "override_flag is True but 'regime' key is missing from Claude response. "
-            "System prompt violation — override requires a regime specification."
+            f"LLM returned invalid regime: '{parsed.get('regime')}'. "
+            f"Must be one of: {_VALID_REGIMES}"
         )
 
+    # Clamp and guard fed_tone
+    try:
+        fed_tone = max(-1.0, min(1.0, float(parsed["fed_tone"])))
+    except (TypeError, ValueError) as exc:
+        raise MacroAgentError(f"LLM returned non-numeric fed_tone: {parsed['fed_tone']}") from exc
+    # Hard guard: no FOMC text → fed_tone must be 0.0 regardless of LLM output
+    if not fomc_text.strip() and fed_tone != 0.0:
+        logger.warning(
+            "fed_tone overridden to 0.0: LLM returned %.2f but no FOMC statement was available.",
+            fed_tone,
+        )
+        fed_tone = 0.0
+    parsed["fed_tone"] = fed_tone
+
+    # Validate sector_tilts structure
+    sector_tilts = parsed.get("sector_tilts", [])
+    if not isinstance(sector_tilts, list):
+        raise MacroAgentError(f"LLM returned non-list sector_tilts: {type(sector_tilts)}")
+    for st in sector_tilts:
+        if not isinstance(st, dict):
+            raise MacroAgentError(f"sector_tilts entry is not a dict: {st}")
+        if st.get("tilt") not in _VALID_TILTS:
+            raise MacroAgentError(
+                f"Invalid sector tilt value '{st.get('tilt')}' for {st.get('sector')}. "
+                f"Must be one of: {_VALID_TILTS}"
+            )
+
     logger.info(
-        "_call_llm: parsed OK | override_flag=%s fed_tone=%s",
+        "_call_llm: parsed OK | regime=%s confidence=%.1f override_flag=%s fed_tone=%.2f",
+        parsed.get("regime"),
+        parsed.get("regime_confidence"),
         parsed.get("override_flag"),
         parsed.get("fed_tone"),
     )
@@ -842,15 +899,14 @@ def _print_data_coverage(ind: RawIndicators, fomc_text: str) -> None:
 def run_macro_pipeline() -> MacroBriefing:
     """Run the full macro intelligence pipeline and return a MacroBriefing.
 
-    Fetches all indicators, scores them quantitatively, calls Claude for
-    qualitative overlay, re-scores with the actual fed_tone, determines the
-    final regime (with optional LLM override), assembles and stores the
-    MacroBriefing, then returns it.
+    Fetches all indicators, formats raw values for the LLM, calls the LLM once
+    to score dimensions and classify the regime, then assembles and stores the
+    MacroBriefing.
 
     This is the entry point called by the APScheduler cron at 7AM ET Mon–Fri
     and by the POST /macro/run API endpoint.
 
-    If the pipeline fails completely (e.g., FRED API + Claude both down), a
+    If the pipeline fails completely (e.g., FRED API + LLM both down), a
     degraded Transitional briefing is returned so downstream agents can still
     operate conservatively.
 
@@ -876,162 +932,97 @@ def run_macro_pipeline() -> MacroBriefing:
             len(fomc_text),
         )
 
-        # ── Phase 2: Score (with fed_tone=0.0 default) ───────────────────────
-        logger.info("Phase 2: quantitative scoring (fed_tone=0.0 placeholder)")
+        # ── Phase 2: Assemble raw indicators ─────────────────────────────────
+        logger.info("Phase 2: assembling raw indicators")
         raw_ind = build_raw_indicators(fred_block, market_block)
         _print_data_coverage(raw_ind, fomc_text)
-        phase2_scores = score_indicators(raw_ind, fed_tone=0.0)
+        raw_indicator_block = _format_raw_indicators_for_llm(raw_ind)
+        logger.info("Phase 2 complete: raw indicator block formatted")
+
+        # ── Phase 3: Single LLM call — regime + all outputs ──────────────────
+        logger.info("Phase 3: LLM regime classification")
+        llm_resp = _call_llm(raw_indicator_block, fomc_text)
+
+        final_regime     = llm_resp["regime"]
+        growth_score     = float(llm_resp["growth_score"])
+        inflation_score  = float(llm_resp["inflation_score"])
+        fed_score        = float(llm_resp["fed_score"])
+        stress_score     = float(llm_resp["stress_score"])
+        regime_score     = float(llm_resp["regime_score"])
+        final_confidence = float(llm_resp["regime_confidence"])
+        override_flag    = bool(llm_resp["override_flag"])
+        override_reason: Optional[str] = llm_resp.get("override_reason")
 
         logger.info(
-            "Phase 2 complete: regime=%s score=%.1f confidence=%.1f",
-            phase2_scores.regime,
-            phase2_scores.regime_score,
-            phase2_scores.regime_confidence,
+            "Phase 3 complete: regime=%s confidence=%.1f score=%.1f override_flag=%s",
+            final_regime, final_confidence, regime_score, override_flag,
         )
 
-        # ── Phase 3: Call Claude ──────────────────────────────────────────────
-        logger.info("Phase 3: Claude qualitative overlay")
-        indicator_summary = _format_indicator_summary(raw_ind, phase2_scores)
-        claude_resp = _call_llm(
-            indicator_summary,
-            fomc_text,
-            phase2_scores.regime,
-            phase2_scores,
-        )
-
-        logger.info(
-            "Phase 3 complete: fed_tone=%.2f override_flag=%s",
-            float(claude_resp.get("fed_tone", 0.0)),
-            claude_resp.get("override_flag", False),
-        )
-
-        # ── Phase 4: Re-score with actual fed_tone ────────────────────────────
-        logger.info("Phase 4: re-scoring with actual fed_tone")
-        fed_tone = float(claude_resp.get("fed_tone", 0.0))
-        fed_tone = max(-1.0, min(1.0, fed_tone))   # clamp to [-1.0, +1.0]
-        # Guard: if no FOMC statement was available, force fed_tone to 0.0 regardless of LLM
-        # output. The LLM can misinterpret the absence sentinel as scored content.
-        if not fomc_text.strip():
-            if fed_tone != 0.0:
-                logger.warning(
-                    "fed_tone overridden to 0.0: LLM returned %.2f but no FOMC statement was available.",
-                    fed_tone,
-                )
-            fed_tone = 0.0
-        final_scores = score_indicators(raw_ind, fed_tone=fed_tone)
-
-        logger.info(
-            "Phase 4 complete: final regime=%s score=%.1f confidence=%.1f",
-            final_scores.regime,
-            final_scores.regime_score,
-            final_scores.regime_confidence,
-        )
-
-        # ── Phase 5: Read previous regime ────────────────────────────────────
-        logger.info("Phase 5: reading previous regime from Supabase")
+        # ── Phase 4: Read previous regime ────────────────────────────────────
+        logger.info("Phase 4: reading previous regime from Supabase")
         previous_regime = _read_previous_regime()
-        logger.info("Phase 5 complete: previous_regime=%s", previous_regime)
+        logger.info("Phase 4 complete: previous_regime=%s", previous_regime)
 
-        # ── Phase 6: Determine final regime (override check) ─────────────────
-        logger.info("Phase 6: override check")
-        override_flag = bool(claude_resp.get("override_flag", False))
-        override_reason: Optional[str] = claude_resp.get("override_reason")
-
-        if override_flag and "regime" in claude_resp:
-            final_regime = claude_resp["regime"]
-            logger.info(
-                "Phase 6: LLM override applied — regime changed from %s to %s",
-                final_scores.regime,
-                final_regime,
-            )
-        else:
-            final_regime = final_scores.regime
-            logger.info(
-                "Phase 6: no override — using quantitative regime=%s", final_regime
-            )
-
-        regime_changed = (
-            previous_regime is not None and final_regime != previous_regime
-        )
+        regime_changed = previous_regime is not None and final_regime != previous_regime
         if regime_changed:
-            logger.info("Regime changed: %s -> %s", previous_regime, final_regime)
+            logger.info("Regime changed: %s → %s", previous_regime, final_regime)
             notify_event("REGIME_CHANGED", {
                 "previous_regime": previous_regime,
                 "new_regime": final_regime,
-                "confidence": round(final_scores.regime_confidence, 1),
-                "regime_score": round(final_scores.regime_score, 1),
+                "confidence": round(final_confidence, 1),
+                "regime_score": round(regime_score, 1),
             })
 
-        # ── Confidence gate ────────────────────────────────────────────────────
-        # When confidence < 7.0 and regime is not already Transitional, the
-        # portfolio_guidance must reflect Transitional posture — signals are too
-        # mixed to act on the classified regime.
-        portfolio_guidance_text = claude_resp["portfolio_guidance"]
-        if final_scores.regime_confidence < 7.0 and final_regime != "Transitional":
-            portfolio_guidance_text = (
-                f"Signal confidence is {final_scores.regime_confidence:.1f}/10 — regime signals "
-                f"are mixed. Adopt Transitional posture regardless of {final_regime} "
-                f"classification: hold current book at reduced size, standard stops. "
-                f"Small positions (≤3% NAV) remain actionable on high-quality setups. "
-                f"Medium positions (3–6% NAV) require conviction ≥ 7.5. "
-                f"Large positions (>6% NAV) deferred until confidence ≥ 7.0."
-            )
-            logger.info(
-                "Confidence gate triggered: confidence=%.1f < 7.0 — portfolio_guidance "
-                "overridden to Transitional posture (classified regime: %s)",
-                final_scores.regime_confidence,
-                final_regime,
-            )
-
-        # ── Phase 7: Build IndicatorScore list ────────────────────────────────
-        logger.info("Phase 7: building IndicatorScore list")
+        # ── Phase 5: Build IndicatorScore list ────────────────────────────────
+        logger.info("Phase 5: building IndicatorScore list")
         raw_indicator_dicts = build_indicator_scores(raw_ind)
         indicator_scores_list: list[IndicatorScore] = []
         for d in raw_indicator_dicts:
             try:
                 indicator_scores_list.append(IndicatorScore(**d))
             except Exception as exc:
-                logger.warning(
-                    "Phase 7: failed to build IndicatorScore from %s — %s", d, exc
-                )
+                logger.warning("Phase 5: failed to build IndicatorScore from %s — %s", d, exc)
 
-        # ── Phase 8: Assemble MacroBriefing ───────────────────────────────────
-        logger.info("Phase 8: assembling MacroBriefing")
+        # ── Phase 6: Assemble MacroBriefing ───────────────────────────────────
+        logger.info("Phase 6: assembling MacroBriefing")
 
-        # Build sector tilts deterministically from regime + confidence
-        sector_tilts_list = _build_sector_tilts(final_regime, final_scores.regime_confidence)
+        sector_tilts_list: list[SectorTilt] = []
+        for st in llm_resp.get("sector_tilts", []):
+            try:
+                sector_tilts_list.append(SectorTilt(**st))
+            except Exception as exc:
+                logger.warning("Phase 6: failed to build SectorTilt from %s — %s", st, exc)
 
-        # Parse upcoming_events from Claude response
         upcoming_events_list: list[UpcomingEvent] = []
-        for ev in claude_resp.get("upcoming_events", []):
+        for ev in llm_resp.get("upcoming_events", []):
             try:
                 upcoming_events_list.append(UpcomingEvent(**ev))
             except Exception as exc:
-                logger.warning("Phase 8: failed to build UpcomingEvent from %s — %s", ev, exc)
+                logger.warning("Phase 6: failed to build UpcomingEvent from %s — %s", ev, exc)
 
         briefing = MacroBriefing(
             date=today.isoformat(),
             regime=final_regime,
-            regime_score=final_scores.regime_score,
+            regime_score=regime_score,
             override_flag=override_flag,
             indicator_scores=indicator_scores_list,
-            qualitative_summary=claude_resp["qualitative_summary"],
-            key_themes=claude_resp["key_themes"],
-            portfolio_guidance=portfolio_guidance_text,
+            qualitative_summary=llm_resp["qualitative_summary"],
+            key_themes=llm_resp["key_themes"],
+            portfolio_guidance=llm_resp["portfolio_guidance"],
             override_reason=override_reason,
             previous_regime=previous_regime,
             regime_changed=regime_changed,
-            growth_score=final_scores.growth_score,
-            inflation_score=final_scores.inflation_score,
-            fed_score=final_scores.fed_score,
-            stress_score=final_scores.stress_score,
-            regime_confidence=final_scores.regime_confidence,
+            growth_score=growth_score,
+            inflation_score=inflation_score,
+            fed_score=fed_score,
+            stress_score=stress_score,
+            regime_confidence=final_confidence,
             sector_tilts=sector_tilts_list if sector_tilts_list else None,
             upcoming_events=upcoming_events_list if upcoming_events_list else None,
         )
 
-        # ── Phase 9: Store ────────────────────────────────────────────────────
-        logger.info("Phase 9: storing briefing to Supabase")
+        # ── Phase 7: Store ────────────────────────────────────────────────────
+        logger.info("Phase 7: storing briefing to Supabase")
         row_id = _store_briefing(briefing)
         logger.info(
             "=== Macro pipeline complete | regime=%s confidence=%.1f row_id=%s ===",
@@ -1061,8 +1052,8 @@ def run_macro_pipeline() -> MacroBriefing:
             key_themes=["Pipeline error — no macro signals available"],
             portfolio_guidance=(
                 "Transitional regime assumed due to data failure. "
-                "Hold existing positions. Small positions (≤3% NAV) may be initiated on very high-conviction setups only. "
-                "No medium or large new entries until pipeline recovers."
+                "Hold existing positions. Small positions (≤3% NAV) may be initiated on very "
+                "high-conviction setups only. No medium or large new entries until pipeline recovers."
             ),
             override_reason=f"Pipeline error: {exc}",
         )

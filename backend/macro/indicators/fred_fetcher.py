@@ -31,7 +31,7 @@ FRED_SERIES: dict[str, str] = {
     "gdp":          "GDPC1",         # quarterly real GDP (billions)
     "cpi":          "CPIAUCSL",      # CPI all items monthly
     "core_cpi":     "CPILFESL",      # CPI less food and energy
-    "ppi":          "PPIACO",        # PPI all commodities
+    "ppi":          "WPSFD49207",    # PPI Final Demand (BLS headline, SA) — replaced PPIACO (all commodities, too volatile)
     "pce":          "PCEPI",         # PCE deflator
     "breakeven_5y": "T5YIE",         # 5Y breakeven inflation rate (daily)
     # ISM Mfg PMI (NAPM) was removed from FRED by ISM due to licensing restrictions.

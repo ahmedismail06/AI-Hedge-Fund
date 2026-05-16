@@ -44,6 +44,11 @@ def _fetch_latest_statement_url() -> str | None:
     Scrape the FOMC calendar page and return the URL of the most recent
     FOMC statement press release.
 
+    Finds all hrefs matching the FOMC statement URL pattern
+    (monetary{YYYYMMDD}b.htm), extracts dates from the URLs, and returns
+    the one with the most recent date. This is more robust than searching
+    by link text, which breaks when anchor tags contain nested HTML.
+
     Returns the fully-qualified URL string, or None if no matching link
     is found or if the request fails.
     """
@@ -61,30 +66,34 @@ def _fetch_latest_statement_url() -> str | None:
     try:
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # Find all anchor tags whose visible text contains "Statement"
-        statement_links = soup.find_all(
-            "a", string=re.compile(r"Statement", re.IGNORECASE)
+        # Match FOMC statement hrefs: /newsevents/pressreleases/monetary{YYYYMMDD}b.htm
+        _stmt_pattern = re.compile(
+            r"/newsevents/pressreleases/monetary(\d{8})b\.htm", re.IGNORECASE
         )
 
-        # Keep only links pointing to press-release pages
-        filtered = [
-            tag
-            for tag in statement_links
-            if tag.get("href") and "/newsevents/pressreleases/" in tag["href"]
-        ]
+        candidates: list[tuple[str, str]] = []  # (YYYYMMDD, full_url)
+        for tag in soup.find_all("a", href=True):
+            m = _stmt_pattern.search(tag["href"])
+            if m:
+                date_str = m.group(1)  # YYYYMMDD — sortable as a plain string
+                href = tag["href"]
+                if href.startswith("/"):
+                    href = FOMC_BASE_URL + href
+                candidates.append((date_str, href))
 
-        if not filtered:
+        if not candidates:
             logger.warning("No FOMC statement links found on calendar page.")
             return None
 
-        # The page lists meetings chronologically; the last matching link is
-        # the most recent statement.
-        href = filtered[-1]["href"]
+        # Sort descending by date string (YYYYMMDD lexicographic == chronological)
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        most_recent_date, most_recent_url = candidates[0]
 
-        if href.startswith("/"):
-            href = FOMC_BASE_URL + href
-
-        return href
+        logger.debug(
+            "_fetch_latest_statement_url: found %d statement links, most recent=%s",
+            len(candidates), most_recent_date,
+        )
+        return most_recent_url
 
     except Exception as exc:
         logger.warning("Error parsing FOMC calendar HTML: %s", exc)

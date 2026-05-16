@@ -13,6 +13,14 @@ Dimensional scores range from -1.0 to +1.0 where:
   stress_score:    positive = high market stress
 
 Regime outputs: Risk-On | Risk-Off | Stagflation | Transitional
+
+NOTE (post-LLM-refactor): score_indicators(), classify_regime(),
+compute_regime_confidence(), compute_regime_score(), and the four
+_score_*() helpers are NO LONGER CALLED by macro_agent.py.
+The LLM now performs all dimension scoring and regime classification.
+These functions are retained for reference and future use in the
+Backtest Engine (Component 11). build_raw_indicators() and
+build_indicator_scores() remain in active use.
 """
 
 from dotenv import load_dotenv
@@ -643,7 +651,7 @@ def compute_regime_confidence(
             score += 3.0
 
     elif regime == "Transitional":
-        # Always uncertain by definition
+        # Fallback only — macro_agent overrides this with the LLM's signal-clarity assessment
         score = 5.0
 
     result = max(0.0, min(10.0, score))
