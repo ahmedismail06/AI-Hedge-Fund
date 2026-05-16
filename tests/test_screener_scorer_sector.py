@@ -37,7 +37,8 @@ def _build_ticker(ev_multiple=10.0):
         "quality": {"raw_values": {
             "gross_margin":       0.6,
             "revenue_growth_yoy": 0.20,
-            "roe":                0.20,
+            "roic":               0.20,
+            "fcf_conversion":     1.00,
             "debt_to_equity":     0.30,
             "eps_beat_rate":      0.70,
         }},

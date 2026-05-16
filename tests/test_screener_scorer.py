@@ -57,7 +57,8 @@ def _good_quality_raw() -> dict:
         "raw_values": {
             "gross_margin":       0.75,
             "revenue_growth_yoy": 0.30,
-            "roe":                0.25,
+            "roic":               0.25,
+            "fcf_conversion":     1.20,
             "debt_to_equity":     0.20,
             "eps_beat_rate":      0.80,
         }
@@ -70,7 +71,8 @@ def _poor_quality_raw() -> dict:
         "raw_values": {
             "gross_margin":       0.20,
             "revenue_growth_yoy": -0.05,
-            "roe":                0.02,
+            "roic":               0.02,
+            "fcf_conversion":     0.30,
             "debt_to_equity":     3.0,
             "eps_beat_rate":      0.25,
         }
@@ -341,7 +343,8 @@ def test_risk_off_caps_high_debt_at_6_5():
         "raw_values": {
             "gross_margin":       0.75,
             "revenue_growth_yoy": 0.30,
-            "roe":                0.25,
+            "roic":               0.25,
+            "fcf_conversion":     1.20,
             "debt_to_equity":     3.0,  # > 2.0 → high debt flag
             "eps_beat_rate":      0.80,
         }

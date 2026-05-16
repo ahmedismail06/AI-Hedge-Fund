@@ -37,7 +37,8 @@ def _build(ticker, gross_margin=0.6, d2e=0.5, cash_runway=None, si_bonus=0.0, se
                 "raw_values": {
                     "gross_margin":       gross_margin,
                     "revenue_growth_yoy": 0.20,
-                    "roe":                0.20,
+                    "roic":               0.20,
+                    "fcf_conversion":     1.00,
                     "debt_to_equity":     d2e,
                     "eps_beat_rate":      0.75,
                 }
@@ -77,37 +78,17 @@ def _run(ticker, regime, gross_margin=0.6, d2e=0.5, cash_runway=None, si_bonus=0
 # Stagflation: gross_margin penalty
 # ===========================================================================
 
-def test_stagflation_low_gross_margin_gets_penalty():
-    """gross_margin=0.35 (<0.40) in Stagflation → lower score than Risk-On baseline."""
-    r_stagflation = _run("T", "Stagflation", gross_margin=0.35)
-    r_risk_on     = _run("T", "Risk-On",     gross_margin=0.35)
-    # Stagflation applies −0.5 penalty on top of the regime weight difference
-    # Verify penalty is reflected (Stagflation score < Risk-On for same ticker)
-    # Note: weights also differ; what we assert is the penalty exists in Stagflation
-    r_no_penalty  = _run("T", "Stagflation", gross_margin=0.45)
-    assert r_stagflation.composite_score < r_no_penalty.composite_score
-
-
-def test_stagflation_high_gross_margin_no_penalty():
-    """gross_margin=0.45 (≥0.40) → no Stagflation penalty."""
-    r_high = _run("T", "Stagflation", gross_margin=0.45)
+def test_stagflation_no_hardcoded_gm_penalty():
+    """Stagflation no longer applies a hard −0.5 penalty for gross_margin < 0.40.
+    Low-margin names are penalised continuously through sector-relative quality normalization.
+    Verify that the same ticker scores identically in Stagflation for gm=0.35 vs gm=0.45
+    when they are the only ticker (single-ticker cohort → quality normalizes to 5.0 either way).
+    """
     r_low  = _run("T", "Stagflation", gross_margin=0.35)
-    assert r_high.composite_score > r_low.composite_score
-
-
-def test_stagflation_gross_margin_exactly_040_no_penalty():
-    """Condition is gross_margin < 0.40; exactly 0.40 must NOT be penalised."""
-    # Use a three-ticker universe so normalization resolves
-    universe = [_make_candidate(t) for t in ["EXACT", "BELOW", "ANCHOR"]]
-    factors = {}
-    factors.update(_build("EXACT",  gross_margin=0.40))
-    factors.update(_build("BELOW",  gross_margin=0.35))
-    factors.update(_build("ANCHOR", gross_margin=0.60))
-    results = compute_composite(universe, factors, "Stagflation")
-    r_exact = next(r for r in results if r.ticker == "EXACT")
-    r_below = next(r for r in results if r.ticker == "BELOW")
-    # EXACT (no penalty) should score strictly higher than BELOW (penalty)
-    assert r_exact.composite_score > r_below.composite_score
+    r_high = _run("T", "Stagflation", gross_margin=0.45)
+    # Single-ticker universe: quality sub-metrics normalize to 5.0 regardless of raw value.
+    # Both should produce the same composite — no hard penalty applied.
+    assert r_low.composite_score == r_high.composite_score
 
 
 # ===========================================================================
@@ -176,7 +157,7 @@ def test_all_four_regimes_produce_different_composites():
     factors_template = {
         "quality": {"raw_values": {
             "gross_margin": 0.80, "revenue_growth_yoy": 0.40,
-            "roe": 0.35, "debt_to_equity": 0.10, "eps_beat_rate": 0.90,
+            "roic": 0.35, "fcf_conversion": 1.20, "debt_to_equity": 0.10, "eps_beat_rate": 0.90,
         }},
         "value": {"raw_values": {
             "ev_multiple": 8.0, "p_fcf": 10.0, "price_book": 1.5,
@@ -200,7 +181,7 @@ def test_all_four_regimes_produce_different_composites():
             **factors_template,
             "quality": {"raw_values": {
                 "gross_margin": 0.50, "revenue_growth_yoy": 0.10,
-                "roe": 0.10, "debt_to_equity": 0.50, "eps_beat_rate": 0.50,
+                "roic": 0.10, "fcf_conversion": 0.80, "debt_to_equity": 0.50, "eps_beat_rate": 0.50,
             }},
         },
         "C": {
@@ -250,7 +231,7 @@ def test_composite_score_never_below_0():
         "BAD": {
             "quality": {"raw_values": {
                 "gross_margin": 0.05, "revenue_growth_yoy": -0.30,
-                "roe": -0.20, "debt_to_equity": 5.0, "eps_beat_rate": 0.0,
+                "roic": -0.20, "fcf_conversion": -0.50, "debt_to_equity": 5.0, "eps_beat_rate": 0.0,
             }},
             "value":    {"raw_values": {"ev_multiple": 100.0, "p_fcf": 200.0, "price_book": 20.0}},
             "momentum": {"raw_values": {"price_12_1": -0.5, "price_6_1": -0.4, "eps_revision": -0.2},

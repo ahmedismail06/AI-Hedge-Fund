@@ -172,10 +172,10 @@ def test_score_quality_returns_required_keys():
 
 
 def test_score_quality_raw_values_has_all_sub_metrics():
-    """raw_values must contain all 5 sub-metrics."""
+    """raw_values must contain all 6 sub-metrics."""
     result = score_quality("AAPL", _make_polygon_financials(), {})
     rv = result["raw_values"]
-    for key in ("gross_margin", "revenue_growth_yoy", "roe", "debt_to_equity", "eps_beat_rate"):
+    for key in ("gross_margin", "revenue_growth_yoy", "roic", "debt_to_equity", "fcf_conversion", "eps_beat_rate"):
         assert key in rv, f"Missing sub-metric: {key}"
 
 
@@ -236,12 +236,43 @@ def test_score_quality_revenue_growth_yoy():
     assert math.isclose(result["raw_values"]["revenue_growth_yoy"], expected, rel_tol=1e-6)
 
 
-def test_score_quality_roe():
-    """roe = net_income / equity."""
-    pf = _make_polygon_financials(current_net_income=50e6, current_equity=200e6)
-    result = score_quality("ROE1", pf, {})
-    expected = 50e6 / 200e6
-    assert math.isclose(result["raw_values"]["roe"], expected, rel_tol=1e-6)
+def test_score_quality_roic_from_fmp():
+    """roic = NOPAT / InvestedCapital from FMP data."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 100e6, "incomeTaxExpense": 21e6, "incomeBeforeTax": 100e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 300e6, "totalDebt": 100e6, "cashAndCashEquivalents": 50e6}],
+    }
+    result = score_quality("ROIC1", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    # NOPAT = 100e6 * (1 - 0.21) = 79e6; IC = 300 + 100 - 50 = 350e6
+    expected = 79e6 / 350e6
+    assert math.isclose(result["raw_values"]["roic"], expected, rel_tol=1e-4)
+
+
+def test_score_quality_roic_none_when_invested_capital_nonpositive():
+    """roic is None when invested_capital <= 0 (net-cash company with no debt)."""
+    fmp_quality = {
+        "income_statement":        [],
+        "annual_income_statement": [{"operatingIncome": 50e6, "incomeTaxExpense": 10e6, "incomeBeforeTax": 50e6}],
+        "balance_sheet":           [{"totalStockholdersEquity": 100e6, "totalDebt": 0, "cashAndCashEquivalents": 150e6}],
+    }
+    result = score_quality("NETCASH", _make_polygon_financials(), {}, fmp_quality=fmp_quality)
+    assert result["raw_values"]["roic"] is None
+
+
+def test_score_quality_fcf_conversion_computed():
+    """fcf_conversion = (OCF - CapEx) / net_income, clamped to [-1, 3]."""
+    pf = _make_polygon_financials(current_net_income=50e6, current_cfo=80e6, current_capex=-20e6)
+    result = score_quality("FCF1", pf, {})
+    expected = (80e6 - 20e6) / 50e6  # = 1.2
+    assert math.isclose(result["raw_values"]["fcf_conversion"], expected, rel_tol=1e-6)
+
+
+def test_score_quality_fcf_conversion_none_when_net_income_nonpositive():
+    """fcf_conversion is None when net_income <= 0."""
+    pf = _make_polygon_financials(current_net_income=-10e6, current_cfo=5e6)
+    result = score_quality("LOSS1", pf, {})
+    assert result["raw_values"]["fcf_conversion"] is None
 
 
 def test_score_quality_eps_beat_rate_computed():
@@ -279,10 +310,10 @@ def test_score_quality_eps_beat_rate_none_when_no_history():
 
 
 def test_score_quality_empty_polygon_financials_returns_none_values():
-    """Empty polygon_financials → all raw_values are None (no FY data)."""
+    """Empty polygon_financials → raw_values sourced only from Polygon are None."""
     result = score_quality("EMPTY", {"results": []}, {})
     rv = result["raw_values"]
-    for key in ("gross_margin", "revenue_growth_yoy", "roe", "debt_to_equity"):
+    for key in ("gross_margin", "revenue_growth_yoy", "roic", "debt_to_equity", "fcf_conversion"):
         assert rv[key] is None, f"Expected None for {key}, got {rv[key]}"
 
 
