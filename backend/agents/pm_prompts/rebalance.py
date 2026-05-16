@@ -9,7 +9,7 @@ NO_ACTION | REBALANCE | RAISE_CASH | DEPLOY_CASH.
 import json
 from typing import Any, Dict, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. You are conducting a portfolio-level rebalancing review to ensure the portfolio's exposure and sector weights are appropriate for the current macro regime and risk environment.
 
@@ -164,7 +164,7 @@ Net (signed weight — directional bet):
 ### Recent Decisions for Portfolio
 {json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for the portfolio."}
 
-{format_calibration_context(base_ctx)}---
+{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Assess whether the portfolio requires rebalancing given the current regime guidance, sector concentration, and exposure drift. Remember: rebalance only when deviation is meaningful, not mechanical.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

@@ -284,7 +284,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
         if cached is not None:
             return cached
 
-    # ── Phase 1: Collect all common-stock ticker symbols ────
+    # ── Step 1: Collect all common-stock ticker symbols ────
     all_symbols: List[str] = []
     target_exchanges = {"XNYS", "XNAS", "XASE"}
 
@@ -326,7 +326,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
 
     logger.info("Polygon list: %d common-stock symbols on NYSE/NASDAQ/AMEX (%d pages)", len(all_symbols), pages_fetched)
 
-    # ── Phase 2: Sequential detail-fetch for market_cap + sic_code ───────────
+    # ── Step 2: Sequential detail-fetch for market_cap + sic_code ───────────
     candidates: List[UniverseCandidate] = []
     logger.info("Fetching detail for %d symbols (sequential, ~0.25s each — this takes ~20 min)", len(all_symbols))
 

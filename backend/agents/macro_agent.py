@@ -248,7 +248,7 @@ forward-guidance signals in either direction.
 REGIME PORTFOLIO IMPLICATIONS:
 
 Risk-On:
-  Gross exposure: up to 150% gross (Phase 1: full long allocation)
+  Gross exposure: up to 150% gross (Risk-On: full long deployment)
   Sector tilt: favor SaaS (revenue visibility) and high-growth Industrials (book-to-bill > 1.0)
   Stop posture: standard Tier 1 at -8% position, Tier 2 at -15% strategy
 

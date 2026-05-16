@@ -500,3 +500,17 @@ CREATE INDEX IF NOT EXISTS earnings_events_ticker_idx
 CREATE INDEX IF NOT EXISTS earnings_events_drift_idx
     ON earnings_events (ticker, drift_hold_active, drift_hold_until)
     WHERE drift_hold_active = TRUE;
+
+-- ── Capability Snapshots ──────────────────────────────────────────────────────
+-- Capability snapshot audit trail — records active capability tier on every PM cycle
+create table if not exists capability_snapshots (
+  id               serial primary key,
+  timestamp        timestamptz not null default now(),
+  nav_current      float not null,
+  nav_trailing_30d float not null,
+  capability_tier  text not null,
+  capabilities     jsonb not null,
+  triggered_by     text  -- 'scheduled' | 'pm_cycle' | 'manual'
+);
+
+create index if not exists capability_snapshots_ts_idx on capability_snapshots (timestamp desc);

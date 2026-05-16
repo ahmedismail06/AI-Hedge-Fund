@@ -10,7 +10,7 @@ The PM decides: REDUCE_EXPOSURE | HALT_NEW_ENTRIES | LIQUIDATE_TO_TARGET | HEDGE
 import json
 from typing import Any, Dict, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. A crisis event has been detected — a CRITICAL risk alert, drawdown spike, or regime shift. You must assess the situation and choose a proportional response.
 
@@ -127,7 +127,7 @@ Regime: {base_ctx['macro_regime']} | Gross cap: {base_ctx['regime_caps']['gross'
 ### Recent Decisions for {alert_ticker if alert_ticker else "Portfolio"}
 {json.dumps(base_ctx['ticker_history'], indent=2, default=str) if base_ctx.get('ticker_history') else "No previous decisions found for this ticker/portfolio."}
 
-{format_calibration_context(base_ctx)}---
+{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Assess the severity of this crisis event and choose a proportional response. Consider: is this isolated or systemic, is it a data artifact or a real signal, and what is the cost of overreacting vs underreacting?
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

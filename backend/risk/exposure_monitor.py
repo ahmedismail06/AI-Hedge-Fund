@@ -24,7 +24,7 @@ def check_exposure_drift(
         positions:       list of OPEN position dicts from the `positions` table.
                          Must have: dollar_size, direction, sector fields.
         regime:          current macro regime string.
-        portfolio_value: total portfolio NAV in dollars (default $25K for Phase 1).
+        portfolio_value: total portfolio NAV in dollars.
 
     Returns:
         List of ExposureBreach objects. Empty list = exposure within limits.

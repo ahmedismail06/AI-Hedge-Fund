@@ -343,7 +343,7 @@ def compute_composite(
                 composite -= 0.5
             cand_sector = cand.sector if cand else None
             if cand_sector == "Industrials":
-                # book-to-bill proxy not available in Phase 1; skip
+                # book-to-bill proxy not available from current data sources; skip
                 pass
 
         composite = max(0.0, min(10.0, round(composite, 3)))

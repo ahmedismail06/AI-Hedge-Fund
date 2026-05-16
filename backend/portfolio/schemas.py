@@ -120,7 +120,7 @@ class SizingRecommendation(BaseModel):
     ticker: str = Field(min_length=1, description="Exchange ticker symbol, e.g. 'AAPL'.")
     date: str = Field(description="ISO date (YYYY-MM-DD) when sizing was computed.")
     direction: Literal["LONG", "SHORT"] = Field(
-        description="Trade direction — Phase 1 is long-only; SHORT unlocked at Phase 2."
+        description="Trade direction — SHORT requires shorts_enabled in current capability tier."
     )
     conviction_score: float = Field(
         ge=0.0,

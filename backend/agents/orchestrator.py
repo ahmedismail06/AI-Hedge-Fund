@@ -1454,15 +1454,22 @@ def _route_decision(
             return "SENT_TO_EXECUTION"
 
         elif category == "CRISIS" and decision == "HEDGE":
-            # Phase 1: no hedging instruments available.  Decision is logged; no execution action.
-            logger.warning(
-                "PM: CRISIS HEDGE — no hedging instruments in Phase 1; decision logged, manual intervention required"
-            )
-            notify_event("CRISIS_MODE", {
-                "action": "HEDGE",
-                "note": "Phase 1 no-op — manual intervention required",
-            })
-            return "NO_ACTION"
+            from backend.capabilities import get_capabilities
+            caps = get_capabilities()
+            if not caps.shorts_enabled:
+                logger.warning(
+                    "PM: CRISIS HEDGE deferred — shorts not available at capability tier %s; manual intervention required",
+                    caps.capability_tier,
+                )
+                notify_event("CRISIS_MODE", {
+                    "action": "HEDGE",
+                    "note": f"Hedging unavailable at {caps.capability_tier} — manual intervention required",
+                })
+                return "NO_ACTION"
+            # Shorts enabled: hedging instruments available — execute hedge
+            logger.info("PM: CRISIS HEDGE — shorts enabled at %s, sending to execution", caps.capability_tier)
+            notify_event("CRISIS_MODE", {"action": "HEDGE", "capability_tier": caps.capability_tier})
+            return "SENT_TO_EXECUTION"
 
         elif category == "PRE_EARNINGS" and decision == "SIZE_UP":
             # Add to position ahead of earnings.  Uses exit_action=ADD (same as EXIT_TRIM+ADD).
@@ -1916,6 +1923,20 @@ def run_pm_cycle(
             _scan_event_triggers()
         except Exception as exc:
             logger.warning("PM cycle: event trigger scan failed — %s", exc)
+
+        # ── Step 3b2: Capability snapshot (fire-and-forget audit trail) ──────────
+        try:
+            from backend.capabilities import get_capabilities
+            _caps = get_capabilities()
+            _get_client().table("capability_snapshots").insert({
+                "nav_current": _caps.nav,
+                "nav_trailing_30d": _caps.nav_trailing_30d,
+                "capability_tier": _caps.capability_tier,
+                "capabilities": _caps.model_dump(),
+                "triggered_by": "pm_cycle",
+            }).execute()
+        except Exception as exc:
+            logger.debug("PM cycle: capability snapshot write failed — %s", exc)
 
         # ── Step 3c: Pre-Claude gates (Changes 2 and 3) ───────────────────────────
         pending_memo_count = _count_pending_memos()

@@ -95,6 +95,22 @@ def get_current_exposure(
     regime = regime or _DEFAULT_REGIME
     caps = _resolve_caps(regime)
 
+    # Intersect regime caps with NAV-derived capability tier.
+    # If shorts are disabled, floor the net-short cap at 0 (no short exposure allowed).
+    # If shorts are enabled but the capability tier imposes a tighter net cap than the
+    # regime, apply the tighter of the two.
+    try:
+        from backend.capabilities import get_capabilities
+        system_caps = get_capabilities()
+        if not system_caps.shorts_enabled:
+            caps = dict(caps)
+            caps["max_net_short"] = 0.0
+        elif system_caps.max_net_exposure_pct is not None:
+            caps = dict(caps)
+            caps["max_net_long"] = min(caps["max_net_long"], system_caps.max_net_exposure_pct)
+    except Exception as _exc:
+        logger.debug("exposure_tracker: capability check skipped — %s", _exc)
+
     long_notional = 0.0
     short_notional = 0.0  # stored as positive; sign applied in net calculation
     sector_buckets: dict[str, float] = defaultdict(float)

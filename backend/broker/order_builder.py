@@ -129,9 +129,12 @@ def build_order(position_row: dict) -> tuple:
     entry_price: float = float(position_row["entry_price"])
 
     if direction != "LONG":
-        raise OrderBuildError(
-            f"direction '{direction}' not supported — Phase 1 is long-only (SHORT deferred to Phase 2)"
-        )
+        from backend.capabilities import get_capabilities
+        caps = get_capabilities()
+        if not caps.shorts_enabled:
+            raise OrderBuildError(
+                f"SHORT orders not available at current NAV tier ({caps.capability_tier})"
+            )
 
     # 2. Fetch ADV
     adv = _fetch_adv(ticker)

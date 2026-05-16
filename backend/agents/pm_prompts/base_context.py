@@ -201,6 +201,19 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         logger.warning("build_base_context: pm_calibration read failed — %s", exc)
         ctx["calibration_anchor"] = {}
 
+    # ── NAV-gated capabilities ────────────────────────────────────────────────
+    try:
+        from backend.capabilities import get_capabilities
+        caps = get_capabilities()
+        ctx["capabilities"] = caps.model_dump()
+        ctx["capability_tier"] = caps.capability_tier
+        ctx["shorts_enabled"] = caps.shorts_enabled
+    except Exception as exc:
+        logger.warning("build_base_context: capabilities read failed — %s", exc)
+        ctx["capabilities"] = None
+        ctx["capability_tier"] = "tier_0"
+        ctx["shorts_enabled"] = False
+
     return ctx
 
 
@@ -228,6 +241,42 @@ def format_calibration_context(base_ctx: dict) -> str:
         parts.append("")
 
     return "\n".join(parts)
+
+
+def format_capabilities_context(base_ctx: dict) -> str:
+    """
+    Return a formatted string block describing current NAV-gated capabilities.
+    Included in every PM decision user_message so Claude reasons within constraints.
+    """
+    caps = base_ctx.get("capabilities")
+    if not caps:
+        return "### Current Capabilities\nUnable to determine capabilities — defaulting to long-only (tier_0).\n\n"
+
+    tier = caps.get("capability_tier", "tier_0")
+    shorts = caps.get("shorts_enabled", False)
+    reasons = caps.get("unlocked_reasons", [])
+    nav_30d = caps.get("nav_trailing_30d", 0)
+    alt_data = caps.get("alt_data_permitted", False)
+
+    shorts_line = (
+        f"Shorts ENABLED (universe min cap: ${caps.get('short_universe_min_cap', 0):.0f}M)"
+        if shorts
+        else "Shorts DISABLED (requires ≥$25K trailing NAV)"
+    )
+
+    lines = [
+        "### Current Capabilities (NAV-Gated)",
+        f"Tier: {tier} | Trailing 30d NAV: ${nav_30d:,.0f}",
+        f"Shorts: {shorts_line}",
+        f"Alt data: {'permitted (budget gate separate)' if alt_data else 'not permitted (requires ≥$250K NAV)'}",
+        "Active capabilities:",
+    ] + [f"  • {r}" for r in reasons] + [
+        "",
+        "If a decision requires a capability not listed above, choose an alternative "
+        "within your current capability set or DEFER.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _build_calibration_anchor(rows: list) -> dict:

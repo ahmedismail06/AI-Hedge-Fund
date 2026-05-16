@@ -8,7 +8,7 @@ recommendation and decides: EXECUTE | MODIFY_SIZE | DEFER | REJECT | WATCHLIST.
 import json
 from typing import Any, Dict, Optional, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund ($50M–$2B market cap, ≤5 sell-side analysts covering). Your edge is identifying variant perception opportunities — situations where you have a differentiated view from consensus — before institutional capital arrives.
 
@@ -170,7 +170,7 @@ Existing positions in same sector ({memo_sector}): {sector_overlap if sector_ove
 ### Recent PM Decisions (last 10)
 {json.dumps([{k: v for k, v in d.items() if k not in ('outcome', 'confidence_breakdown')} for d in base_ctx['recent_decisions']], indent=2, default=str)}
 
-{format_calibration_context(base_ctx)}---
+{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Evaluate this memo against the current portfolio state and make your entry decision. Consider: thesis quality, variant perception clarity, portfolio fit, sector concentration, regime alignment, and sizing relative to available capacity. Use your historical calibration stats to inform how much weight to put on your conviction score.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""
