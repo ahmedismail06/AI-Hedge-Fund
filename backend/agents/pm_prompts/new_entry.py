@@ -162,6 +162,7 @@ def build_new_entry_prompt(
 - Open positions: {base_ctx['position_count']}
 - Macro regime: {base_ctx['macro_regime']}
 - Regime gross cap: {base_ctx['regime_caps']['gross']:.0%} | Net cap: {base_ctx['regime_caps']['net']:.0%}
+- Market status: {"OPEN — orders execute immediately" if base_ctx.get('market_hours_open') else "CLOSED — your decision will be queued and executed at next market open"}
 
 ### Sector Overlap
 Existing positions in same sector ({memo_sector}): {sector_overlap if sector_overlap else "None"}

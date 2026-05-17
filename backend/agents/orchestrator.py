@@ -550,7 +550,6 @@ def _check_hard_blocks(
     """
     blocks = {
         "position_cap_ok": True,
-        "market_hours_ok": _is_market_hours(),
         "gross_exposure_ok": True,
         "daily_loss_ok": True,
     }
@@ -1096,6 +1095,7 @@ def _snapshot(base_ctx: Dict[str, Any]) -> Dict[str, Any]:
         "position_count": base_ctx.get("position_count", 0),
         "cash_pct": base_ctx.get("cash_pct", 1.0),
         "macro_regime": base_ctx.get("macro_regime", "Transitional"),
+        "market_hours_open": base_ctx.get("market_hours_open", False),
         "active_critical_alerts": sum(
             1 for a in base_ctx.get("active_alerts", [])
             if a.get("severity") == "CRITICAL"
@@ -1907,7 +1907,8 @@ def run_pm_cycle(
         from backend.agents.pm_prompts.base_context import build_base_context
         base_ctx = build_base_context(_get_client())
         base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
-        
+        base_ctx["market_hours_open"] = _is_market_hours()
+
         if base_ctx["portfolio_value_usd"] <= 0:
             logger.error("PM cycle aborted — portfolio value could not be computed (nav <= 0).")
             return {
@@ -2039,7 +2040,7 @@ def run_pm_cycle(
                         ticker=ticker,
                         decision="REJECT",
                         action_details={"hard_block_reason": failed},
-                        reasoning=f"Hard block prevented evaluation: {', '.join(failed)}",
+                        reasoning=f"Hard block: {', '.join(failed)}",
                         risk_assessment="Position violated hard constraints before PM evaluation.",
                         confidence=1.0,
                         context_snapshot=_snapshot(base_ctx),

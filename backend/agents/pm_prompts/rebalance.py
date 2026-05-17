@@ -158,6 +158,7 @@ Net (signed weight — directional bet):
 - Current regime: {regime}
 - Target gross: {caps['gross']:.0%} | Actual gross: {gross:.1%} | Drift: {gross_drift:+.1%}
 - Target net: {caps['net']:.0%} | Actual net: {net:.1%} | Drift: {net_drift:+.1%}
+- Market status: {"OPEN — orders execute immediately" if base_ctx.get('market_hours_open') else "CLOSED — your decision will be queued and executed at next market open"}
 
 ### Active Risk Alerts
 {json.dumps(base_ctx['active_alerts'], indent=2, default=str) if base_ctx['active_alerts'] else "None"}
