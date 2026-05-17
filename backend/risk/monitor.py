@@ -105,7 +105,7 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
 
     if live_count < original_count:
         logger.warning(
-            "%d/%d position(s) had no live Polygon price this cycle",
+            "%d/%d position(s) had no price from any source this cycle",
             original_count - live_count,
             original_count,
         )
@@ -268,8 +268,19 @@ def _refresh_prices(
             polygon_prices = _fetch_prices_polygon(missing)
             price_map.update(polygon_prices)
     else:
-        # Outside market hours: Polygon only (day.c = previous close).
-        price_map = _fetch_prices_polygon(tickers)
+        # Outside market hours: IBKR holds last-close prices for owned positions;
+        # Polygon day.c is the secondary source; stored current_price is the final
+        # fallback (prices don't move overnight so the DB value is always valid).
+        price_map = _fetch_prices_ibkr(tickers)
+        missing = [t for t in tickers if t not in price_map]
+        if missing:
+            polygon_prices = _fetch_prices_polygon(missing)
+            price_map.update(polygon_prices)
+        for pos in positions:
+            t = pos.get("ticker")
+            if t and t not in price_map and pos.get("current_price"):
+                price_map[t] = float(pos["current_price"])
+                logger.debug("%s: no live price — using stored DB price $%.4f", t, price_map[t])
 
     if not price_map:
         logger.error("no prices obtained from any source — all positions excluded this cycle")
