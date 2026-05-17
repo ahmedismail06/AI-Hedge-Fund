@@ -388,6 +388,24 @@ def run_screening(regime: str | None = None) -> list[dict]:
     eligible_tickers = {c.ticker for c in universe}
     raw_data_map = {t: d for t, d in raw_data_map.items() if t in eligible_tickers}
 
+    # Step 2d: Backfill fmp.market_cap from the universe candidate when fetch returned None.
+    # The universe builder already cached market_cap via Polygon detail endpoint (24h TTL);
+    # without this, a transient FMP /profile + Polygon /v3/reference/tickers failure leaves
+    # market_cap=None which cascades to ev/p_fcf/price_book=None → value_score defaults to
+    # neutral 5.0, silently under-ranking high-quality tickers (e.g. CODA, BODI).
+    cand_by_ticker = {c.ticker: c for c in universe}
+    for ticker, raw_data in raw_data_map.items():
+        fmp = raw_data.setdefault("fmp", {})
+        if fmp.get("market_cap") is None:
+            cand = cand_by_ticker.get(ticker)
+            if cand and cand.market_cap_m:
+                fmp["market_cap"] = float(cand.market_cap_m) * 1_000_000
+                fmp["market_cap_source"] = "universe_candidate_fallback"
+                logger.info(
+                    "%s: market_cap backfilled from universe candidate ($%.1fM) — FMP/Polygon both returned None",
+                    ticker, cand.market_cap_m,
+                )
+
     # Step 3: Score each ticker (quality, value, momentum, beneish)
     raw_factor_results: dict[str, dict] = {}
     for ticker, raw_data in raw_data_map.items():
