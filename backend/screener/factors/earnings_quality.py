@@ -81,7 +81,18 @@ def _extract_fields(row: dict) -> dict:
     }
 
 
-def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
+def _fmp_sga(stmt: dict) -> Optional[float]:
+    """Extract SGA from an FMP income statement dict, or None if absent."""
+    val = stmt.get("sellingGeneralAndAdministrativeExpenses")
+    if val is not None:
+        try:
+            return abs(float(val))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def compute_beneish(ticker: str, polygon_financials: dict, fmp_quality: Optional[dict] = None) -> dict:
     """
     Compute the Beneish M-Score for a ticker using Polygon annual financial data.
 
@@ -89,6 +100,8 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
         ticker: Stock ticker symbol.
         polygon_financials: Raw Polygon /vX/reference/financials response dict
                             (as returned by fetch_ticker_data()["polygon_financials"]).
+        fmp_quality: Optional FMP quality data dict (from fetch_quality_fmp_batch).
+                     Used as fallback for fields Polygon does not expose (e.g. SGA).
 
     Returns:
         {
@@ -112,6 +125,17 @@ def compute_beneish(ticker: str, polygon_financials: dict) -> dict:
 
     t  = _extract_fields(fy_rows[0])  # current year
     t1 = _extract_fields(fy_rows[1])  # prior year
+
+    # FMP fallback for SGA — Polygon often omits selling_general_administrative_expenses
+    # for small caps that report a combined operating expense line. FMP annual income
+    # statements have better coverage. Revenue is already populated from Polygon if
+    # available, so SGAI can be computed once SGA is filled.
+    if fmp_quality:
+        annual = fmp_quality.get("annual_income_statement", [])
+        if len(annual) >= 1 and t.get("sga") is None:
+            t["sga"] = _fmp_sga(annual[0])
+        if len(annual) >= 2 and t1.get("sga") is None:
+            t1["sga"] = _fmp_sga(annual[1])
 
     missing: list[str] = []
 

@@ -112,7 +112,7 @@ def _score_ticker(ticker: str, raw_data: dict, fmp_quality: dict | None = None) 
     except Exception as exc:
         logger.warning("%s: momentum scorer failed: %s", ticker, exc)
     try:
-        out["beneish"]  = compute_beneish(ticker, raw_data["polygon_financials"])
+        out["beneish"]  = compute_beneish(ticker, raw_data["polygon_financials"], fmp_quality=fmp_quality)
     except Exception as exc:
         logger.warning("%s: beneish scorer failed: %s", ticker, exc)
 
@@ -374,11 +374,14 @@ def run_screening(regime: str | None = None) -> list[dict]:
     try:
         fmp_quality_map = fetch_quality_fmp_batch(all_tickers)
         logger.info("FMP quality data fetched for %d tickers", len(fmp_quality_map))
-        
-        # Merge fmp_quality_map back into raw_data_map['fmp'] for filtering
+
+        # Merge quality data (income_statement, balance_sheet) INTO the existing fmp dict.
+        # Use .update() — not assignment — so the rich fetch_fmp() fields (market_cap,
+        # long_term_debt, cash, ttm_operating_cash_flow, ev_ebitda_fmp, price_book_fmp,
+        # consensus_eps_*, etc.) are preserved for the value and momentum scorers.
         for ticker, quality_data in fmp_quality_map.items():
             if ticker in raw_data_map:
-                raw_data_map[ticker]["fmp"] = quality_data
+                raw_data_map[ticker].setdefault("fmp", {}).update(quality_data)
     except Exception as exc:
         logger.error("FMP quality batch fetch failed — proceeding without FMP quality data: %s", exc)
 
