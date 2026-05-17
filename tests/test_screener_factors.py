@@ -268,10 +268,48 @@ def test_score_quality_fcf_conversion_computed():
     assert math.isclose(result["raw_values"]["fcf_conversion"], expected, rel_tol=1e-6)
 
 
-def test_score_quality_fcf_conversion_none_when_net_income_nonpositive():
-    """fcf_conversion is None when net_income <= 0."""
-    pf = _make_polygon_financials(current_net_income=-10e6, current_cfo=5e6)
+def test_score_quality_fcf_conversion_fallback_to_ebitda_when_net_income_nonpositive():
+    """
+    fcf_conversion now falls back to FCF / EBITDA when net_income ≤ 0,
+    so loss-making companies with strong cash flow still get credit.
+    Default fixture: ebitda=80e6, cfo=5e6, capex omitted so capex=None and
+    FCF=cfo=5e6 → 5e6 / 80e6 ≈ 0.0625.
+    """
+    pf = _make_polygon_financials(current_net_income=-10e6, current_cfo=5e6, current_capex=None)
     result = score_quality("LOSS1", pf, {})
+    fc = result["raw_values"]["fcf_conversion"]
+    assert fc is not None
+    assert math.isclose(fc, 5e6 / 80e6, rel_tol=1e-6)
+
+
+def test_score_quality_fcf_conversion_none_when_ni_bad_and_no_ebitda():
+    """fcf_conversion remains None when NI is bad AND EBITDA is missing."""
+    # Build a Polygon row with NI<=0 and no EBITDA at all
+    row = {
+        "fiscal_period": "FY",
+        "filing_date": "2024-03-01",
+        "financials": {
+            "income_statement": {
+                "revenues":        _w(100e6),
+                "net_income_loss": _w(-5e6),
+            },
+            "balance_sheet": {"equity": _w(100e6)},
+            "cash_flow_statement": {
+                "net_cash_flow_from_operating_activities": _w(10e6),
+            },
+        },
+    }
+    prior = {
+        "fiscal_period": "FY",
+        "filing_date": "2023-03-01",
+        "financials": {
+            "income_statement": {"revenues": _w(90e6), "net_income_loss": _w(-3e6)},
+            "balance_sheet": {"equity": _w(95e6)},
+            "cash_flow_statement": {},
+        },
+    }
+    pf = {"results": [row, prior]}
+    result = score_quality("NOEBITDA", pf, {})
     assert result["raw_values"]["fcf_conversion"] is None
 
 
@@ -466,11 +504,17 @@ def test_fcf_conversion_none_when_cfo_missing():
     assert result["raw_values"]["fcf_conversion"] is None
 
 
-def test_fcf_conversion_none_when_net_income_is_none():
-    """fcf_conversion is None when net_income is None (distinct from <= 0)."""
+def test_fcf_conversion_falls_back_to_ebitda_when_net_income_is_none():
+    """
+    When net_income is None but EBITDA is available, fcf_conversion falls back
+    to FCF / EBITDA. Default fixture: ebitda=80e6, cfo=80e6, capex=-10e6 →
+    FCF=70e6, ratio=70e6/80e6=0.875.
+    """
     pf = _make_polygon_financials(current_net_income=None, current_cfo=80e6)
     result = score_quality("NONI", pf, {})
-    assert result["raw_values"]["fcf_conversion"] is None
+    fc = result["raw_values"]["fcf_conversion"]
+    assert fc is not None
+    assert math.isclose(fc, 70e6 / 80e6, rel_tol=1e-6)
 
 
 def test_fcf_conversion_uses_cfo_only_when_capex_missing():
@@ -482,8 +526,13 @@ def test_fcf_conversion_uses_cfo_only_when_capex_missing():
 
 
 def test_fcf_conversion_clamped_upper():
-    """FCF ratio > 3.0 is clamped to 3.0."""
-    pf = _make_polygon_financials(current_net_income=1e6, current_cfo=100e6, current_capex=-5e6)
+    """
+    FCF ratio > 3.0 is clamped to 3.0.
+    Use NI well above the EBITDA × 0.05 near-zero threshold so the FCF/NI path
+    is exercised, not the EBITDA fallback. Default EBITDA=80e6 → threshold=4e6,
+    so NI=20e6 with FCF=100e6 yields ratio 5.0, clamped to 3.0.
+    """
+    pf = _make_polygon_financials(current_net_income=20e6, current_cfo=110e6, current_capex=-10e6)
     result = score_quality("HIGHFCF", pf, {})
     assert result["raw_values"]["fcf_conversion"] == 3.0
 

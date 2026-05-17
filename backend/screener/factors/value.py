@@ -10,7 +10,13 @@ Sub-components:
   p_fcf        30%  — Price/Free Cash Flow
   price_book   30%  — Price/Book
 
-EV formula: EV = market_cap (yfinance live) + LTD (Polygon) − cash (yfinance)
+EV formula: EV = market_cap (FMP /profile) + LTD (Polygon) − cash (FMP balance sheet)
+
+EBITDA precedence (most reliable first):
+  1. FMP key-metrics-ttm.evToEBITDATTM (used directly as EV/EBITDA)
+  2. FMP income-statement annual[0].ebitda (combined with our EV)
+  3. Polygon FY EBITDA field
+  4. Polygon operating_income (last-resort fallback; logs WARNING)
 """
 
 import logging
@@ -96,23 +102,57 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
         ev = market_cap + ltd - cash
 
     # ── EV Multiple (EV/Revenue for pre-profit, EV/EBITDA for profitable) ────
+    # Source precedence:
+    #   1. FMP key-metrics-ttm.evToEBITDATTM (passed in as ev_ebitda_fmp) — direct,
+    #      uses FMP's own EV and true TTM EBITDA. Most accurate for small caps.
+    #   2. FMP annual income-statement.ebitda (passed in as ebitda_fmp) — combined
+    #      with our computed EV.
+    #   3. Polygon FY ebitda field (often sparse for small caps).
+    #   4. Polygon operating_income — last-resort fallback. Materially understates
+    #      EBITDA (excludes D&A). Logs WARNING so we can audit how often it fires.
     ev_multiple: Optional[float] = None
     ev_type: Optional[str] = None
     is_profitable = False
+    ebitda_used: Optional[float] = None
+    ebitda_source: Optional[str] = None
 
-    ebitda = fin.get("ebitda") or fin.get("operating_income")
+    ev_ebitda_fmp = fmp_data.get("ev_ebitda_fmp")
+    ebitda_fmp    = fmp_data.get("ebitda_fmp")
+    polygon_ebitda = fin.get("ebitda")
+    polygon_op_income = fin.get("operating_income")
     revenue = fin.get("revenue")
 
-    if ebitda is not None and ebitda > 0:
+    # Pick EBITDA from best available source for the profitability flag
+    if ebitda_fmp is not None:
+        ebitda_used = ebitda_fmp
+        ebitda_source = "fmp_income_statement"
+    elif polygon_ebitda is not None:
+        ebitda_used = polygon_ebitda
+        ebitda_source = "polygon_fy"
+    elif polygon_op_income is not None:
+        ebitda_used = polygon_op_income
+        ebitda_source = "polygon_operating_income_fallback"
+        logger.warning(
+            "%s: EBITDA unavailable from FMP/Polygon — falling back to Polygon operating_income (%.0f). "
+            "EV/EBITDA multiple will be understated.",
+            ticker, polygon_op_income,
+        )
+
+    if ebitda_used is not None and ebitda_used > 0:
         is_profitable = True
 
-    if ev is not None:
-        if is_profitable and ebitda and ebitda > 0:
-            ev_multiple = ev / ebitda
-            ev_type = "EV/EBITDA"
-        elif revenue and revenue > 0:
-            ev_multiple = ev / revenue
-            ev_type = "EV/Revenue"
+    # Apply the multiple in source-priority order
+    if ev_ebitda_fmp is not None and ev_ebitda_fmp > 0:
+        # FMP's own TTM EV/EBITDA — most reliable.
+        ev_multiple = ev_ebitda_fmp
+        ev_type = "EV/EBITDA"
+        is_profitable = True
+    elif ev is not None and is_profitable and ebitda_used and ebitda_used > 0:
+        ev_multiple = ev / ebitda_used
+        ev_type = "EV/EBITDA"
+    elif ev is not None and revenue and revenue > 0:
+        ev_multiple = ev / revenue
+        ev_type = "EV/Revenue"
 
     # ── P/FCF ─────────────────────────────────────────────────────────────────
     p_fcf: Optional[float] = None
@@ -135,10 +175,14 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
                 p_fcf = raw_p_fcf
 
     # ── Price/Book ────────────────────────────────────────────────────────────
+    # Prefer FMP key-metrics-ttm.priceToBookTTM (TTM, sector-comparable).
     price_book: Optional[float] = None
+    price_book_fmp = fmp_data.get("price_book_fmp")
     book_value = fin.get("book_value")
     shares     = fin.get("shares")
-    if market_cap is not None and book_value is not None and book_value > 0:
+    if price_book_fmp is not None and price_book_fmp > 0:
+        price_book = price_book_fmp
+    elif market_cap is not None and book_value is not None and book_value > 0:
         price_book = market_cap / book_value
 
     raw_values = {
@@ -149,6 +193,7 @@ def score_value(ticker: str, polygon_financials: dict, fmp_data: dict) -> dict:
         "ev":             ev,
         "is_profitable":  is_profitable,
         "ocf_annualized": ocf_annualized,  # True = single-quarter OCF; 33% P/FCF haircut applied
+        "ebitda_source":  ebitda_source,   # source of EBITDA used for the multiple
     }
 
     logger.debug(

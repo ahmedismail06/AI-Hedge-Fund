@@ -115,6 +115,21 @@ def _score_ticker(ticker: str, raw_data: dict, fmp_quality: dict | None = None) 
         out["beneish"]  = compute_beneish(ticker, raw_data["polygon_financials"])
     except Exception as exc:
         logger.warning("%s: beneish scorer failed: %s", ticker, exc)
+
+    # ── Data-quality audit: count null sub-metrics across factors ─────────────
+    # Persisted on the row so we can downstream-filter tickers whose composite
+    # scores are based on near-empty inputs. Composer doesn't act on it yet.
+    null_count = 0
+    for factor_key in ("quality", "value", "momentum"):
+        raw_values = out.get(factor_key, {}).get("raw_values", {}) or {}
+        for sub_key, val in raw_values.items():
+            # Skip non-numeric metadata fields (ev_type, ebitda_source, flags)
+            if sub_key in ("ev_type", "ebitda_source", "is_profitable", "ocf_annualized"):
+                continue
+            if val is None:
+                null_count += 1
+    out["data_quality_nulls"] = null_count
+
     return out
 
 

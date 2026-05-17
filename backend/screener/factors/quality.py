@@ -51,6 +51,7 @@ def _get_latest_two_fy(polygon_financials: dict) -> tuple[dict, dict]:
             "cogs":             _v(inc, "cost_of_revenue"),
             "net_income":       _v(inc, "net_income_loss"),
             "operating_income": _v(inc, "operating_income_loss"),
+            "ebitda":           _v(inc, "earnings_before_interest_taxes_depreciation_and_amortization"),
             "equity":           _v(bs,  "equity"),
             "total_debt":       _v(bs,  "long_term_debt"),
             "current_debt":     _v(bs,  "current_portion_of_long_term_debt"),
@@ -211,19 +212,48 @@ def _polygon_roic_fallback(cur: dict) -> Optional[float]:
     return nopat / invested_capital
 
 
-def _polygon_fcf_conversion(cur: dict, net_income: Optional[float]) -> Optional[float]:
+def _polygon_fcf_conversion(
+    cur: dict,
+    net_income: Optional[float],
+    ebitda: Optional[float] = None,
+) -> Optional[float]:
     """
     FCF Conversion = (OCF − CapEx) / Net Income.
-    Higher = more of net income is backed by cash (Sloan accruals quality signal).
-    Returns None if net_income <= 0 or OCF missing; clamped to [−1.0, 3.0].
+
+    When net_income is None, ≤ 0, or near-zero (|NI| < |EBITDA| × 0.05) AND a
+    positive EBITDA is available, fall back to FCF / EBITDA so turnarounds with
+    strong cash but reported losses still get credit. Result clamped to [−1, 3].
+
+    Returns None when OCF is missing, or when NI is bad and no EBITDA fallback
+    is available.
     """
     cfo = cur.get("cfo")
-    if cfo is None or net_income is None or net_income <= 0:
+    if cfo is None:
         return None
     capex = cur.get("capex")
     fcf = cfo - abs(capex) if capex is not None else cfo
-    ratio = fcf / net_income
-    return max(-1.0, min(3.0, ratio))
+
+    ni_bad = (
+        net_income is None
+        or net_income <= 0
+        or (
+            ebitda is not None
+            and ebitda > 0
+            and abs(net_income) < abs(ebitda) * 0.05
+        )
+    )
+
+    if not ni_bad:
+        # net_income is valid and material
+        ratio = fcf / net_income
+        return max(-1.0, min(3.0, ratio))
+
+    # Fall back to FCF / EBITDA when NI is unusable
+    if ebitda is not None and ebitda > 0:
+        ratio = fcf / ebitda
+        return max(-1.0, min(3.0, ratio))
+
+    return None
 
 
 # ── Main scorer ───────────────────────────────────────────────────────────────
@@ -296,7 +326,22 @@ def score_quality(
         roic = _polygon_roic_fallback(cur)
 
     # ── FCF Conversion ────────────────────────────────────────────────────────
-    fcf_conversion: Optional[float] = _polygon_fcf_conversion(cur, cur.get("net_income"))
+    # Source EBITDA for the fallback path: prefer FMP annual income statement
+    # (top-level `ebitda` field), then Polygon FY EBITDA.
+    ebitda_for_conv: Optional[float] = None
+    if fmp_annual:
+        try:
+            eb = fmp_annual[0].get("ebitda") if isinstance(fmp_annual[0], dict) else None
+            if eb is not None:
+                ebitda_for_conv = float(eb)
+        except (TypeError, ValueError):
+            pass
+    if ebitda_for_conv is None:
+        ebitda_for_conv = cur.get("ebitda")
+
+    fcf_conversion: Optional[float] = _polygon_fcf_conversion(
+        cur, cur.get("net_income"), ebitda=ebitda_for_conv,
+    )
 
     # ── Debt-to-Equity ────────────────────────────────────────────────────────
     # Primary: FMP balance sheet (pre-computed ratio fields missing for most names)

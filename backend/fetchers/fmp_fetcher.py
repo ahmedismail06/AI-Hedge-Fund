@@ -1,25 +1,42 @@
 """
-Market Intelligence Fetcher
-Replaces the deprecated FMP endpoints with yfinance (market data, estimates)
-and Polygon (balance sheet fundamentals).
+Market Intelligence Fetcher.
 
-Fields returned:
-  - short_interest_pct, days_to_cover       (yfinance)
-  - analyst_count, target_mean_price        (yfinance)
-  - consensus_eps_current_year/next_year    (yfinance)
-  - consensus_revenue_current_year/next_year (yfinance, in millions)
-  - next_earnings_date                      (yfinance)
-  - sector                                  (yfinance)
-  - cash                                    (yfinance quarterly balance sheet)
-  - ttm_operating_cash_flow                 (Polygon cash flow statement)
-  - cash_runway_months                      (computed: cash / monthly burn)
-  - net_income, net_income_flag             (Polygon income statement, validation flag)
-  - long_term_debt, accounts_payable        (Polygon /vX/reference/financials)
-  - market_cap                              (Polygon /v3/reference/tickers)
+All market/profile/estimate/short-interest fields come from FMP. Polygon is
+retained only for the deep financials shape (vX/reference/financials) that
+downstream Beneish/value scorers key off.
+
+yfinance has been removed from this module — it returned empty payloads
+intermittently on micro-caps, silently dropping market_cap and cash and
+masking otherwise-valid value scores. FMP covers every field yfinance was
+previously providing.
+
+Fields returned by fetch_fmp():
+  - market_cap            FMP /profile → /quote → Polygon reference (final)
+  - market_cap_source     "fmp_profile" | "fmp_quote" | "polygon_reference"
+  - sector                FMP /profile
+  - beta                  FMP /profile
+  - cash                  FMP /balance-sheet-statement (most-recent quarter)
+  - analyst_count         FMP /price-target-summary (lastQuarterCount)
+  - target_mean_price     FMP /price-target-summary (lastQuarterAvgPriceTarget)
+  - consensus_eps_*       FMP /analyst-estimates
+  - consensus_revenue_*   FMP /analyst-estimates  (millions)
+  - next_earnings_date    FMP /earnings (next upcoming with non-null epsEstimated)
+  - short_interest_pct    Polygon /v3/reference/short-interest (optional)
+  - days_to_cover         Polygon /v3/reference/short-interest (optional)
+  - ev_ebitda_fmp         FMP /key-metrics-ttm evToEBITDATTM
+  - price_book_fmp        FMP /key-metrics-ttm priceToBookTTM
+  - ebitda_fmp            FMP /income-statement annual[0] ebitda
+  - net_income, net_income_flag        Polygon income statement (validated)
+  - long_term_debt, accounts_payable   Polygon balance sheet
+  - interest_expense                   Polygon income statement
+  - ttm_operating_cash_flow            Polygon cash flow (TTM or annualised)
+  - revenue_recent, revenue_prior      Polygon FY income statement
+  - gross_margin_pct                   Polygon FY income statement
+  - polygon_financials_raw             Full Polygon /vX/reference/financials JSON
 
 Quality data (FMP):
   fetch_quality_fmp_batch() fetches income statements + balance sheets for a
-  list of tickers in async batches of 50 (0.5s inter-batch delay) and is used
+  list of tickers in async batches of 10 (6.0s inter-batch delay) and is used
   by the quality factor scorer to compute gross_margin, debt_to_equity, and
   revenue_growth_yoy with better small-cap coverage than Polygon.
 """
@@ -31,7 +48,6 @@ from datetime import date
 
 import httpx
 import requests
-import yfinance as yf
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -148,6 +164,146 @@ def fetch_quality_fmp_batch(tickers: list[str]) -> dict[str, dict]:
         return {t: dict(_EMPTY_QUALITY) for t in tickers}
 
 
+# ── Helpers for fetch_fmp ─────────────────────────────────────────────────────
+
+def _get_json(url: str, params: dict, timeout: int = 15) -> object | None:
+    """GET an endpoint, parse JSON, return None on any failure. Never raises."""
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _first(payload) -> dict | None:
+    """Return the first dict of a list payload, or None."""
+    if isinstance(payload, list) and payload:
+        item = payload[0]
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _fmp_profile(sym: str, fmp_key: str) -> dict | None:
+    """FMP /profile — market_cap, sector, beta, price."""
+    return _first(_get_json(f"{FMP_BASE}/profile", {"symbol": sym, "apikey": fmp_key}))
+
+
+def _fmp_quote(sym: str, fmp_key: str) -> dict | None:
+    """FMP /quote — market_cap fallback, sharesOutstanding."""
+    return _first(_get_json(f"{FMP_BASE}/quote", {"symbol": sym, "apikey": fmp_key}))
+
+
+def _fmp_price_target_summary(sym: str, fmp_key: str) -> dict | None:
+    """FMP /price-target-summary — analyst_count, target_mean_price."""
+    return _first(_get_json(f"{FMP_BASE}/price-target-summary", {"symbol": sym, "apikey": fmp_key}))
+
+
+def _fmp_balance_sheet_latest(sym: str, fmp_key: str) -> dict | None:
+    """FMP /balance-sheet-statement most recent quarter — cash."""
+    return _first(_get_json(
+        f"{FMP_BASE}/balance-sheet-statement",
+        {"symbol": sym, "limit": 1, "apikey": fmp_key},
+    ))
+
+
+def _fmp_key_metrics_ttm(sym: str, fmp_key: str) -> dict | None:
+    """FMP /key-metrics-ttm — evToEBITDATTM, priceToBookTTM, etc."""
+    return _first(_get_json(
+        f"{FMP_BASE}/key-metrics-ttm",
+        {"symbol": sym, "apikey": fmp_key},
+    ))
+
+
+def _fmp_income_statement_annual(sym: str, fmp_key: str) -> list | None:
+    """FMP /income-statement annual — ebitda, revenue, netIncome."""
+    payload = _get_json(
+        f"{FMP_BASE}/income-statement",
+        {"symbol": sym, "period": "annual", "limit": 2, "apikey": fmp_key},
+    )
+    return payload if isinstance(payload, list) else None
+
+
+def _fmp_next_earnings_date(sym: str, fmp_key: str) -> str | None:
+    """
+    FMP /earnings — find soonest future date with non-null epsEstimated.
+    Returns YYYY-MM-DD or None.
+    """
+    payload = _get_json(
+        f"{FMP_BASE}/earnings",
+        {"symbol": sym, "limit": 4, "apikey": fmp_key},
+    )
+    if not isinstance(payload, list):
+        return None
+    today = date.today()
+    candidates: list[str] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("date")
+        eps_est = row.get("epsEstimated")
+        if not d or eps_est is None:
+            continue
+        try:
+            d_parsed = date.fromisoformat(str(d)[:10])
+        except ValueError:
+            continue
+        if d_parsed >= today:
+            candidates.append(d_parsed.isoformat())
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _fmp_analyst_estimates(sym: str, fmp_key: str) -> list | None:
+    """FMP /analyst-estimates annual — consensus EPS/revenue for current and next year."""
+    payload = _get_json(
+        f"{FMP_BASE}/analyst-estimates",
+        {"symbol": sym, "period": "annual", "limit": 4, "apikey": fmp_key},
+    )
+    return payload if isinstance(payload, list) else None
+
+
+def _polygon_short_interest(sym: str, polygon_key: str) -> tuple[float | None, float | None]:
+    """
+    Polygon /v3/reference/short-interest — best-effort fallback when FMP doesn't
+    expose short interest. Returns (short_interest_pct, days_to_cover) or
+    (None, None) when unavailable. Endpoint may not be on every Polygon tier.
+    """
+    try:
+        r = requests.get(
+            f"{POLYGON_BASE}/stocks/v1/short-interest/{sym}",
+            params={"apiKey": polygon_key, "limit": 1},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            results = data.get("results") if isinstance(data, dict) else None
+            if isinstance(results, list) and results:
+                row = results[0]
+                si = row.get("short_interest")
+                avg_vol = row.get("avg_daily_volume")
+                shares_out = row.get("shares_outstanding") or row.get("float")
+                short_pct = None
+                if si and shares_out:
+                    try:
+                        short_pct = round(float(si) / float(shares_out) * 100, 2)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                dtc = None
+                if si and avg_vol:
+                    try:
+                        dtc = round(float(si) / float(avg_vol), 2)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                return short_pct, dtc
+    except Exception:
+        pass
+    return None, None
+
+
 def fetch_fmp(ticker: str) -> dict:
     """
     Returns:
@@ -171,6 +327,13 @@ def fetch_fmp(ticker: str) -> dict:
         "long_term_debt": float | None,                  # raw dollars
         "accounts_payable": float | None,                # raw dollars
         "market_cap": float | None,                      # raw dollars
+        "market_cap_source": str | None,                 # "fmp_profile"|"fmp_quote"|"polygon_reference"
+        "beta": float | None,
+        "interest_expense": float | None,
+        "ev_ebitda_fmp": float | None,
+        "price_book_fmp": float | None,
+        "ebitda_fmp": float | None,
+        "polygon_financials_raw": dict | None,
         "error": None | str,
     }
     Never raises — partial failures are silently skipped.
@@ -186,125 +349,204 @@ def fetch_fmp(ticker: str) -> dict:
         "consensus_eps_next_year": None,
         "consensus_revenue_current_year": None,
         "consensus_revenue_next_year": None,
-        "revenue_recent": None,   # raw dollars — Polygon FY[0] income statement
-        "revenue_prior": None,    # raw dollars — Polygon FY[1] income statement
-        "gross_margin_pct": None, # float 0–100 — computed from Polygon gross_profit / revenues
+        "revenue_recent": None,
+        "revenue_prior": None,
+        "gross_margin_pct": None,
         "next_earnings_date": None,
         "sector": None,
         "cash": None,
         "ttm_operating_cash_flow": None,
-        "ocf_annualized": False,   # Bug 9: True when TTM OCF = single quarter × 4
+        "ocf_annualized": False,
         "cash_runway_months": None,
-        "net_income": None,        # raw dollars (Polygon income statement)
-        "net_income_flag": None,   # e.g., "SUSPECT_NET_INCOME"
+        "net_income": None,
+        "net_income_flag": None,
         "long_term_debt": None,
         "accounts_payable": None,
         "market_cap": None,
-        "market_cap_source": None, # Bug 10: "yfinance" (live) or "polygon_reference" (stale)
+        "market_cap_source": None,
         "beta": None,
         "interest_expense": None,
+        "ev_ebitda_fmp": None,
+        "price_book_fmp": None,
+        "ebitda_fmp": None,
         "polygon_financials_raw": None,
         "error": None,
     }
 
-    # ── yfinance ──────────────────────────────────────────────────────────────
-    try:
-        t = yf.Ticker(sym)
-        info = t.info or {}
-
-        # Short interest
-        si = info.get("shortPercentOfFloat")
-        if si is not None:
-            result["short_interest_pct"] = round(si * 100, 2)  # convert 0–1 → %
-        result["days_to_cover"] = info.get("shortRatio")
-        result["analyst_count"] = info.get("numberOfAnalystOpinions")
-        result["target_mean_price"] = info.get("targetMeanPrice")
-        result["sector"] = info.get("sector")
-
-        # Beta
-        try:
-            beta_val = info.get("beta")
-            if beta_val is not None:
-                result["beta"] = float(beta_val)
-        except Exception:
-            pass
-
-        # Bug 10: yfinance marketCap is live (updated intraday); use as primary source.
-        # Polygon /v3/reference/tickers returns a static reference field that can be
-        # months stale. Valuation multiples computed against stale market cap are wrong.
-        mktcap_yf = info.get("marketCap")
-        if mktcap_yf:
-            result["market_cap"] = float(mktcap_yf)
-            result["market_cap_source"] = "yfinance"
-
-        # Next earnings date
-        try:
-            cal = t.calendar or {}
-            earnings_dates = cal.get("Earnings Date", [])
-            today = date.today()
-            for d in (earnings_dates if isinstance(earnings_dates, list) else [earnings_dates]):
-                if hasattr(d, "date"):
-                    d = d.date()
-                if d >= today:
-                    result["next_earnings_date"] = str(d)
-                    break
-        except Exception:
-            pass
-
-        # Cash from quarterly balance sheet
-        try:
-            qbs = t.quarterly_balance_sheet
-            if qbs is not None and not qbs.empty:
-                for row in ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"):
-                    if row in qbs.index:
-                        val = qbs.loc[row].iloc[0]
-                        if val is not None and val == val:  # not NaN
-                            result["cash"] = float(val)
-                            break
-        except Exception:
-            pass
-
-    except Exception as exc:
-        result["error"] = f"yfinance error: {exc}"
-
     fmp_key = os.getenv("FMP_API_KEY")
-    if fmp_key:
-        try:
-            r = requests.get(
-                f"{FMP_BASE}/analyst-estimates",
-                params={"symbol": sym, "period": "annual", "limit": 2, "apikey": fmp_key},
-                timeout=15,
-            )
-            if r.status_code == 200:
-                estimates = r.json() or []
-                current_year = date.today().year
-                for est in estimates:
-                    est_date = est.get("date", "")
-                    try:
-                        est_year = int(est_date[:4])
-                    except (ValueError, TypeError):
-                        continue
-                    eps_avg = est.get("epsAvg")
-                    rev_avg = est.get("revenueAvg")
-                    if est_year == current_year and result["consensus_eps_current_year"] is None:
-                        if eps_avg is not None:
-                            result["consensus_eps_current_year"] = float(eps_avg)
-                        if rev_avg is not None:
-                            result["consensus_revenue_current_year"] = round(float(rev_avg) / 1_000_000, 1)
-                    elif est_year == current_year + 1 and result["consensus_eps_next_year"] is None:
-                        if eps_avg is not None:
-                            result["consensus_eps_next_year"] = float(eps_avg)
-                        if rev_avg is not None:
-                            result["consensus_revenue_next_year"] = round(float(rev_avg) / 1_000_000, 1)
-        except Exception as exc:
-            logger.warning("fetch_fmp(%s): FMP analyst-estimates failed — %s", sym, exc)
-
-    # ── Polygon balance sheet ─────────────────────────────────────────────────
     polygon_key = os.getenv("POLYGON_API_KEY")
+
+    # ── FMP block (replaces yfinance entirely) ────────────────────────────────
+    if fmp_key:
+        # /profile — primary market_cap, sector, beta
+        try:
+            prof = _fmp_profile(sym, fmp_key)
+            if prof:
+                mc = prof.get("marketCap") or prof.get("mktCap")
+                if mc:
+                    try:
+                        result["market_cap"] = float(mc)
+                        result["market_cap_source"] = "fmp_profile"
+                    except (TypeError, ValueError):
+                        pass
+                sector = prof.get("sector")
+                if sector:
+                    result["sector"] = sector
+                beta_val = prof.get("beta")
+                if beta_val is not None:
+                    try:
+                        result["beta"] = float(beta_val)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /profile failed — %s", sym, exc)
+
+        # /quote — market_cap fallback
+        if result["market_cap"] is None:
+            try:
+                qt = _fmp_quote(sym, fmp_key)
+                if qt:
+                    mc = qt.get("marketCap")
+                    if mc:
+                        try:
+                            result["market_cap"] = float(mc)
+                            result["market_cap_source"] = "fmp_quote"
+                        except (TypeError, ValueError):
+                            pass
+            except Exception as exc:
+                logger.warning("fetch_fmp(%s): FMP /quote failed — %s", sym, exc)
+
+        # /price-target-summary — analyst count + mean target
+        try:
+            pts = _fmp_price_target_summary(sym, fmp_key)
+            if pts:
+                ac = pts.get("lastQuarterCount") or pts.get("lastMonthCount")
+                tmp = pts.get("lastQuarterAvgPriceTarget") or pts.get("lastMonthAvgPriceTarget")
+                if ac is not None:
+                    try:
+                        result["analyst_count"] = int(ac)
+                    except (TypeError, ValueError):
+                        pass
+                if tmp is not None:
+                    try:
+                        result["target_mean_price"] = float(tmp)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /price-target-summary failed — %s", sym, exc)
+
+        # /balance-sheet-statement — cash (latest period)
+        try:
+            bs_latest = _fmp_balance_sheet_latest(sym, fmp_key)
+            if bs_latest:
+                c = bs_latest.get("cashAndCashEquivalents")
+                if c is not None:
+                    try:
+                        result["cash"] = float(c)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /balance-sheet-statement failed — %s", sym, exc)
+
+        # /earnings — next upcoming earnings date
+        try:
+            ned = _fmp_next_earnings_date(sym, fmp_key)
+            if ned:
+                result["next_earnings_date"] = ned
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /earnings failed — %s", sym, exc)
+
+        # /analyst-estimates — forward EPS + revenue consensus
+        try:
+            estimates = _fmp_analyst_estimates(sym, fmp_key) or []
+            current_year = date.today().year
+            for est in estimates:
+                if not isinstance(est, dict):
+                    continue
+                est_date = est.get("date", "")
+                try:
+                    est_year = int(str(est_date)[:4])
+                except (ValueError, TypeError):
+                    continue
+                eps_avg = est.get("epsAvg") or est.get("estimatedEpsAvg")
+                rev_avg = est.get("revenueAvg") or est.get("estimatedRevenueAvg")
+                if est_year == current_year and result["consensus_eps_current_year"] is None:
+                    if eps_avg is not None:
+                        try:
+                            result["consensus_eps_current_year"] = float(eps_avg)
+                        except (TypeError, ValueError):
+                            pass
+                    if rev_avg is not None:
+                        try:
+                            result["consensus_revenue_current_year"] = round(float(rev_avg) / 1_000_000, 1)
+                        except (TypeError, ValueError):
+                            pass
+                elif est_year == current_year + 1 and result["consensus_eps_next_year"] is None:
+                    if eps_avg is not None:
+                        try:
+                            result["consensus_eps_next_year"] = float(eps_avg)
+                        except (TypeError, ValueError):
+                            pass
+                    if rev_avg is not None:
+                        try:
+                            result["consensus_revenue_next_year"] = round(float(rev_avg) / 1_000_000, 1)
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /analyst-estimates failed — %s", sym, exc)
+
+        # /key-metrics-ttm — bundled multiples for the value scorer
+        try:
+            km = _fmp_key_metrics_ttm(sym, fmp_key)
+            if km:
+                ev_eb = km.get("evToEBITDATTM")
+                if ev_eb is not None:
+                    try:
+                        result["ev_ebitda_fmp"] = float(ev_eb)
+                    except (TypeError, ValueError):
+                        pass
+                pb = km.get("priceToBookTTM")
+                if pb is not None:
+                    try:
+                        result["price_book_fmp"] = float(pb)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /key-metrics-ttm failed — %s", sym, exc)
+
+        # /income-statement annual — EBITDA fallback for value scorer
+        try:
+            annual_inc = _fmp_income_statement_annual(sym, fmp_key)
+            if annual_inc:
+                first_row = annual_inc[0] if isinstance(annual_inc[0], dict) else None
+                if first_row is not None:
+                    eb = first_row.get("ebitda")
+                    if eb is not None:
+                        try:
+                            result["ebitda_fmp"] = float(eb)
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as exc:
+            logger.warning("fetch_fmp(%s): FMP /income-statement (annual) failed — %s", sym, exc)
+    else:
+        logger.warning("fetch_fmp(%s): FMP_API_KEY not set — FMP fields unavailable", sym)
+
+    # ── Polygon short-interest (best-effort fallback for FMP gap) ─────────────
+    # FMP Starter doesn't expose short interest; Polygon's reference endpoint
+    # may not be on every tier either. If unavailable, leave both fields None
+    # and the screener's short_interest_bonus simply won't apply.
     if polygon_key:
-        # Market cap from Polygon — only used as fallback when yfinance didn't provide it.
-        # Bug 10: this is reference data (static field), potentially months stale.
-        # Prefer yfinance market cap (set above) for all valuation multiple calculations.
+        try:
+            si_pct, dtc = _polygon_short_interest(sym, polygon_key)
+            if si_pct is not None:
+                result["short_interest_pct"] = si_pct
+            if dtc is not None:
+                result["days_to_cover"] = dtc
+        except Exception:
+            pass
+
+    # ── Polygon /v3/reference/tickers — market_cap final fallback ─────────────
+    if polygon_key and result["market_cap"] is None:
         try:
             r = requests.get(
                 f"{POLYGON_BASE}/v3/reference/tickers/{sym}",
@@ -314,15 +556,15 @@ def fetch_fmp(ticker: str) -> dict:
             if r.status_code == 200:
                 data = r.json().get("results", {})
                 poly_mktcap = data.get("market_cap")
-                if poly_mktcap is not None and result["market_cap"] is None:
+                if poly_mktcap is not None:
                     result["market_cap"] = poly_mktcap
                     result["market_cap_source"] = "polygon_reference"
         except Exception:
             pass
 
-        # Balance sheet + cash flow from Polygon financials.
-        # limit=16 ensures 2 FY periods appear for Beneish (quarterly filings would
-        # fill limit=3 leaving zero or one annual row, breaking the M-score calc).
+    # ── Polygon /vX/reference/financials — deep financials shape ──────────────
+    # Load-bearing for Beneish M-score, value EV math, quality FCF conversion.
+    if polygon_key:
         try:
             r = requests.get(
                 f"{POLYGON_BASE}/vX/reference/financials",
