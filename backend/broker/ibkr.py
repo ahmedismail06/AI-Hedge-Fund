@@ -17,7 +17,18 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from ib_insync import IB, util
+# ib_insync is an optional dependency. Importing the broker module must not
+# require it; only actually connecting to IBKR does. This lets NAV fallback
+# paths, tests, and any code that touches `backend.broker.ibkr` import-side
+# (e.g. via `from backend.broker.ibkr import IBKRConnectionError`) work in
+# environments where ib_insync isn't installed.
+try:
+    from ib_insync import IB, util
+    _IBKR_AVAILABLE = True
+except ImportError:
+    IB = None  # type: ignore[assignment,misc]
+    util = None  # type: ignore[assignment]
+    _IBKR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +78,12 @@ def _start_ib_thread() -> None:
 
 def _get_ib() -> IB:
     global _ib
+
+    if not _IBKR_AVAILABLE:
+        raise IBKRConnectionError(
+            "ib_insync is not installed — IBKR broker is unavailable. "
+            "Install with `pip install ib_insync` to enable live trading."
+        )
 
     if _ib is not None and _ib.isConnected():
         return _ib

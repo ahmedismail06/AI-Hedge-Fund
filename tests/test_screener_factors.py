@@ -827,16 +827,25 @@ def test_short_interest_stub_returns_required_keys():
     assert "active" in result
 
 
-def test_short_interest_stub_score_is_none():
-    """score is always None in Phase 1 stub."""
-    result = score_short_interest("TSLA", {"short_interest_pct": 50.0})
+def test_short_interest_inactive_when_capability_gate_off():
+    """When capabilities.short_factor_active is False, scorer returns inactive stub."""
+    class _InactiveCaps:
+        short_factor_active = False
+
+    result = score_short_interest("TSLA", {"short_interest_pct": 50.0}, capabilities=_InactiveCaps())
     assert result["score"] is None
-
-
-def test_short_interest_stub_active_is_false():
-    """active is always False in Phase 1 stub."""
-    result = score_short_interest("GME", {"short_interest_pct": 60.0})
     assert result["active"] is False
+
+
+def test_short_interest_active_produces_score():
+    """When capabilities.short_factor_active is True, scorer computes a real score."""
+    class _ActiveCaps:
+        short_factor_active = True
+
+    result = score_short_interest("GME", {"short_interest_pct": 0.60, "days_to_cover": 12}, capabilities=_ActiveCaps())
+    assert result["active"] is True
+    assert result["score"] is not None
+    assert 0.0 <= result["score"] <= 10.0
 
 
 def test_short_interest_stub_ticker_uppercased():

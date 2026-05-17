@@ -29,8 +29,15 @@ def score_short_interest(ticker: str, fmp_data: dict, capabilities=None) -> dict
         score is None and active is False when the capability gate is not met.
     """
     if capabilities is None:
-        from backend.capabilities import get_capabilities
-        capabilities = get_capabilities()
+        # Resolve capabilities lazily. If resolution fails (e.g. no NAV history
+        # and IBKR unreachable — typical in tests or cold-start environments),
+        # treat as inactive rather than crashing. Factor scorers should be
+        # pure-ish: a broker outage must not break the screening pipeline.
+        try:
+            from backend.capabilities import get_capabilities
+            capabilities = get_capabilities()
+        except Exception:
+            return {"ticker": ticker.upper(), "score": None, "active": False}
 
     if not capabilities.short_factor_active:
         return {"ticker": ticker.upper(), "score": None, "active": False}
