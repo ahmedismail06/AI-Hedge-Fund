@@ -806,7 +806,7 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
                 "ticker,direction,share_count,entry_price,current_price,conviction_score,"
                 "dollar_size,pct_of_portfolio,stop_tier1,stop_tier2,stop_tier3,"
                 "sector,next_earnings_date,opened_at,status,exit_action"
-            ).eq("status", "OPEN")
+            ).in_("status", ["OPEN", "APPROVED", "PENDING_APPROVAL"])
             if ticker_filter:
                 q = q.eq("ticker", ticker_filter)
             resp = q.execute()
@@ -824,7 +824,7 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
             from backend.agents.pm_prompts.base_context import _REGIME_CAPS
             resp = client.table("positions").select(
                 "ticker,direction,dollar_size"
-            ).eq("status", "OPEN").execute()
+            ).in_("status", ["OPEN", "APPROVED", "PENDING_APPROVAL"]).execute()
             positions = resp.data or []
             try:
                 from backend.broker.ibkr import get_portfolio_value
@@ -901,7 +901,7 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
         elif tool_name == "check_correlation":
             ticker = tool_input["ticker"]
             # Sector overlap check
-            resp = client.table("positions").select("ticker,sector").eq("status", "OPEN").execute()
+            resp = client.table("positions").select("ticker,sector").in_("status", ["OPEN", "APPROVED", "PENDING_APPROVAL"]).execute()
             positions = resp.data or []
             # Get sector of the queried ticker from latest memo
             memo_resp = (
@@ -953,7 +953,7 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
             dollar_amount = float(tool_input["dollar_amount"])
             nav = _compute_portfolio_value()
             weight = dollar_amount / nav if nav > 0 else 1.0
-            resp = client.table("positions").select("ticker,dollar_size").eq("status", "OPEN").execute()
+            resp = client.table("positions").select("ticker,dollar_size").in_("status", ["OPEN", "APPROVED", "PENDING_APPROVAL"]).execute()
             positions = resp.data or []
             gross = sum(abs(float(p.get("dollar_size") or 0)) / nav for p in positions if nav > 0)
             config = _get_pm_config()
