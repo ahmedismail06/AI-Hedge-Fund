@@ -6,7 +6,7 @@ Scheduled at 5:00 PM ET Mon–Fri.
 Efficiency improvements (2026-04-10):
   - Staleness gate: skips tickers with a memo < 7 days old unless material_event=True
   - Priority ordering: P1 (held+material) → P2 (watchlist+material) → P3 (nightly) → P4 (manual)
-  - Daily research cap: hard limit of 10 runs/day, tracked in pm_config; surplus carries to next day
+  - AV budget gate: stops queue when Alpha Vantage daily request budget is exhausted
   - update_mode dispatch: held positions without a material event use incremental mode
     (news+transcripts only; skips SEC/Form4/FMP re-fetch and ReAct loop)
 """
@@ -26,7 +26,6 @@ from backend.notifications.events import notify_event
 
 logger = logging.getLogger(__name__)
 
-DAILY_RESEARCH_CAP = 10
 _STALENESS_DAYS = 7
 
 
@@ -157,44 +156,6 @@ def _get_material_event(client, ticker: str) -> bool:
     return False
 
 
-def _get_and_increment_daily_count(client) -> int:
-    """Return the daily research run count AFTER incrementing it.
-
-    Resets automatically when the date changes (new calendar day).
-    Persisted to pm_config so it survives process restarts.
-    """
-    today = date.today().isoformat()
-    try:
-        row = (
-            client.table("pm_config")
-            .select("daily_research_count,daily_research_date")
-            .eq("id", 1)
-            .single()
-            .execute()
-            .data
-        )
-    except Exception as exc:
-        logger.warning("_get_and_increment_daily_count: read failed — %s; assuming 0", exc)
-        return 1
-
-    if not row or str(row.get("daily_research_date") or "") != today:
-        try:
-            client.table("pm_config").update(
-                {"daily_research_count": 1, "daily_research_date": today}
-            ).eq("id", 1).execute()
-        except Exception as exc:
-            logger.warning("_get_and_increment_daily_count: reset write failed — %s", exc)
-        return 1
-
-    new_count = row["daily_research_count"] + 1
-    try:
-        client.table("pm_config").update(
-            {"daily_research_count": new_count}
-        ).eq("id", 1).execute()
-    except Exception as exc:
-        logger.warning("_get_and_increment_daily_count: increment write failed — %s", exc)
-    return new_count
-
 
 def _clear_material_event(client, ticker: str, today: str) -> None:
     """Clear material_event flag after research completes."""
@@ -216,9 +177,8 @@ def _poll_research_queue() -> list[str]:
       P2 — memos.status=DEFERRED AND deferred_until <= NOW() (expired deferrals)
       P3 — watchlist.priority>=2 (new candidates + material events)
 
-    Enforces DAILY_RESEARCH_CAP across all sources.  Tickers skipped by the
-    staleness gate are cleared from the screener queue; cap overflows carry to
-    the next day.  P2 items have no screener queue row to clear.
+    Tickers skipped by the staleness gate are cleared from the screener queue.
+    P2 items have no screener queue row to clear.
     """
     from backend.memory.vector_store import _get_client
     from backend.agents.research_agent import run_research
@@ -304,6 +264,15 @@ def _poll_research_queue() -> list[str]:
         ticker = row["ticker"]
         from_deferred = row.get("_from_deferred", False)
 
+        # ── AV budget gate ────────────────────────────────────────────────────
+        from backend.fetchers.transcript_fetcher import av_requests_remaining
+        if av_requests_remaining() == 0:
+            logger.warning(
+                "_poll_research_queue: Alpha Vantage daily budget exhausted — stopping queue at %s",
+                ticker,
+            )
+            break
+
         # ── Staleness gate ────────────────────────────────────────────────────
         if not _needs_research(client, ticker):
             logger.info(
@@ -312,15 +281,6 @@ def _poll_research_queue() -> list[str]:
             if not from_deferred:
                 staleness_skipped_wl.append(ticker)
             continue
-
-        # ── Daily cap ─────────────────────────────────────────────────────────
-        count = _get_and_increment_daily_count(client)
-        if count > DAILY_RESEARCH_CAP:
-            logger.warning(
-                "_poll_research_queue: daily cap (%d) hit at %s — remaining carry to next day",
-                DAILY_RESEARCH_CAP, ticker,
-            )
-            break
 
         # ── Determine update_mode ─────────────────────────────────────────────
         is_held = _is_held_position(client, ticker)
