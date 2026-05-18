@@ -92,7 +92,9 @@ CONVICTION SCORE RUBRIC — mechanical derivation required:
 
    HARD CAPS:
    - Conviction < 4.0 → verdict must be AVOID (bear case insufficient to short)
-   - Conviction ≥ 4.0 with specific repricing catalyst → verdict is SHORT
+   - Conviction ≥ 4.0 → verdict is SHORT (catalyst strengthens conviction but is not
+     required for the verdict; overvaluation + deterioration alone is sufficient)
+   - Conviction without a specific time-bound catalyst → cap at 5.5
    - Conviction ≤ 8.0 unless variant_perception documents the specific market error
      with a named metric and value from source documents
    - If short squeeze risk is extreme (SI > 40%), cap conviction at 5.5 regardless of
@@ -121,9 +123,10 @@ REPRICING CATALYST — required field:
    reveal [specific metric that will disappoint the market]."
 
    Must include: (a) specific event, (b) expected date window, (c) what will be revealed.
-   "Continued deterioration" is explicitly rejected. If no time-bound catalyst exists in
-   source documents → state "No time-bound catalyst identified from source documents"
-   and cap conviction at 5.5.
+   "Continued deterioration" is explicitly rejected as a named catalyst. If no time-bound
+   catalyst exists in source documents → state "No time-bound catalyst identified from
+   source documents" and cap conviction at 5.5. The verdict can still be SHORT at 4.0–5.5
+   based on overvaluation and deterioration alone.
 
 ---
 
