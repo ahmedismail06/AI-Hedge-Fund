@@ -142,17 +142,25 @@ def build_order(position_row: dict) -> tuple:
     # 3. Select order type
     order_type, timeout_minutes = _select_order_type(share_count, adv)
 
+    # 4. Fetch current market price — entry_price is the PM agent's approval-time
+    # snapshot and goes stale on retries; live_price anchors the limit to the
+    # actual ask so repeated retries don't keep submitting a price the market
+    # has already moved past.
+    live_price = _fetch_live_price(ticker, entry_price)
+
     logger.info(
-        "Order for %s: %s (%d shares, ADV=%.0f)",
+        "Order for %s: %s (%d shares, ADV=%.0f, live_price=%.4f, entry_price=%.4f)",
         ticker,
         order_type,
         share_count,
         adv,
+        live_price,
+        entry_price,
     )
 
-    # 4. Build OrderRequest
+    # 5. Build OrderRequest
     limit_price_value = (
-        _round_up_to_tick(entry_price * 1.001) if order_type == "LIMIT" else None
+        _round_up_to_tick(live_price * 1.001) if order_type == "LIMIT" else None
     )
     req = OrderRequest(
         position_id=str(position_row["id"]),
@@ -165,20 +173,20 @@ def build_order(position_row: dict) -> tuple:
         timeout_minutes=timeout_minutes,
     )
 
-    # 5. Build ib_insync Contract
+    # 6. Build ib_insync Contract
     contract = Stock(ticker, "SMART", "USD")
 
-    # 6. Build ib_insync Order
+    # 7. Build ib_insync Order
     if order_type == "LIMIT":
-        order = LimitOrder("BUY", share_count, _round_up_to_tick(entry_price * 1.001))
+        order = LimitOrder("BUY", share_count, _round_up_to_tick(live_price * 1.001))
     else:
         # VWAP algo requires live IBKR algo permissions; using limit approximation
-        order = LimitOrder("BUY", share_count, _round_up_to_tick(entry_price * 1.005))
+        order = LimitOrder("BUY", share_count, _round_up_to_tick(live_price * 1.005))
 
     # Ensure TIF matches the gateway preset to avoid IBKR canceling the order.
     order.tif = "DAY"
 
-    # 7. Return triple
+    # 8. Return triple
     return (req, contract, order)
 
 

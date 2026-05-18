@@ -132,6 +132,7 @@ def build_new_entry_prompt(
         "summary", "catalysts",
         "financial_health", "valuation_note", "cash_runway_months",
         "sector", "market_cap", "price_target",
+        "execution_context",  # present only on requeued memos — explains prior expiry
     )
     memo_slim = {k: _merged[k] for k in _ENTRY_FIELDS if k in _merged}
 

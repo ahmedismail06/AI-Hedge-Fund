@@ -33,6 +33,9 @@ from backend.notifications.events import notify_event
 logger = logging.getLogger(__name__)
 _ET = pytz.timezone("America/New_York")
 
+# Max TIMEOUT orders before a position is abandoned rather than retried.
+_MAX_ENTRY_RETRIES = 5
+
 
 class ExecutionAgentError(Exception):
     pass
@@ -78,6 +81,64 @@ def _has_critical_alerts() -> bool:
     except Exception as exc:
         logger.warning("CRITICAL alert check failed (non-blocking): %s", exc)
         return False  # Don't block execution if the check itself fails
+
+
+# ── Expiry re-queue helper ────────────────────────────────────────────────────
+
+def _requeue_memo_after_expiry(
+    client,
+    memo_id: str,
+    position: dict,
+    timeout_orders: list,
+) -> None:
+    """
+    After a position is marked EXPIRED, reset its memo to PENDING_PM_REVIEW and
+    inject an execution_context block so the PM understands why the entry failed.
+    The PM can then decide to retry at current price, resize, or pass entirely.
+    """
+    try:
+        memo_resp = client.table("memos").select("memo_json").eq("id", memo_id).single().execute()
+        if not memo_resp.data:
+            logger.warning("_requeue_memo_after_expiry: memo %s not found — skipping re-queue", memo_id)
+            return
+
+        memo_json = memo_resp.data.get("memo_json") or {}
+        last_price = None
+        if timeout_orders:
+            raw = timeout_orders[0].get("limit_price")
+            last_price = float(raw) if raw is not None else None
+
+        memo_json["execution_context"] = {
+            "status": "REQUEUE_AFTER_EXPIRY",
+            "note": (
+                f"This position was previously approved but the entry order timed out "
+                f"{len(timeout_orders)} time(s) without a single fill. "
+                f"The last limit price submitted was ${last_price:.4f}. "
+                f"The limit is set at approval-time price + 0.1% — if the stock moved up "
+                f"after approval the limit will be stale and sit below the ask indefinitely. "
+                f"Re-evaluate: retry at current market price, adjust size, or pass."
+            ),
+            "timeout_count": len(timeout_orders),
+            "last_limit_price": last_price,
+            "original_entry_price": float(position.get("entry_price") or 0) or None,
+            "expired_at": datetime.utcnow().isoformat(),
+        }
+
+        client.table("memos").update({
+            "memo_json": memo_json,
+            "status": "PENDING_PM_REVIEW",
+        }).eq("id", memo_id).execute()
+
+        logger.info(
+            "Memo %s reset to PENDING_PM_REVIEW with expiry context (%d timeouts, last price $%s) — "
+            "PM will re-evaluate %s",
+            memo_id, len(timeout_orders), last_price, position.get("ticker"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "_requeue_memo_after_expiry failed for memo %s (position %s): %s — position still EXPIRED",
+            memo_id, position.get("id"), exc,
+        )
 
 
 # ── Reconciliation helper ─────────────────────────────────────────────────────
@@ -298,9 +359,8 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
     # ── Pre-gate: log pending exit_actions so the gate decision is always visible.
     # exit_action set by the PM agent after 4 PM persists in the DB overnight
-    # and is naturally picked up at the next pre-market window (07:00 ET) or
-    # market open (09:30 ET) — this query confirms positions are in the queue
-    # even when the gate below fires and skips execution.
+    # and is naturally picked up at market open (09:30 ET) — this query confirms
+    # positions are in the queue even when the gate below fires and skips execution.
     try:
         _pending = (
             _get_client()
@@ -325,10 +385,9 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         logger.warning("Could not query exit queue pre-gate: %s", _exc)
 
     # ── A: Market hours guard ─────────────────────────────────────────────────
-    # Pre-market (07:00–09:29 ET): exits only, with outsideRth=True so orders
-    # queue on the exchange before the 09:30 open. No new entries allowed.
-    pre_market_mode = not force and _is_pre_market()
-    if not force and not _is_market_open() and not pre_market_mode:
+    # All order submission (entries and exits) is restricted to regular market
+    # hours: Mon–Fri 09:30–15:55 ET. Nothing is sent to IBKR before the open.
+    if not force and not _is_market_open():
         logger.debug("Execution cycle skipped — market closed")
         summary.skipped_market_closed = True
         return summary
@@ -411,20 +470,13 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
         # ── E: Exit cycle — sell OPEN positions flagged by PM Agent ──────────
         # Run before new-entry processing so capital is freed before new orders are sized.
-        # In pre-market mode, pass outside_rth=True so IBKR routes the orders immediately.
-        exit_result = _run_exit_cycle(client, outside_rth=pre_market_mode)
+        exit_result = _run_exit_cycle(client, outside_rth=False)
         summary.exits_placed = exit_result["exits_placed"]
         summary.exits_error = exit_result["exits_error"]
         exit_order_ids = exit_result["exit_order_ids"]
 
-        # In pre-market, skip new entries — only exits are allowed.
-        if pre_market_mode:
-            logger.info("Pre-market mode: %d exit order(s) placed, skipping new entries", len(exit_order_ids))
-            return summary
-
-        # New entries only allowed during regular market hours (09:30–15:55 ET).
-        # This applies even when force=True so a manual API trigger can't push
-        # entry orders at 09:20 or 23:27.
+        # Guard is already enforced at gate A — this is a belt-and-suspenders check
+        # for the force=True path to prevent entries outside market hours.
         if not _is_market_open():
             logger.info("Outside market hours: skipping new entries (%d exit(s) placed)", len(exit_order_ids))
             return summary
@@ -461,6 +513,39 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                     "Position %s (%s) already has an active order — skipping",
                     pos["id"], pos.get("ticker"),
                 )
+                continue
+
+            # Retry cap: abandon positions that have timed out too many times.
+            # A repeated TIMEOUT almost always means the limit price is wrong or
+            # the stock has no liquidity at our size — retrying endlessly wastes
+            # IBKR order slots and pollutes the orders table.
+            timeout_orders_result = (
+                client.table("orders")
+                .select("id, limit_price, submitted_at")
+                .eq("position_id", pos["id"])
+                .eq("status", "TIMEOUT")
+                .order("submitted_at", desc=True)
+                .execute()
+            )
+            timeout_orders = timeout_orders_result.data or []
+            timeout_count = len(timeout_orders)
+            if timeout_count >= _MAX_ENTRY_RETRIES:
+                client.table("positions").update({"status": "EXPIRED"}).eq("id", pos["id"]).execute()
+                logger.warning(
+                    "Position %s (%s) exceeded max retries (%d timeouts) — marked EXPIRED",
+                    pos["id"], pos.get("ticker"), timeout_count,
+                )
+
+                # Re-queue the linked memo for PM re-evaluation with expiry context
+                # so the PM can decide whether to retry at current price, resize, or pass.
+                memo_id = pos.get("memo_id")
+                if memo_id:
+                    _requeue_memo_after_expiry(client, memo_id, pos, timeout_orders)
+
+                notify_event("ORDER_ERROR", {
+                    "ticker": pos.get("ticker", "—"),
+                    "error": f"Abandoned after {timeout_count} timeout(s) — marked EXPIRED, memo re-queued for PM",
+                })
                 continue
 
             # F: Build and place
