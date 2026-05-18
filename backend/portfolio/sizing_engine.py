@@ -55,8 +55,9 @@ _TIERS: list[dict] = [
     },
 ]
 
-_HARD_POSITION_CAP = 0.15  # 15% of portfolio — absolute ceiling
-_KELLY_FRACTION = 0.25     # 25% fractional Kelly
+_HARD_POSITION_CAP = 0.15   # 15% of portfolio — absolute ceiling for LONG
+_SHORT_POSITION_CAP = 0.075 # 7.5% for SHORT — asymmetric loss profile (unlimited upside risk)
+_KELLY_FRACTION = 0.25      # 25% fractional Kelly
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -163,9 +164,12 @@ def calculate_size(
     kelly_fraction = (b * win_rate - q) / b
     adjusted_kelly = kelly_fraction * _KELLY_FRACTION
 
-    # Apply tier cap first, then absolute hard cap
+    # Apply tier cap first, then direction-specific hard cap.
+    # Shorts cap at 7.5% (half of longs) — a short can lose multiples of notional
+    # if the thesis is wrong, while a long is bounded at 100%.
     raw_pct = min(adjusted_kelly, max_pct)
-    pct_of_portfolio = min(raw_pct, _HARD_POSITION_CAP)
+    hard_cap = _SHORT_POSITION_CAP if direction.upper() == "SHORT" else _HARD_POSITION_CAP
+    pct_of_portfolio = min(raw_pct, hard_cap)
 
     dollar_size = pct_of_portfolio * portfolio_value
     share_count = int(dollar_size // entry_price)

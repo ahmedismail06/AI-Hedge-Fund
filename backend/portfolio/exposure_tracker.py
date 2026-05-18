@@ -30,14 +30,17 @@ logger = logging.getLogger(__name__)
 # max_net_short : (long - short) lower bound (negative = net short)
 
 REGIME_CAPS: dict[str, dict[str, float]] = {
-    "Risk-On":      {"max_gross": 1.50, "max_net_long":  0.50, "max_net_short":  0.00},
-    "Transitional": {"max_gross": 1.20, "max_net_long":  0.20, "max_net_short": -0.20},
-    "Risk-Off":     {"max_gross": 0.80, "max_net_long":  0.10, "max_net_short": -0.10},
-    "Stagflation":  {"max_gross": 1.00, "max_net_long":  0.00, "max_net_short": -0.20},
+    # max_gross_short — absolute cap on summed short notional / portfolio_value.
+    # Tighter than total gross because shorts carry asymmetric loss.
+    "Risk-On":      {"max_gross": 1.50, "max_net_long":  0.50, "max_net_short":  0.00, "max_gross_short": 0.50},
+    "Transitional": {"max_gross": 1.20, "max_net_long":  0.20, "max_net_short": -0.20, "max_gross_short": 0.60},
+    "Risk-Off":     {"max_gross": 0.80, "max_net_long":  0.10, "max_net_short": -0.10, "max_gross_short": 0.40},
+    "Stagflation":  {"max_gross": 1.00, "max_net_long":  0.00, "max_net_short": -0.20, "max_gross_short": 0.60},
 }
 
 _DEFAULT_REGIME = "Risk-On"
-_POSITION_CAP = 0.15  # hard per-position cap: 15% of portfolio (domain rule, regime-independent)
+_POSITION_CAP = 0.15        # hard per-position cap for LONGs (domain rule)
+_SHORT_POSITION_CAP = 0.075 # half-cap for SHORTs — asymmetric loss profile
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
@@ -134,6 +137,7 @@ def get_current_exposure(
 
     gross_exposure_pct = gross_notional / safe_value
     net_exposure_pct = net_notional / safe_value
+    gross_short_pct = short_notional / safe_value
 
     sector_concentration: dict[str, float] = {
         sector: round(notional / safe_value, 6)
@@ -146,9 +150,11 @@ def get_current_exposure(
     exposure_state: dict = {
         "gross_exposure_pct":   round(gross_exposure_pct, 6),
         "net_exposure_pct":     round(net_exposure_pct, 6),
+        "gross_short_pct":      round(gross_short_pct, 6),
         "max_gross_pct":        caps["max_gross"],
         "max_net_long_pct":     caps["max_net_long"],
         "max_net_short_pct":    caps["max_net_short"],
+        "max_gross_short_pct":  caps.get("max_gross_short", 0.60),
         "sector_concentration": sector_concentration,
         "position_count":       len(positions),
         "regime":               regime,
@@ -201,19 +207,35 @@ def check_exposure_breach(
     # Extract current state values — current is typed as ExposureState but backed by dict
     gross_now = float(current["gross_exposure_pct"])  # type: ignore[index]
     net_now = float(current["net_exposure_pct"])       # type: ignore[index]
+    gross_short_now = float(current.get("gross_short_pct", 0.0))  # type: ignore[union-attr]
     max_gross = float(current["max_gross_pct"])        # type: ignore[index]
     max_net_long = float(current["max_net_long_pct"])  # type: ignore[index]
     max_net_short = float(current["max_net_short_pct"])# type: ignore[index]
+    max_gross_short = float(current.get("max_gross_short_pct", 0.60))  # type: ignore[union-attr]
     regime = str(current.get("regime", _DEFAULT_REGIME))  # type: ignore[union-attr]
 
-    # ── Check 1: Hard per-position cap (15% of portfolio — domain rule) ─────────
-    if new_pct > _POSITION_CAP:
+    # ── Check 1: Hard per-position cap (direction-specific) ─────────────────────
+    # SHORTs cap at 7.5% (half of LONGs) — a short can lose multiples of notional.
+    position_cap = _SHORT_POSITION_CAP if direction_upper == "SHORT" else _POSITION_CAP
+    if new_pct > position_cap:
         reason = (
-            f"Position size {new_pct:.1%} of portfolio exceeds the hard per-position "
-            f"cap of {_POSITION_CAP:.0%} (regime: {regime})."
+            f"{direction_upper} position size {new_pct:.1%} of portfolio exceeds the "
+            f"hard per-position cap of {position_cap:.1%} (regime: {regime})."
         )
         logger.warning("Exposure breach — %s", reason)
         return True, reason
+
+    # ── Check 1b: Gross-short cap (SHORTS only) ─────────────────────────────────
+    if direction_upper == "SHORT":
+        projected_gross_short = gross_short_now + new_pct
+        if projected_gross_short > max_gross_short + 1e-6:
+            reason = (
+                f"Adding this SHORT would push gross short exposure to "
+                f"{projected_gross_short:.2%}, exceeding the {regime} cap of "
+                f"{max_gross_short:.0%} (current gross short: {gross_short_now:.2%})."
+            )
+            logger.warning("Exposure breach — %s", reason)
+            return True, reason
 
     # ── Check 2: Gross exposure cap ──────────────────────────────────────────────
     projected_gross = gross_now + new_pct

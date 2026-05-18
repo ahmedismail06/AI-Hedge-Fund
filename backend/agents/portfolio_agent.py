@@ -358,6 +358,32 @@ async def run_portfolio_sizing(
         sizing_rationale = sizing["sizing_rationale"]
         kelly_fraction = sizing.get("kelly_fraction", 0.0)
 
+    # 4a.5 — IBKR borrow availability check (SHORTS only).
+    # A short thesis without locate-able borrow is not investable. We block on
+    # UNAVAILABLE always. UNKNOWN (IBKR unreachable) blocks in live mode and
+    # warns in paper, so live trading can't proceed without confirmed locate.
+    if direction == "SHORT":
+        from backend.broker.borrow_check import check_borrow, is_blocking, BORROW_HTB
+        from backend.broker.ibkr import is_paper
+        borrow = check_borrow(ticker, int(share_count))
+        logger.info(
+            "Phase 4a.5: borrow check %s — %s (shortable=%s, required=%s)",
+            ticker, borrow.status, borrow.shortable_shares, borrow.required_shares,
+        )
+        if is_blocking(borrow.status, allow_unknown=is_paper()):
+            raise PortfolioAgentError(
+                f"Phase 4a.5: borrow check blocked SHORT {ticker} — "
+                f"status={borrow.status}, reason={borrow.reason}"
+            )
+        if borrow.status == BORROW_HTB:
+            sizing_rationale += f" [HTB warning: {borrow.reason}]"
+            notify_event("BORROW_HTB", {
+                "ticker": ticker,
+                "shortable_shares": borrow.shortable_shares,
+                "required_shares": borrow.required_shares,
+                "margin_ratio": borrow.margin_ratio,
+            })
+
     # 4b — Correlation check
     correlation_flag, correlation_note = correlation.check_correlation(
         candidate_ticker=ticker,

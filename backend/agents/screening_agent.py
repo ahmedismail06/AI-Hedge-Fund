@@ -244,6 +244,59 @@ def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -
     logger.info("Upserted %d watchlist rows for %s", len(rows), run_date.isoformat())
 
 
+def _enqueue_beneish_excluded_as_shorts(
+    results: list[ScreenerResult], run_date: date, regime: str,
+) -> int:
+    """
+    Auto-enqueue Beneish-EXCLUDED tickers into short_candidates with source=BENEISH_EXCLUDED.
+
+    EXCLUDED (M-score > -1.78) is the strongest short signal the long pipeline produces.
+    These tickers are dead-on-arrival for longs but live wires for shorts — route them
+    straight to the research queue with high priority.
+    """
+    try:
+        client = _get_client()
+    except Exception as exc:
+        logger.error("Beneish short auto-enqueue: Supabase unavailable — %s", exc)
+        return 0
+
+    rows = []
+    for r in results:
+        if r.beneish_flag != "EXCLUDED":
+            continue
+        rows.append({
+            "run_date":            run_date.isoformat(),
+            "ticker":              r.ticker,
+            "source":              "BENEISH_EXCLUDED",
+            "priority":            3,   # high — these are pre-qualified
+            "evidence":            {
+                "m_score":           r.beneish_m_score,
+                "raw_factors":       r.raw_factors,
+            },
+            "market_cap_m":        r.market_cap_m,
+            "sector":              r.sector,
+            "adv_k":               r.adv_k,
+            "beneish_m_score":     r.beneish_m_score,
+            "beneish_flag":        "EXCLUDED",
+            "raw_factors":         r.raw_factors,
+            "queued_for_research": True,
+            "regime":              regime,
+        })
+
+    if not rows:
+        return 0
+
+    try:
+        client.table("short_candidates").upsert(
+            rows, on_conflict="run_date,ticker"
+        ).execute()
+        logger.info("Beneish short auto-enqueue: queued %d EXCLUDED tickers for short research", len(rows))
+        return len(rows)
+    except Exception as exc:
+        logger.error("Beneish short auto-enqueue: upsert failed — %s", exc)
+        return 0
+
+
 def _queue_top_n_for_research(
     run_date: date,
     n: int = _TOP_N_FOR_RESEARCH,
@@ -447,6 +500,12 @@ def run_screening(regime: str | None = None) -> list[dict]:
         _store_results(all_results, run_date, regime)
     except Exception as exc:
         logger.error("Failed to store screener results: %s", exc)
+
+    # Step 7b: Auto-enqueue Beneish-EXCLUDED tickers to short_candidates for bear-thesis research
+    try:
+        _enqueue_beneish_excluded_as_shorts(all_results, run_date, regime)
+    except Exception as exc:
+        logger.error("Beneish short auto-enqueue failed: %s", exc)
 
     # Step 8: Queue top N qualified tickers for research (all-time pool, not just today's run)
     qualified = [r for r in all_results if not r.excluded and r.composite_score >= _QUALIFY_THRESHOLD]

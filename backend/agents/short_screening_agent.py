@@ -1,18 +1,27 @@
 """
 Short screening agent.
 
-Runs after the long screener (4 PM ET) and sources short candidates from:
-  1. Today's watchlist rows (0 extra API calls — data already fetched)
-  2. Supplementary wide universe $2B–$10B (weekly-cached)
+Runs after the long screener (4 PM ET). New v2 flow:
 
-Writes top 2-5 short candidates to the short_candidates table with
-queued_for_research=True. The research scheduler picks them up at 5 PM ET.
+  1. Read today's long-watchlist tickers (used to exclude overlap)
+  2. Build dedicated short universe ($2B–$20B, well-covered, low SI)
+  3. Run the trigger-count scorer (7 binary bear triggers; ≥3 to qualify)
+  4. Apply 14-day SHORT-memo freshness gate
+  5. Write qualifying rows to short_candidates with source=TRIGGER_SCORER,
+     queued_for_research=True. The research scheduler picks them up.
+
+This agent does NOT handle the event-driven queue path (BENEISH_EXCLUDED,
+NEWS_GUIDANCE_CUT, SEC_RESTATEMENT, MANUAL). Those are written directly to
+short_candidates by their respective producers — e.g. screening_agent
+auto-enqueues Beneish-EXCLUDED rows. The research scheduler reads everything
+out of short_candidates regardless of source.
 """
 from __future__ import annotations
 
 import logging
 from datetime import date, timedelta, timezone
 from datetime import datetime as _dt
+from typing import Iterable
 
 from dotenv import load_dotenv
 
@@ -20,12 +29,17 @@ load_dotenv()
 
 from backend.memory.vector_store import _get_client
 from backend.notifications.events import notify_event
-from backend.screener.short_scorer import compute_short_scores, select_short_candidates
-from backend.screener.short_universe import build_wide_universe
+from backend.screener.short_trigger_scorer import (
+    TriggerResult,
+    score_triggers,
+    select_qualifying,
+)
+from backend.screener.short_universe import build_short_universe
 
 logger = logging.getLogger(__name__)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _read_regime() -> str:
     try:
         client = _get_client()
@@ -41,6 +55,50 @@ def _read_regime() -> str:
     except Exception as exc:
         logger.warning("_read_regime failed, defaulting to Transitional: %s", exc)
     return "Transitional"
+
+
+def _read_long_watchlist_tickers(run_date: date) -> set[str]:
+    """Today's long-watchlist tickers — excluded from the short universe to avoid overlap."""
+    try:
+        client = _get_client()
+        result = (
+            client.table("watchlist")
+            .select("ticker")
+            .eq("run_date", run_date.isoformat())
+            .execute()
+        )
+        return {r["ticker"] for r in (result.data or []) if r.get("ticker")}
+    except Exception as exc:
+        logger.warning("Long watchlist read failed (continuing without exclude set): %s", exc)
+        return set()
+
+
+def _read_beneish_lookup(run_date: date, tickers: Iterable[str]) -> dict[str, dict]:
+    """Pull Beneish data from watchlist.raw_factors for tickers we care about.
+
+    Used as input to T4 of the trigger scorer. Most short-universe tickers won't
+    be in the long watchlist (cap bands differ), so this lookup is usually small
+    or empty — T4 just evaluates as None and skips.
+    """
+    tickers = list(tickers)
+    if not tickers:
+        return {}
+    try:
+        client = _get_client()
+        result = (
+            client.table("watchlist")
+            .select("ticker,beneish_m_score,beneish_flag")
+            .eq("run_date", run_date.isoformat())
+            .in_("ticker", tickers)
+            .execute()
+        )
+        return {
+            r["ticker"]: {"m_score": r.get("beneish_m_score"), "gate_result": r.get("beneish_flag")}
+            for r in (result.data or [])
+        }
+    except Exception as exc:
+        logger.warning("Beneish lookup failed: %s", exc)
+        return {}
 
 
 def _is_recently_researched(ticker: str, days: int = 14) -> bool:
@@ -63,149 +121,121 @@ def _is_recently_researched(ticker: str, days: int = 14) -> bool:
         return False
 
 
-def _store_short_candidates(
-    results: list,
-    run_date: date,
-    regime: str,
-) -> None:
-    client = _get_client()
-    rows = []
-    for r in results:
-        rows.append({
+def _store_trigger_candidates(
+    results: list[TriggerResult], run_date: date, regime: str,
+) -> int:
+    """Upsert qualifying trigger-scorer rows into short_candidates."""
+    if not results:
+        return 0
+    try:
+        client = _get_client()
+    except Exception as exc:
+        logger.error("short_candidates: client unavailable — %s", exc)
+        return 0
+
+    rows = [
+        {
             "run_date":            run_date.isoformat(),
             "ticker":              r.ticker,
-            "short_score":         float(r.short_score),
-            "deterioration_score": float(r.deterioration_score),
-            "overvaluation_score": float(r.overvaluation_score),
-            "accruals_score":      float(r.accruals_score),
-            "cash_burn_score":     float(r.cash_burn_score),
-            "source":              r.source,
-            "market_cap_m":        float(r.market_cap_m) if r.market_cap_m is not None else None,
+            "source":              "TRIGGER_SCORER",
+            "priority":            5,
+            "evidence":            {
+                "triggers_fired":     r.triggers_fired,
+                "triggers_evaluated": r.triggers_evaluated,
+                "trigger_count":      r.trigger_count,
+                "raw":                r.evidence,
+                "short_interest_pct": r.short_interest_pct,
+            },
+            "trigger_count":       r.trigger_count,
+            "triggers_fired":      r.triggers_fired,
+            "market_cap_m":        r.market_cap_m,
             "sector":              r.sector,
-            "adv_k":               float(r.adv_k) if r.adv_k is not None else None,
-            "beneish_m_score":     float(r.beneish_m_score) if r.beneish_m_score is not None else None,
+            "adv_k":               r.adv_k,
+            "beneish_m_score":     r.beneish_m_score,
             "beneish_flag":        r.beneish_flag,
-            "raw_factors":         r.raw_factors,
             "queued_for_research": True,
             "regime":              regime,
-        })
-
-    if not rows:
-        return
+        }
+        for r in results
+    ]
 
     try:
-        client.table("short_candidates").upsert(
-            rows, on_conflict="run_date,ticker"
-        ).execute()
-        logger.info("short_candidates: upserted %d rows for %s", len(rows), run_date)
+        client.table("short_candidates").upsert(rows, on_conflict="run_date,ticker").execute()
+        logger.info("short_candidates: upserted %d TRIGGER_SCORER rows", len(rows))
+        return len(rows)
     except Exception as exc:
         logger.error("short_candidates upsert failed: %s", exc)
+        return 0
 
 
+# ── Main entrypoint ───────────────────────────────────────────────────────────
 def run_short_screening(regime: str | None = None) -> list[dict]:
     """
-    Run the short screening pipeline.
+    Run the dedicated short-screening pipeline.
 
-    Returns a list of dicts for selected short candidates.
-    Never raises — logs errors and returns [] on failure.
+    Returns a list of dicts for qualifying tickers. Never raises — logs errors
+    and returns [] on failure.
     """
     try:
         today = date.today()
         regime = regime or _read_regime()
-        logger.info("=== Short screening starting | date=%s regime=%s ===", today, regime)
+        logger.info("=== Short screening v2 starting | date=%s regime=%s ===", today, regime)
 
-        # ── Step 1: Read today's watchlist ────────────────────────────────────
-        client = _get_client()
-        try:
-            wl_result = (
-                client.table("watchlist")
-                .select("ticker,market_cap_m,sector,adv_k,beneish_m_score,beneish_flag,raw_factors")
-                .eq("run_date", today.isoformat())
-                .not_.is_("raw_factors", "null")
-                .execute()
-            )
-            watchlist_rows = [
-                {
-                    "ticker":        r["ticker"],
-                    "market_cap_m":  r.get("market_cap_m"),
-                    "sector":        r.get("sector"),
-                    "adv_k":         r.get("adv_k"),
-                    "beneish_m_score": r.get("beneish_m_score"),
-                    "beneish_flag":  r.get("beneish_flag"),
-                    "raw_factors":   r.get("raw_factors") or {},
-                    "source":        "watchlist",
-                }
-                for r in (wl_result.data or [])
-            ]
-            logger.info("Short screening: %d watchlist rows loaded", len(watchlist_rows))
-        except Exception as exc:
-            logger.error("Short screening: watchlist read failed — %s", exc)
-            watchlist_rows = []
+        # ── Step 1: exclude set = today's long watchlist (no overlap) ─────────
+        exclude = _read_long_watchlist_tickers(today)
+        logger.info("Short screening: excluding %d tickers from long watchlist", len(exclude))
 
-        if not watchlist_rows:
-            logger.warning("Short screening: no watchlist rows for %s — aborting", today)
+        # ── Step 2: build dedicated short universe (cached, 7-day TTL) ────────
+        universe = build_short_universe(use_cache=True, exclude_tickers=exclude)
+        if not universe:
+            logger.warning("Short screening: empty universe (cache miss spawned background rebuild) — done")
+            return []
+        logger.info("Short screening: %d tickers in universe", len(universe))
+
+        # ── Step 3: Beneish lookup (best-effort — most won't be in long wl) ───
+        beneish_lookup = _read_beneish_lookup(today, [r["ticker"] for r in universe])
+
+        # ── Step 4: score triggers ────────────────────────────────────────────
+        scored = score_triggers(universe, beneish_lookup=beneish_lookup)
+        qualifying = select_qualifying(scored)
+        logger.info("Short screening: %d tickers qualify (≥3 triggers, ≥4 evaluable)", len(qualifying))
+        if not qualifying:
             return []
 
-        # ── Step 2: Supplement with wide universe ($2B–$10B) ─────────────────
-        try:
-            wide_rows = build_wide_universe(use_cache=True)
-            logger.info("Short screening: %d wide universe candidates", len(wide_rows))
-        except Exception as exc:
-            logger.warning("Short screening: wide universe failed — %s", exc)
-            wide_rows = []
-
-        # Deduplicate: prefer watchlist rows (more data) at $2B boundary
-        watchlist_tickers = {r["ticker"] for r in watchlist_rows}
-        wide_rows = [r for r in wide_rows if r["ticker"] not in watchlist_tickers]
-
-        all_candidates = watchlist_rows + wide_rows
-        logger.info("Short screening: %d total candidates", len(all_candidates))
-
-        # ── Step 3: Score ─────────────────────────────────────────────────────
-        scored = compute_short_scores(all_candidates, regime=regime)
-
-        # ── Step 4: Select top 2-5 ────────────────────────────────────────────
-        selected = select_short_candidates(scored, max_candidates=5)
-        logger.info("Short screening: %d candidates selected (score >= 6.0)", len(selected))
-
-        if not selected:
-            logger.info("Short screening: no candidates met threshold — done")
+        # ── Step 5: freshness gate ────────────────────────────────────────────
+        fresh = [r for r in qualifying if not _is_recently_researched(r.ticker, days=14)]
+        skipped = [r.ticker for r in qualifying if r not in fresh]
+        if skipped:
+            logger.info("Short screening: %d skipped (SHORT memo < 14 days): %s",
+                        len(skipped), skipped)
+        if not fresh:
             return []
 
-        # ── Step 5: Freshness check ───────────────────────────────────────────
-        fresh_candidates = []
-        for r in selected:
-            if _is_recently_researched(r.ticker, days=14):
-                logger.info("Short screening: skipping %s — SHORT memo < 14 days old", r.ticker)
-            else:
-                fresh_candidates.append(r)
+        # ── Step 6: enqueue to short_candidates ───────────────────────────────
+        n_stored = _store_trigger_candidates(fresh, today, regime)
 
-        if not fresh_candidates:
-            logger.info("Short screening: all candidates have recent memos — done")
-            return []
-
-        # ── Step 6: Write to short_candidates ────────────────────────────────
-        _store_short_candidates(fresh_candidates, today, regime)
-
-        # ── Step 7: Notify ────────────────────────────────────────────────────
+        # ── Step 7: notify ────────────────────────────────────────────────────
         summary = [
-            {"ticker": r.ticker, "short_score": r.short_score, "sector": r.sector}
-            for r in fresh_candidates
+            {
+                "ticker":         r.ticker,
+                "trigger_count":  r.trigger_count,
+                "triggers":       r.triggers_fired,
+                "sector":         r.sector,
+                "market_cap_m":   r.market_cap_m,
+            }
+            for r in fresh
         ]
         notify_event("SHORT_CANDIDATES_SELECTED", {
-            "count": len(fresh_candidates),
+            "count":      len(fresh),
             "candidates": summary,
-            "regime": regime,
+            "regime":     regime,
+            "source":     "TRIGGER_SCORER",
         })
         logger.info(
-            "=== Short screening complete | %d candidates: %s ===",
-            len(fresh_candidates),
-            [r.ticker for r in fresh_candidates],
+            "=== Short screening v2 complete | %d enqueued (%d stored): %s ===",
+            len(fresh), n_stored, [r.ticker for r in fresh],
         )
-        return [
-            {"ticker": r.ticker, "short_score": r.short_score, "sector": r.sector}
-            for r in fresh_candidates
-        ]
+        return summary
 
     except Exception as exc:
         logger.exception("run_short_screening: unexpected failure — %s", exc)

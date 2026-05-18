@@ -378,6 +378,9 @@ def compute_composite(
         results.append(sr)
 
     # ── Step 7: Audit rows for EXCLUDED tickers ───────────────────────────────
+    # raw_factors must be carried over for the short pipeline — EXCLUDED tickers
+    # are the strongest short signal and the trigger scorer needs their underlying
+    # quality/value metrics, not an empty payload.
     for ticker in excluded_set:
         cand    = ticker_to_cand.get(ticker)
         beneish = raw_factor_results.get(ticker, {}).get("beneish", {})
@@ -392,6 +395,12 @@ def compute_composite(
             adv_k=cand.adv_k if cand else None,
             beneish_m_score=beneish.get("m_score"),
             beneish_flag="EXCLUDED",
+            raw_factors={
+                "quality":  raw_factor_results.get(ticker, {}).get("quality", {}).get("raw_values", {}),
+                "value":    raw_factor_results.get(ticker, {}).get("value", {}).get("raw_values", {}),
+                "momentum": raw_factor_results.get(ticker, {}).get("momentum", {}).get("raw_values", {}),
+                "beneish":  beneish,
+            },
             excluded=True,
         )
         results.append(sr)
