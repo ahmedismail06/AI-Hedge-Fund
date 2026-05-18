@@ -69,6 +69,17 @@ async def run_peer_multiples_job() -> None:
         logger.exception("Peer multiples refresh failed: %s", exc)
 
 
+async def run_short_screening_job() -> None:
+    """Async wrapper for the short screening pipeline. Runs after the long screener."""
+    from backend.agents.short_screening_agent import run_short_screening
+    logger.info("Short screener job starting (post-long-screener trigger)")
+    try:
+        results = run_short_screening()
+        logger.info("Short screener complete — %d candidates selected", len(results))
+    except Exception as exc:
+        logger.exception("Short screener job failed: %s", exc)
+
+
 async def run_screening_job() -> None:
     """
     Async wrapper for the screening pipeline. Logs start/end.
@@ -96,6 +107,8 @@ async def run_screening_job() -> None:
 
     # Refresh peer multiples after screener finishes (needed for relative valuation at memo time)
     await run_peer_multiples_job()
+    # Short screening runs after watchlist is written — sources from today's watchlist rows
+    await run_short_screening_job()
 
 
 def create_screener_scheduler() -> AsyncIOScheduler:

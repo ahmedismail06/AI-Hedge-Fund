@@ -1190,6 +1190,16 @@ def _route_decision(
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
                     import concurrent.futures as _cf
+                    # If the PM explicitly sized the trade (e.g. low-conviction shorts),
+                    # pass it through so the Kelly 5.0 floor doesn't block execution.
+                    _exec_action = decision_data.get("action_details", {})
+                    _raw_exec_dollar = _exec_action.get("dollar_amount")
+                    _exec_override = None
+                    if _raw_exec_dollar not in (None, ""):
+                        try:
+                            _exec_override = float(_raw_exec_dollar)
+                        except (TypeError, ValueError):
+                            pass
                     # Run in a new thread to avoid "event loop already running" inside
                     # FastAPI/APScheduler contexts where asyncio.run() would fail.
                     with _cf.ThreadPoolExecutor(max_workers=1) as pool:
@@ -1199,9 +1209,10 @@ def _route_decision(
                                 memo_id=memo_id,
                                 portfolio_value=portfolio_value,
                                 auto_approve=auto_approve,
+                                override_dollar_amount=_exec_override,
                             ),
                         ).result()
-                    logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s)", ticker, auto_approve)
+                    logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s, override=$%s)", ticker, auto_approve, _exec_override)
                     return "SENT_TO_EXECUTION" if auto_approve else "PENDING_HUMAN"
                 except Exception as exc:
                     logger.warning("PM: EXECUTE sizing failed for %s — %s", ticker, exc)

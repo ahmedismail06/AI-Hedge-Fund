@@ -211,6 +211,25 @@ def _poll_research_queue() -> list[str]:
     p1_rows = [r for r in watchlist_rows if (r.get("priority") or 99) == 1]
     p3_rows = [r for r in watchlist_rows if (r.get("priority") or 99) >= 2]
 
+    # ── Short candidates queue (appended as P3) ───────────────────────────────
+    try:
+        sc_result = (
+            client.table("short_candidates")
+            .select("ticker,short_score,source")
+            .eq("queued_for_research", True)
+            .eq("run_date", today)
+            .order("short_score", desc=True)
+            .execute()
+        )
+        short_rows = [
+            {"ticker": r["ticker"], "rank": 999, "priority": 3,
+             "material_event": False, "_direction": "SHORT"}
+            for r in (sc_result.data or [])
+        ]
+    except Exception as exc:
+        logger.error("_poll_research_queue: short_candidates read failed — %s", exc)
+        short_rows = []
+
     # ── P2: expired deferrals ──────────────────────────────────────────────────
     try:
         def_result = (
@@ -244,7 +263,11 @@ def _poll_research_queue() -> list[str]:
     # Remove from P3 any tickers promoted to P2 (expired deferral wins)
     p3_rows = [r for r in p3_rows if r["ticker"] not in p1_tickers and r["ticker"] not in p2_tickers]
 
-    unified_rows = p1_rows + p2_rows + p3_rows
+    # Short rows are P3 — exclude any that overlap with existing P1/P2/P3 tickers
+    existing_tickers = p1_tickers | p2_tickers | {r["ticker"] for r in p3_rows}
+    short_rows = [r for r in short_rows if r["ticker"] not in existing_tickers]
+
+    unified_rows = p1_rows + p2_rows + p3_rows + short_rows
 
     if not unified_rows:
         logger.info("_poll_research_queue: no tickers queued for research today")
@@ -298,8 +321,20 @@ def _poll_research_queue() -> list[str]:
                 ticker, is_held, has_material_event,
             )
 
-        # ── Dequeue from watchlist (screener rows only) ───────────────────────
-        if not from_deferred:
+        is_short = row.get("_direction") == "SHORT"
+
+        # ── Dequeue from watchlist or short_candidates ────────────────────────
+        if is_short:
+            try:
+                client.table("short_candidates").update({"queued_for_research": False}).eq(
+                    "ticker", ticker
+                ).eq("run_date", today).execute()
+            except Exception as exc:
+                logger.warning(
+                    "_poll_research_queue: failed to dequeue short %s — %s; skipping", ticker, exc
+                )
+                continue
+        elif not from_deferred:
             try:
                 client.table("watchlist").update({"queued_for_research": False}).eq(
                     "ticker", ticker
@@ -313,7 +348,12 @@ def _poll_research_queue() -> list[str]:
 
         # ── Run research ──────────────────────────────────────────────────────
         try:
-            memo = run_research(ticker, use_cache=False, update_mode=update_mode)
+            memo = run_research(
+                ticker,
+                use_cache=False,
+                update_mode=False if is_short else update_mode,
+                direction="SHORT" if is_short else "LONG",
+            )
             processed.append(ticker)
             logger.info("_poll_research_queue: completed %s", ticker)
         except Exception as exc:

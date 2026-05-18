@@ -574,7 +574,10 @@ def _build_structured_block(
 # ACTIVE: System prompt (Claude-compatible)
 # Originally tuned for GPT-4.1. Claude handles this well as-is.
 # A lighter Claude-native version is preserved in the commented block below.
-def _build_system_prompt() -> str:
+def _build_system_prompt(direction: str = "LONG") -> str:
+    if direction == "SHORT":
+        from backend.agents.pm_prompts.bear_thesis import build_bear_system_prompt
+        return build_bear_system_prompt()
     today = date.today().isoformat()
     return"""You are a senior equity research analyst at a long/short hedge fund focused on
 US micro/small-cap equities ($50M–$2B, SaaS/Healthcare/Industrials, ≤5 analysts).
@@ -1204,6 +1207,7 @@ def _build_synthesis_message(
     macro_context: Optional[str] = None,
     financial_modeling_context: Optional[str] = None,
     earnings_alpha_context: Optional[str] = None,
+    direction: str = "LONG",
 ) -> str:
     """Assemble final synthesis prompt combining structured data and retrieved narrative chunks."""
     if retrieved_chunks:
@@ -1225,7 +1229,14 @@ def _build_synthesis_message(
     else:
         ea_section = ""
 
+    direction_prefix = (
+        "RESEARCH DIRECTION: SHORT candidate evaluation. "
+        "Prioritize overvaluation, fundamental deterioration, and downside catalysts. "
+        "Verdict must be SHORT or AVOID.\n\n"
+    ) if direction == "SHORT" else ""
+
     message = (
+        f"{direction_prefix}"
         f"Analyze {ticker.upper()} and produce a structured investment memo.\n\n"
         f"{structured_block}\n\n"
         f"{chunks_section}\n"
@@ -1243,7 +1254,36 @@ def _build_synthesis_message(
 
 # ── Red Team ─────────────────────────────────────────────────────────────────
 
-def _build_red_team_system_prompt() -> str:
+def _build_red_team_system_prompt(direction: str = "LONG") -> str:
+    if direction == "SHORT":
+        return """You are a long-only portfolio manager stress-testing a SHORT thesis.
+
+You will be given a memo recommending SHORT on a stock.
+Your task: find 5 reasons the short is WRONG — scenarios where the stock re-rates upward,
+squeezes, or the bear thesis fails to play out.
+
+Rules:
+- Each risk must describe a distinct scenario where the short LOSES money.
+- Be specific — reference the data points in the memo and explain what would have to be
+  true for them to reverse (revenue recovery, strategic buyer, refinancing success, etc.).
+- Focus on: squeeze dynamics, strategic optionality, management credibility the memo ignores,
+  valuation support (asset value, sum-of-parts), and macro tailwinds the memo underweights.
+
+Respond with a single valid JSON object only. No markdown, no code fences.
+
+Required schema:
+{
+  "red_team_risks": [
+    "scenario where short loses money 1",
+    "scenario 2",
+    "scenario 3",
+    "scenario 4",
+    "scenario 5"
+  ]
+}
+
+Up to 5 points. Each must be a distinct upside scenario not already addressed by the memo."""
+
     return """You are a short-seller at an activist hedge fund. Your job is to destroy bull theses.
 
 You will be given an investment memo that recommends LONG or AVOID on a stock.
@@ -1329,7 +1369,7 @@ SUMMARY:
 Now argue aggressively against this bull thesis. Find 5 distinct failure modes the memo misses or underweights."""
 
 
-def _run_red_team(client: anthropic.Anthropic, memo: dict, raw_context: dict) -> tuple[list[str], dict]:
+def _run_red_team(client: anthropic.Anthropic, memo: dict, raw_context: dict, direction: str = "LONG") -> tuple[list[str], dict]:
     """
     Second LLM call: adversarial critique of the bull thesis.
     Returns (risks, usage_dict). Risks is empty list on failure — never blocks the main memo.
@@ -1339,7 +1379,7 @@ def _run_red_team(client: anthropic.Anthropic, memo: dict, raw_context: dict) ->
             model="claude-sonnet-4-6",
             max_tokens=2000,
             temperature=0.3,
-            system=_build_red_team_system_prompt(),
+            system=_build_red_team_system_prompt(direction=direction),
             messages=[{"role": "user", "content": _build_red_team_user_message(memo, raw_context)}],
         )
         raw = response.content[0].text or ""
@@ -1400,7 +1440,7 @@ def _validate_memo(memo: dict) -> InvestmentMemo:
 
 # ── Update Mode (incremental refresh for held positions) ─────────────────────
 
-def _run_update_mode(ticker: str, macro_context: Optional[str]) -> dict:
+def _run_update_mode(ticker: str, macro_context: Optional[str], direction: str = "LONG") -> dict:
     """Incremental research path for held positions with no material event.
 
     Fetches only news + transcripts, then asks Claude to return only the fields
@@ -1420,7 +1460,7 @@ def _run_update_mode(ticker: str, macro_context: Optional[str]) -> dict:
             "run_research(%s): update_mode fallback — no existing memo; running full research",
             ticker,
         )
-        return run_research(ticker, use_cache=False, update_mode=False)
+        return run_research(ticker, use_cache=False, update_mode=False, direction=direction)
 
     existing_memo = existing_raw.get("memo_json", {})
     memo_date = str(existing_raw.get("date", date.today().isoformat()))
@@ -1629,7 +1669,7 @@ def _merge_updated_fields(existing_memo: dict, updated_fields: dict) -> dict:
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
 
-def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False) -> dict:
+def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False, direction: str = "LONG") -> dict:
     """
     5-phase hybrid B+D pipeline:
       Phase 0: Fetch all 5 data sources (skipped when use_cache=True).
@@ -1658,7 +1698,7 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
 
     # ── update_mode: incremental path for held positions ──────────────────────
     if update_mode:
-        return _run_update_mode(ticker, macro_context)
+        return _run_update_mode(ticker, macro_context, direction=direction)
 
     # ── Phase 0: Fetch (or load from cache) ──────────────────────────────────
     if use_cache:
@@ -1781,13 +1821,14 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
         ticker, structured_block, retrieved_chunks, macro_context,
         financial_modeling_context=financial_modeling_context,
         earnings_alpha_context=earnings_alpha_context,
+        direction=direction,
     )
-    response = client.messages.create(                                                       
-      model="claude-sonnet-4-6",                            
+    response = client.messages.create(
+      model="claude-sonnet-4-6",
       max_tokens=16000,
-      temperature=1,           # required for extended thinking                            
+      temperature=1,           # required for extended thinking
       thinking={"type": "enabled", "budget_tokens": 10000},
-      system=_build_system_prompt(),                                                       
+      system=_build_system_prompt(direction=direction),                                                       
       messages=[{"role": "user", "content": synthesis_message}],                           
   ) 
     # response = client.messages.create(
@@ -1918,7 +1959,7 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
         "transcript_signal": transcript_signal,
         "negative_turns": all_negative_turns[:3],
     }
-    red_team_risks, rt_usage = _run_red_team(client, result, raw_context)
+    red_team_risks, rt_usage = _run_red_team(client, result, raw_context, direction=direction)
     if red_team_risks:
         result["red_team_risks"] = red_team_risks
     if rt_usage:
