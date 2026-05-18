@@ -244,6 +244,64 @@ def _store_results(results: list[ScreenerResult], run_date: date, regime: str) -
     logger.info("Upserted %d watchlist rows for %s", len(rows), run_date.isoformat())
 
 
+# Sectors where Beneish is miscalibrated (no COGS / different accrual structure).
+# REITs, banks, insurers, and utilities all generate noise M-scores.
+_BENEISH_UNRELIABLE_SECTORS = {"Real Estate", "Financials", "Utilities"}
+_BENEISH_MIN_ADV_K = 5_000.0      # $5M ADV floor for shortable names
+_BENEISH_MAX_MISSING_FIELDS = 3   # M-score with 3+ missing inputs is low-confidence
+_BENEISH_HEALTHY_ROIC = 0.15      # ROIC threshold for "fundamentals look healthy"
+
+
+def _beneish_enqueue_skip_reason(r: ScreenerResult) -> str | None:
+    """
+    Return a skip reason (or None to enqueue) for a Beneish-EXCLUDED candidate.
+
+    Four false-positive shapes get filtered:
+
+      G1 Sector ill-fit: Beneish was calibrated on industrial firms and produces
+         meaningless scores on REITs/financials/utilities (no COGS, different
+         accrual structure). Half the inputs are typically missing.
+      G2 Low-confidence M-score: ≥3 of the 8 Beneish inputs missing means the
+         neutral-substitution fallback dominates the score.
+      G3 Illiquid: shorting requires real borrow and exit liquidity — same
+         $5M ADV floor as the dedicated short universe.
+      G4 Fundamentals contradict: if ROIC > 15% AND revenue growth > 0 AND
+         FCF conversion ≥ 0 the business is healthy by other measures, so the
+         M-score is almost certainly catching an accounting artifact, not fraud.
+    """
+    # G1 — sector
+    if r.sector in _BENEISH_UNRELIABLE_SECTORS:
+        return f"sector={r.sector} — Beneish miscalibrated"
+
+    # G2 — Beneish input quality
+    rf = r.raw_factors or {}
+    beneish_dict = rf.get("beneish") or {}
+    missing = beneish_dict.get("missing_fields") or []
+    if isinstance(missing, list) and len(missing) >= _BENEISH_MAX_MISSING_FIELDS:
+        return f"low-confidence M-score (missing={missing})"
+
+    # G3 — ADV floor
+    if r.adv_k is not None and r.adv_k < _BENEISH_MIN_ADV_K:
+        return f"illiquid (adv_k=${r.adv_k:.0f}k < ${_BENEISH_MIN_ADV_K:.0f}k floor)"
+
+    # G4 — fundamentals contradict the fraud signal
+    quality = rf.get("quality") or {}
+    roic = quality.get("roic")
+    rev_growth = quality.get("revenue_growth_yoy")
+    fcf_conv = quality.get("fcf_conversion")
+    if (
+        roic is not None and roic > _BENEISH_HEALTHY_ROIC
+        and rev_growth is not None and rev_growth > 0
+        and fcf_conv is not None and fcf_conv >= 0
+    ):
+        return (
+            f"fundamentals healthy (ROIC={roic:.2f}, rev_growth={rev_growth:.2f}, "
+            f"fcf_conv={fcf_conv:.2f}) — likely Beneish false positive"
+        )
+
+    return None
+
+
 def _enqueue_beneish_excluded_as_shorts(
     results: list[ScreenerResult], run_date: date, regime: str,
 ) -> int:
@@ -253,6 +311,10 @@ def _enqueue_beneish_excluded_as_shorts(
     EXCLUDED (M-score > -1.78) is the strongest short signal the long pipeline produces.
     These tickers are dead-on-arrival for longs but live wires for shorts — route them
     straight to the research queue with high priority.
+
+    Quality gates: see _beneish_enqueue_skip_reason. False-positive shapes (REITs,
+    half-missing M-score inputs, illiquid names, fundamentally healthy businesses)
+    are filtered before reaching bear thesis.
     """
     try:
         client = _get_client()
@@ -261,8 +323,13 @@ def _enqueue_beneish_excluded_as_shorts(
         return 0
 
     rows = []
+    skipped: list[tuple[str, str]] = []
     for r in results:
         if r.beneish_flag != "EXCLUDED":
+            continue
+        skip_reason = _beneish_enqueue_skip_reason(r)
+        if skip_reason is not None:
+            skipped.append((r.ticker, skip_reason))
             continue
         rows.append({
             "run_date":            run_date.isoformat(),
@@ -283,14 +350,25 @@ def _enqueue_beneish_excluded_as_shorts(
             "regime":              regime,
         })
 
+    if skipped:
+        logger.info(
+            "Beneish short auto-enqueue: filtered %d EXCLUDED rows as false positives: %s",
+            len(skipped),
+            ", ".join(f"{t} ({reason})" for t, reason in skipped[:10]),
+        )
+
     if not rows:
+        logger.info("Beneish short auto-enqueue: 0 candidates passed quality gates")
         return 0
 
     try:
         client.table("short_candidates").upsert(
             rows, on_conflict="run_date,ticker"
         ).execute()
-        logger.info("Beneish short auto-enqueue: queued %d EXCLUDED tickers for short research", len(rows))
+        logger.info(
+            "Beneish short auto-enqueue: queued %d EXCLUDED tickers (filtered %d) for short research",
+            len(rows), len(skipped),
+        )
         return len(rows)
     except Exception as exc:
         logger.error("Beneish short auto-enqueue: upsert failed — %s", exc)
