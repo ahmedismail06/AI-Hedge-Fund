@@ -164,12 +164,10 @@ OUTPUT FORMAT — return a single valid JSON object only:
   "key_risks": ["string — risk that could cause the short to squeeze or re-rate, point 1", "point 2"],
   "catalysts": ["string — downside repricing event 1 with date", "event 2"],
   "financial_health": {{
-    "revenue_growth_yoy": "string — e.g. '-12% YoY' from source documents",
-    "gross_margin": "string — e.g. '38%, down from 45% prior year'",
-    "ebitda_margin": "string",
-    "cash_runway_months": "number | null — derived from cash ÷ quarterly burn",
-    "net_debt": "string — e.g. 'Net debt $45M (2.1x EBITDA)'",
-    "fcf_status": "string — 'Negative $X per quarter' or 'Positive $X per quarter'"
+    "revenue_trend": "growing | stable | declining | unknown",
+    "margin_trend": "expanding | stable | contracting | unknown",
+    "debt_level": "low | moderate | high | unknown",
+    "fcf": "strong | neutral | weak | unknown"
   }},
   "macro_sensitivity": "string — how macro regime amplifies or dampens the bear thesis",
   "verdict": "SHORT | AVOID",
