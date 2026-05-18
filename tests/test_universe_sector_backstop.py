@@ -36,6 +36,25 @@ def test_is_excluded_sic_excludes_pharma_range():
     assert _is_excluded_sic(8731) is True  # commercial R&D point
 
 
+def test_is_excluded_sic_excludes_petroleum():
+    """SIC 2911 (Petroleum Refining) — XOM-style. Was leaking through as Consumer."""
+    assert _is_excluded_sic(2911) is True
+    assert _is_excluded_sic(2999) is True  # range upper bound
+
+
+def test_is_excluded_sic_excludes_industrial_chemicals():
+    """SIC 2860-2899 (industrial / agricultural / misc chemicals) — ASPI 2890 was leaking through."""
+    assert _is_excluded_sic(2860) is True
+    assert _is_excluded_sic(2890) is True
+    assert _is_excluded_sic(2899) is True
+
+
+def test_is_excluded_sic_keeps_consumer_chemicals():
+    """SIC 2840-2859 (soaps, cosmetics, paints) — Consumer."""
+    assert _is_excluded_sic(2844) is False  # cosmetics (P&G)
+    assert _is_excluded_sic(2851) is False  # paints (Sherwin-Williams)
+
+
 def test_is_excluded_sic_keeps_software():
     assert _is_excluded_sic(7372) is False
 

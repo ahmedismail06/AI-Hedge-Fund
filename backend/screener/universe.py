@@ -65,6 +65,8 @@ _GM_FLOOR_BROKEN: Dict[str, float] = {
 _EXCLUDED_SIC_RANGES = [
     (1000, 1499),   # Mining (metal/coal), oil & gas extraction, nonmetallic minerals
     (2830, 2836),   # Pharma & drug manufacturing (pre-revenue biotech / pharma R&D)
+    (2860, 2899),   # Industrial organic / agricultural / misc chemicals (Basic Materials)
+    (2900, 2999),   # Petroleum refining and related products (Energy)
     (3300, 3399),   # Primary metals industries (steel mills, aluminum smelters)
     (4900, 4999),   # Utilities (electric, gas, sanitary services)
     (6000, 6199),   # Banks, savings institutions, credit companies
@@ -199,8 +201,10 @@ def _sic_to_sector(sic: Optional[int]) -> Optional[str]:
         return "Healthcare"  # health services, medical devices, instruments, distributors
     if (3400 <= sic <= 3599) or (3710 <= sic <= 3799) or (4000 <= sic <= 4899):
         return "Industrials"  # fabricated metals, machinery, transport equipment, comms
-    if (5000 <= sic <= 5999) or (2000 <= sic <= 2829) or (2837 <= sic <= 2999):
-        return "Consumer"    # retail, wholesale, food/textiles/chemicals manufacturing
+    if (5000 <= sic <= 5999) or (2000 <= sic <= 2829) or (2837 <= sic <= 2859):
+        return "Consumer"    # retail, wholesale, food/textiles + consumer chemicals (soaps,
+                             # cosmetics, paints). Industrial chemicals (2860-2899) and
+                             # petroleum (2900-2999) excluded above.
     if 6500 <= sic <= 6552:
         return "Real Estate"  # operating companies only (not REITs — those are excluded above)
     return "Other"
