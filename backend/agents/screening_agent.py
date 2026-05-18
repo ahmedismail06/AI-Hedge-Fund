@@ -369,10 +369,93 @@ def _enqueue_beneish_excluded_as_shorts(
             "Beneish short auto-enqueue: queued %d EXCLUDED tickers (filtered %d) for short research",
             len(rows), len(skipped),
         )
-        return len(rows)
     except Exception as exc:
         logger.error("Beneish short auto-enqueue: upsert failed — %s", exc)
         return 0
+
+    _backfill_trigger_scores(rows, run_date)
+    return len(rows)
+
+
+def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
+    """
+    Fetch trigger-scorer inputs for BENEISH_EXCLUDED rows and write back
+    trigger_count + triggers_fired to short_candidates.
+
+    BENEISH_EXCLUDED tickers come from the long screener ($50M–$2B cap) and
+    won't be in the short universe cache ($2B–$20B), so data is fetched fresh.
+    T4 (Beneish) is already known from the ScreenerResult — no re-computation.
+    """
+    import time as _time
+    from backend.screener.short_trigger_scorer import score_triggers
+    from backend.screener.short_universe import (
+        _fetch_quarterly_history,
+        _fetch_key_metrics_ttm,
+        _fetch_runway,
+        _fetch_short_interest_pct,
+    )
+
+    fmp_key = os.getenv("FMP_API_KEY")
+    polygon_key = os.getenv("POLYGON_API_KEY")
+    if not fmp_key:
+        logger.warning("Beneish trigger backfill: FMP_API_KEY missing — skipping")
+        return
+
+    universe_rows: list[dict] = []
+    beneish_lookup: dict[str, dict] = {}
+
+    for row in rows:
+        ticker = row["ticker"]
+        revenue_q, gm_q, shares_q = _fetch_quarterly_history(ticker, fmp_key)
+        _time.sleep(0.15)
+        km = _fetch_key_metrics_ttm(ticker, fmp_key)
+        _time.sleep(0.15)
+        _, fcf_ttm, runway = _fetch_runway(ticker, fmp_key)
+        _time.sleep(0.15)
+        si_pct = _fetch_short_interest_pct(ticker, polygon_key) if polygon_key else None
+
+        universe_rows.append({
+            "ticker":             ticker,
+            "sector":             row.get("sector"),
+            "market_cap_m":       row.get("market_cap_m"),
+            "adv_k":              row.get("adv_k"),
+            "revenue_q":          revenue_q,
+            "gross_margin_q":     gm_q,
+            "shares_diluted_q":   shares_q,
+            "fcf_ttm":            fcf_ttm,
+            "cash_runway_months": runway,
+            "ev_to_sales_ttm":    km.get("ev_to_sales_ttm"),
+            "debt_to_ebitda_ttm": km.get("debt_to_ebitda_ttm"),
+            "short_interest_pct": si_pct,
+        })
+        beneish_lookup[ticker] = {
+            "m_score":    row.get("beneish_m_score"),
+            "gate_result": row.get("beneish_flag"),
+        }
+
+    scored = score_triggers(universe_rows, beneish_lookup=beneish_lookup)
+    if not scored:
+        logger.info("Beneish trigger backfill: no trigger results returned")
+        return
+
+    try:
+        client = _get_client()
+        for result in scored:
+            client.table("short_candidates").update({
+                "trigger_count":  result.trigger_count,
+                "triggers_fired": result.triggers_fired,
+                "evidence": {
+                    "m_score":            beneish_lookup.get(result.ticker, {}).get("m_score"),
+                    "triggers_fired":     result.triggers_fired,
+                    "triggers_evaluated": result.triggers_evaluated,
+                    "trigger_count":      result.trigger_count,
+                    "raw":                result.evidence,
+                    "short_interest_pct": result.short_interest_pct,
+                },
+            }).eq("run_date", run_date.isoformat()).eq("ticker", result.ticker).execute()
+        logger.info("Beneish trigger backfill: scored %d/%d tickers", len(scored), len(rows))
+    except Exception as exc:
+        logger.error("Beneish trigger backfill: update failed — %s", exc)
 
 
 def _queue_top_n_for_research(

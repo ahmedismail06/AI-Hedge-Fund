@@ -1,7 +1,7 @@
 """
 Research queue poller — fires run_research() for watchlist rows queued after each screen.
 
-Scheduled at 5:00 PM ET Mon–Fri.
+Scheduled at 7:15 PM ET Mon–Fri.
 
 Efficiency improvements (2026-04-10):
   - Staleness gate: skips tickers with a memo < 7 days old unless material_event=True
@@ -215,10 +215,11 @@ def _poll_research_queue() -> list[str]:
     try:
         sc_result = (
             client.table("short_candidates")
-            .select("ticker,short_score,source")
+            .select("ticker,priority,trigger_count,source")
             .eq("queued_for_research", True)
             .eq("run_date", today)
-            .order("short_score", desc=True)
+            .order("priority", desc=False)
+            .order("trigger_count", desc=True)
             .execute()
         )
         short_rows = [
@@ -267,7 +268,14 @@ def _poll_research_queue() -> list[str]:
     existing_tickers = p1_tickers | p2_tickers | {r["ticker"] for r in p3_rows}
     short_rows = [r for r in short_rows if r["ticker"] not in existing_tickers]
 
-    unified_rows = p1_rows + p2_rows + p3_rows + short_rows
+    long_rows = p1_rows + p2_rows + p3_rows
+    interleaved = []
+    for i in range(max(len(long_rows), len(short_rows))):
+        if i < len(long_rows):
+            interleaved.append(long_rows[i])
+        if i < len(short_rows):
+            interleaved.append(short_rows[i])
+    unified_rows = interleaved
 
     if not unified_rows:
         logger.info("_poll_research_queue: no tickers queued for research today")
@@ -276,8 +284,8 @@ def _poll_research_queue() -> list[str]:
     from backend.memory.vector_store import store_memo
 
     logger.info(
-        "_poll_research_queue: unified queue — P1=%d, P2=%d, P3=%d",
-        len(p1_rows), len(p2_rows), len(p3_rows),
+        "_poll_research_queue: unified queue (interleaved 1:1) — P1=%d, P2=%d, P3=%d, shorts=%d",
+        len(p1_rows), len(p2_rows), len(p3_rows), len(short_rows),
     )
 
     processed: list[str] = []
@@ -418,13 +426,13 @@ async def run_research_job() -> None:
 
 def create_research_scheduler() -> AsyncIOScheduler:
     """Return a configured (not yet started) research queue poller.
-    Fires at 5:00 PM ET Mon–Fri."""
+    Fires at 7:15 PM ET Mon–Fri."""
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_research_job,
         trigger=CronTrigger(
-            hour=17,
-            minute=0,
+            hour=19,
+            minute=15,
             day_of_week="mon-fri",
             timezone=ZoneInfo("America/New_York"),
         ),
