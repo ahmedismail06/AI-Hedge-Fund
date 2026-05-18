@@ -342,15 +342,13 @@ def _fetch_universe_fresh() -> list[dict]:
     from backend.screener.universe import (
         _fetch_ticker_detail,
         _fetch_adv_k,
-        _is_excluded_sic,
-        _sic_to_sector,
-        SECTOR_OVERRIDES,
+        _resolve_sector_with_fmp_backstop,
     )
 
     all_symbols = _collect_polygon_tickers(polygon_key)
     logger.info("Short universe: %d raw tickers from Polygon", len(all_symbols))
 
-    # ── Step 1: market cap + sector filter ────────────────────────────────────
+    # ── Step 1: market cap + sector filter (with FMP backstop) ────────────────
     band: list[dict] = []
     for sym in all_symbols:
         detail = _fetch_ticker_detail(sym, polygon_key)
@@ -364,10 +362,9 @@ def _fetch_universe_fresh() -> list[dict]:
         if not (_MIN_CAP_M <= cap_m <= _MAX_CAP_M):
             continue
         sic = detail.get("sic_code")
-        if sic is not None and _is_excluded_sic(sic):
-            continue
-        sector = SECTOR_OVERRIDES.get(sym) or _sic_to_sector(sic)
-        if not sector:
+        sector = _resolve_sector_with_fmp_backstop(sym, sic, fmp_key)
+        if sector is None:
+            # SIC-excluded, FMP-excluded, or unknown to both → drop.
             continue
         band.append({"ticker": sym, "market_cap_m": round(cap_m, 2), "sector": sector})
     logger.info("Short universe: %d after cap/sector filter", len(band))

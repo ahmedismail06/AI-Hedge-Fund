@@ -77,6 +77,33 @@ _EXCLUDED_SIC_POINT = frozenset({8731})  # Commercial physical & biological rese
 
 VALID_SECTORS = {"SaaS", "Healthcare", "Industrials", "Consumer", "Real Estate", "Other"}
 
+# ── FMP sector backstop ───────────────────────────────────────────────────────
+# Polygon's SIC field is null or wrong for a non-trivial share of tickers
+# (notably mortgage REITs classified as 6500 instead of 6798). FMP's /profile
+# `sector` is the authoritative cross-check.
+_FMP_EXCLUDED_SECTORS = frozenset({
+    "Real Estate",          # all REITs (mortgage, equity, hybrid)
+    "Financial Services",   # FMP's umbrella for banks/insurers/brokers
+    "Energy",               # oil & gas exploration / production / services
+    "Utilities",
+    "Basic Materials",      # mining, metals, paper, chemicals
+})
+
+# FMP sector strings → internal universe label.
+# Categories not listed (Real Estate, Financial Services, Energy, Utilities,
+# Basic Materials) are excluded above. Healthcare goes into Healthcare even
+# though pharma R&D is excluded by SIC 2830-2836 + 8731 (that's the load-bearing
+# pharma filter; FMP's "Healthcare" is broader and includes med devices/services
+# we want to keep).
+_FMP_SECTOR_TO_INTERNAL: Dict[str, str] = {
+    "Technology":             "SaaS",
+    "Communication Services": "SaaS",
+    "Healthcare":             "Healthcare",
+    "Industrials":            "Industrials",
+    "Consumer Cyclical":      "Consumer",
+    "Consumer Defensive":     "Consumer",
+}
+
 
 @dataclass
 class UniverseCandidate:
@@ -88,10 +115,75 @@ class UniverseCandidate:
     analyst_count: Optional[int] = None
 
 
-def _is_excluded_sic(sic: int) -> bool:
+def _is_excluded_sic(sic: Optional[int]) -> bool:
+    """Excludes by SIC range/point. None SICs are NOT excluded here — the caller
+    must apply the FMP sector backstop instead of treating null as 'unknown OK'."""
+    if sic is None:
+        return False
     if sic in _EXCLUDED_SIC_POINT:
         return True
     return any(lo <= sic <= hi for lo, hi in _EXCLUDED_SIC_RANGES)
+
+
+def _resolve_sector_with_fmp_backstop(
+    ticker: str,
+    sic: Optional[int],
+    fmp_key: str,
+) -> Optional[str]:
+    """
+    Authoritative sector classification with FMP cross-check.
+
+    Returns None when the ticker should be excluded from the universe.
+
+    Decision tree:
+      1. SECTOR_OVERRIDES (manual map) wins absolutely.
+      2. Try SIC-based mapping.
+      3. If SIC said None, or mapped to ambiguous "Real Estate"/"Other"
+         (REITs commonly misclassified as SIC 6500-6552), consult FMP /profile.
+      4. If FMP says excluded sector → exclude (FMP wins on exclusion).
+      5. If SIC was None and FMP gave a usable sector → use FMP's mapping.
+      6. If neither source produces a sector → exclude.
+    """
+    override = SECTOR_OVERRIDES.get(ticker)
+    if override:
+        return override
+
+    # Short-circuit on explicit SIC exclusion (pharma R&D, banks, REITs, etc.) —
+    # no need to spend an FMP /profile call on something we already know we
+    # reject from the universe.
+    if sic is not None and _is_excluded_sic(sic):
+        return None
+
+    sic_sector = _sic_to_sector(sic)
+
+    # Only call FMP when SIC mapping is null OR ambiguous (Real Estate / Other).
+    # Real Estate is ambiguous because SIC 6500-6552 covers both legit operators
+    # and misclassified REITs; FMP correctly tags REITs as "Real Estate" and we
+    # exclude that. "Other" is ambiguous because SIC outside our positive ranges
+    # could be anything.
+    if sic_sector in (None, "Real Estate", "Other"):
+        fmp_sector = _fetch_fmp_sector(ticker, fmp_key)
+        if fmp_sector in _FMP_EXCLUDED_SECTORS:
+            return None
+        if sic_sector is None and fmp_sector:
+            return _FMP_SECTOR_TO_INTERNAL.get(fmp_sector)
+
+    return sic_sector
+
+
+def _fetch_fmp_sector(ticker: str, fmp_key: str) -> Optional[str]:
+    """Return FMP's `sector` string from /profile, or None on miss."""
+    try:
+        r = _fmp_get(f"{FMP_BASE}/profile?symbol={ticker}&apikey={fmp_key}")
+        if r is None:
+            return None
+        data = r.json()
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            sector = data[0].get("sector")
+            return sector or None
+    except Exception:
+        pass
+    return None
 
 
 def _sic_to_sector(sic: Optional[int]) -> Optional[str]:
@@ -355,8 +447,12 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
         if not (50 <= mktcap_m <= 2000):
             continue
         sic = detail.get("sic_code")
-        sector = SECTOR_OVERRIDES.get(ticker) or _sic_to_sector(sic)
+        sector = _resolve_sector_with_fmp_backstop(ticker, sic, fmp_key)
         if sector is None:
+            # Either SIC-excluded, FMP-excluded, or unknown to both sources.
+            # Unknown → excluded is intentional: better to lose a few real names
+            # than to silently classify REITs/financials as "Other" and pollute
+            # downstream sector-relative scoring.
             continue
         candidates.append(UniverseCandidate(
             ticker=ticker,
