@@ -2917,7 +2917,7 @@ def create_orchestrator_scheduler():
             hour=20, minute=15, day_of_week="mon-fri", timezone="America/New_York"
         ),
         id="pm_trigger_research",
-        name="PM → Research Queue (7:15PM ET)",
+        name="PM → Research Queue (8:15PM ET)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
