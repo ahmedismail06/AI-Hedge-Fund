@@ -412,7 +412,36 @@ def _poll_research_queue() -> list[str]:
                 "_poll_research_queue: failed to clear staleness-skipped flag — %s", exc
             )
 
+    # ── Update pm_config after every research run ─────────────────────────────
+    _update_pm_config_post_research(client, today, len(processed))
+
     return processed
+
+
+def _update_pm_config_post_research(client, today: str, n_processed: int) -> None:
+    """Stamp pm_config with research run metadata — works for both scheduled and manual triggers."""
+    try:
+        existing = client.table("pm_config").select(
+            "daily_research_count,daily_research_date"
+        ).eq("id", 1).single().execute()
+        row = existing.data or {}
+
+        current_count = row.get("daily_research_count") or 0
+        current_date  = row.get("daily_research_date")
+
+        new_count = (current_count + n_processed) if current_date == today else n_processed
+
+        client.table("pm_config").update({
+            "daily_research_count": new_count,
+            "daily_research_date":  today,
+            "pipeline_last_run":    datetime.now(timezone.utc).isoformat(),
+            "updated_at":           datetime.now(timezone.utc).isoformat(),
+        }).eq("id", 1).execute()
+        logger.info(
+            "pm_config updated: daily_research_count=%d, pipeline_last_run=now", new_count,
+        )
+    except Exception as exc:
+        logger.warning("_update_pm_config_post_research: failed — %s", exc)
 
 
 async def run_research_job() -> None:
