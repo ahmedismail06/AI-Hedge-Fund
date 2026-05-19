@@ -4,6 +4,12 @@ Fetches 10-K and 10-Q filings from SEC EDGAR for a given ticker.
 Extracts Items 1, 1A, 7 with reduced caps; drops Item 8 in favour of
 programmatically pre-extracted financial metrics.
 
+Foreign private issuers (20-F / 6-K):
+  When no 10-K is found, falls back to 20-F (annual report for foreign filers).
+  When no 10-Q is found, falls back to 6-K (interim/current report for foreign filers).
+  20-F uses different item numbering: Item 3 (risk factors), Item 4 (business),
+  Item 5 (operating review). 6-K has no standard structure — returned as raw text.
+
 Efficiency improvement (2026-04-10):
   ticker_events cache check — before downloading from EDGAR, check whether this
   ticker + filing type was already fetched within the last 7 days and the document

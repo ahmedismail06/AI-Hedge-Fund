@@ -173,19 +173,26 @@ def _resolve_sector_with_fmp_backstop(
     return sic_sector
 
 
-def _fetch_fmp_sector(ticker: str, fmp_key: str) -> Optional[str]:
-    """Return FMP's `sector` string from /profile, or None on miss."""
+def _fetch_fmp_profile(ticker: str, fmp_key: str) -> dict:
+    """Return FMP profile fields (sector, country) from /profile, or {} on miss."""
     try:
         r = _fmp_get(f"{FMP_BASE}/profile?symbol={ticker}&apikey={fmp_key}")
         if r is None:
-            return None
+            return {}
         data = r.json()
         if isinstance(data, list) and data and isinstance(data[0], dict):
-            sector = data[0].get("sector")
-            return sector or None
+            return {
+                "sector":  data[0].get("sector") or None,
+                "country": data[0].get("country") or None,
+            }
     except Exception:
         pass
-    return None
+    return {}
+
+
+def _fetch_fmp_sector(ticker: str, fmp_key: str) -> Optional[str]:
+    """Return FMP's `sector` string from /profile, or None on miss."""
+    return _fetch_fmp_profile(ticker, fmp_key).get("sector")
 
 
 def _sic_to_sector(sic: Optional[int]) -> Optional[str]:
@@ -377,7 +384,8 @@ def _save_universe_cache(universe: List[UniverseCandidate]) -> None:
 def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
     """
     Build the screener universe from Polygon reference tickers.
-    Filters: US exchange, Cap $50M–$2B, non-excluded SIC, ADV ≥ $500K, Analyst ≤ 8.
+    Filters: US exchange, Cap $50M–$2B, non-excluded SIC, ADV ≥ $500K,
+             US-domiciled (FMP country == US), Analyst ≤ 10.
     """
     polygon_key = os.getenv("POLYGON_API_KEY")
     fmp_key = os.getenv("FMP_API_KEY")
@@ -486,10 +494,20 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
 
     # ── Analyst count filter (parallel, FMP) ─────────────────────────────
     def _check_analyst(cand: UniverseCandidate) -> Optional[UniverseCandidate]:
+        # Foreign private issuer check — FMP /profile returns country; exclude non-US.
+        # Catches companies like ESEA (Greece) and BWMX (Mexico) that trade on US
+        # exchanges but file 20-F/6-K instead of 10-K/10-Q, breaking the SEC fetcher
+        # and producing memos with near-zero primary source data.
+        profile = _fetch_fmp_profile(cand.ticker, fmp_key)
+        country = profile.get("country")
+        if country and country.upper() != "US":
+            logger.info("%s: Excluded — FOREIGN_ISSUER (country=%s)", cand.ticker, country)
+            return None
+
         count = _fetch_analyst_count(cand.ticker, fmp_key)
         cand.analyst_count = count
         time.sleep(0.5)  # Proactive pacing to protect FMP 300 req/min
-        
+
         if count is not None and count > 10:
             return None
         return cand
@@ -503,7 +521,7 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
             if result is not None:
                 final.append(result)
 
-    logger.info("Final universe after analyst ≤ 10 filter: %d candidates", len(final))
+    logger.info("Final universe after foreign-issuer + analyst ≤ 10 filter: %d candidates", len(final))
 
     if final:
         _save_universe_cache(final)

@@ -268,14 +268,10 @@ def _poll_research_queue() -> list[str]:
     existing_tickers = p1_tickers | p2_tickers | {r["ticker"] for r in p3_rows}
     short_rows = [r for r in short_rows if r["ticker"] not in existing_tickers]
 
-    long_rows = p1_rows + p2_rows + p3_rows
-    interleaved = []
-    for i in range(max(len(long_rows), len(short_rows))):
-        if i < len(long_rows):
-            interleaved.append(long_rows[i])
-        if i < len(short_rows):
-            interleaved.append(short_rows[i])
-    unified_rows = interleaved
+    # Strict 1:1 cap — exactly one long and one short per run regardless of trigger source.
+    long_rows = (p1_rows + p2_rows + p3_rows)[:1]
+    short_rows = short_rows[:1]
+    unified_rows = long_rows + short_rows
 
     if not unified_rows:
         logger.info("_poll_research_queue: no tickers queued for research today")
@@ -284,8 +280,9 @@ def _poll_research_queue() -> list[str]:
     from backend.memory.vector_store import store_memo
 
     logger.info(
-        "_poll_research_queue: unified queue (interleaved 1:1) — P1=%d, P2=%d, P3=%d, shorts=%d",
-        len(p1_rows), len(p2_rows), len(p3_rows), len(short_rows),
+        "_poll_research_queue: 1:1 cap applied — long=%s, short=%s",
+        long_rows[0]["ticker"] if long_rows else "none",
+        short_rows[0]["ticker"] if short_rows else "none",
     )
 
     processed: list[str] = []
