@@ -463,15 +463,13 @@ def _queue_top_n_for_research(
     n: int = _TOP_N_FOR_RESEARCH,
 ) -> list[str]:
     """
-    Queue the top N all-time qualified tickers (score >= 7.0) for research.
+    Queue the top N qualified tickers from today's run (score >= _QUALIFY_THRESHOLD) for research.
 
-    Candidate pool: best-ever composite_score per ticker across ALL watchlist runs,
-    not just today's. This ensures a stock that has consistently scored 8.5 but
-    never landed in today's top 5 still gets researched.
+    Candidate pool: today's watchlist rows only. Using all-time best scores caused
+    tickers with stale high scores to be queued on days where their current score
+    fell below threshold.
 
     Filtering: Excludes tickers with memos < 7 days old AND no material_event=True.
-    This gives research opportunities to other qualified tickers instead of
-    constantly re-queuing the same companies.
 
     Returns list of queued ticker symbols.
     """
@@ -481,11 +479,12 @@ def _queue_top_n_for_research(
         logger.error("Supabase client unavailable — skipping research queue: %s", exc)
         return []
 
-    # Fetch best-ever score per ticker across all watchlist history
+    # Fetch today's qualifying rows only
     try:
         result = (
             client.table("watchlist")
             .select("ticker,composite_score,material_event")
+            .eq("run_date", run_date.isoformat())
             .gte("composite_score", _QUALIFY_THRESHOLD)
             .order("composite_score", desc=True)
             .execute()
@@ -495,54 +494,36 @@ def _queue_top_n_for_research(
         logger.error("_queue_top_n_for_research: watchlist read failed — %s", exc)
         return []
 
-    # Collapse to best-ever score per ticker; preserve material_event=True if any row has it
-    best: dict[str, dict] = {}
-    for row in all_rows:
-        ticker = row["ticker"]
-        if ticker not in best or row["composite_score"] > best[ticker]["composite_score"]:
-            best[ticker] = row
-        elif row.get("material_event"):
-            best[ticker]["material_event"] = True
-
     # Filter out tickers with recent memos and no material events
     from datetime import date, timedelta
     cutoff = (date.today() - timedelta(days=7)).isoformat()
-    filtered_best: dict[str, dict] = {}
-    
-    for ticker, row in best.items():
+    filtered: list[dict] = []
+
+    for row in all_rows:
+        ticker = row["ticker"]
         try:
-            # Skip tickers with a DEFERRED memo — the AI PM is waiting on them
             deferred_result = client.table("memos").select("id").eq("ticker", ticker).eq("status", "DEFERRED").limit(1).execute()
             if deferred_result.data:
                 logger.debug("_queue_top_n_for_research: skipping %s — memo is DEFERRED", ticker)
                 continue
 
-            # Check for recent memo
             memo_result = client.table("memos").select("id").eq("ticker", ticker).gte("date", cutoff).limit(1).execute()
             has_recent_memo = bool(memo_result.data)
 
-            # Include if: no recent memo OR has material event
             if not has_recent_memo or row.get("material_event", False):
-                filtered_best[ticker] = row
+                filtered.append(row)
         except Exception as exc:
             logger.warning("Failed to check memo status for %s: %s — including anyway", ticker, exc)
-            filtered_best[ticker] = row  # Include on error to be safe
+            filtered.append(row)
 
-    # Sort by best-ever score descending, pick top N from filtered list
-    ranked = sorted(filtered_best.values(), key=lambda x: x["composite_score"], reverse=True)
-
-    queued: list[str] = []
-    for row in ranked:
-        if len(queued) >= n:
-            break
-        queued.append(row["ticker"])
+    queued = [row["ticker"] for row in filtered[:n]]
 
     if queued:
         try:
             client.table("watchlist").update({"queued_for_research": True}).in_(
                 "ticker", queued
             ).eq("run_date", run_date.isoformat()).execute()
-            logger.info("Queued for research (all-time top %d): %s", n, queued)
+            logger.info("Queued for research (today's top %d, score ≥ %.1f): %s", n, _QUALIFY_THRESHOLD, queued)
         except Exception as exc:
             logger.error("Failed to set queued_for_research: %s", exc)
 

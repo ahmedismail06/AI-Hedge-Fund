@@ -209,7 +209,7 @@ def select_qualifying(
     min_triggers: int = MIN_TRIGGERS,
     min_evaluable: int = MIN_EVALUABLE,
     max_per_sector: int = 2,
-    max_total: int = 10,
+    max_total: int = 5,
 ) -> list[TriggerResult]:
     """
     Filter trigger results to high-quality short candidates.

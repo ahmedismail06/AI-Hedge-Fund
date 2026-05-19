@@ -313,7 +313,8 @@ def _fetch_analyst_count(ticker: str, fmp_key: str) -> Optional[int]:
 
 def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[Dict[str, Any]]:
     """
-    Fetch market_cap and sic_code from the Polygon per-ticker detail endpoint.
+    Fetch market_cap, sic_code, and locale from the Polygon per-ticker detail endpoint.
+    locale == "us" means US domestic issuer (files 10-K); anything else is a foreign filer.
     """
     for attempt in range(3):
         try:
@@ -329,6 +330,7 @@ def _fetch_ticker_detail(ticker: str, polygon_key: str) -> Optional[Dict[str, An
                 return {
                     "market_cap": float(mc) if mc is not None else None,
                     "sic_code": int(sic) if sic and str(sic).isdigit() else None,
+                    "locale": data.get("locale"),
                 }
             if r.status_code == 429:
                 backoff = 5 * (attempt + 1)
@@ -458,6 +460,14 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
         mktcap_m = mc / 1_000_000
         if not (50 <= mktcap_m <= 2000):
             continue
+        # Polygon locale == "us" means US domestic issuer (files 10-K/10-Q).
+        # Foreign private issuers (file 20-F/6-K) return "global" or another value.
+        # Exclude if locale is anything other than "us" — this is a harder gate
+        # than the FMP country check below, which silently passes on null country.
+        locale = detail.get("locale")
+        if locale and locale != "us":
+            logger.info("%s: Excluded — NON_US_LOCALE (locale=%s)", ticker, locale)
+            continue
         sic = detail.get("sic_code")
         sector = _resolve_sector_with_fmp_backstop(ticker, sic, fmp_key)
         if sector is None:
@@ -494,14 +504,15 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
 
     # ── Analyst count filter (parallel, FMP) ─────────────────────────────
     def _check_analyst(cand: UniverseCandidate) -> Optional[UniverseCandidate]:
-        # Foreign private issuer check — FMP /profile returns country; exclude non-US.
-        # Catches companies like ESEA (Greece) and BWMX (Mexico) that trade on US
-        # exchanges but file 20-F/6-K instead of 10-K/10-Q, breaking the SEC fetcher
-        # and producing memos with near-zero primary source data.
+        # Foreign private issuer check — FMP /profile returns country; require US.
+        # Whitelist approach: exclude if country is non-US OR missing. Missing country
+        # was the original bug — it silently passed foreign issuers like ESEA and BWMX
+        # that trade on US exchanges but file 20-F/6-K, breaking the SEC fetcher.
+        # The Polygon locale check in Step 2 is the primary gate; this is defense-in-depth.
         profile = _fetch_fmp_profile(cand.ticker, fmp_key)
         country = profile.get("country")
-        if country and country.upper() != "US":
-            logger.info("%s: Excluded — FOREIGN_ISSUER (country=%s)", cand.ticker, country)
+        if not country or country.upper() != "US":
+            logger.info("%s: Excluded — FOREIGN_ISSUER (country=%s)", cand.ticker, country or "unknown")
             return None
 
         count = _fetch_analyst_count(cand.ticker, fmp_key)
