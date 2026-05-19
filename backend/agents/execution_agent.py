@@ -215,7 +215,7 @@ def run_fill_recon() -> int:
 # ── Exit cycle ───────────────────────────────────────────────────────────────
 
 
-def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
+def _run_exit_cycle(client, outside_rth: bool = False, skip_position_ids: set | None = None) -> dict:
     """
     Poll OPEN positions with exit_action set and place sell orders.
 
@@ -246,11 +246,18 @@ def _run_exit_cycle(client, outside_rth: bool = False) -> dict:
         return result
 
     placed_this_cycle: set = set()
+    _skip = skip_position_ids or set()
 
     for pos in positions_to_exit:
         exit_action = pos.get("exit_action")
         trim_pct = float(pos.get("exit_trim_pct") or 0)
         exit_type = "EXIT_CLOSE" if exit_action == "CLOSE" else "EXIT_TRIM"
+
+        # Guard 0: skip positions whose order was just cancelled this cycle —
+        # let the IBKR cancel clear before placing a replacement order.
+        if pos["id"] in _skip:
+            logger.debug("Position %s just had order cancelled this cycle — deferring exit retry to next cycle", pos["id"])
+            continue
 
         # Guard 1: never process the same position twice in one cycle.
         if pos["id"] in placed_this_cycle:
@@ -415,6 +422,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         # check_timeouts() sets PARTIAL_FILLED (has fills) or TIMEOUT (zero fills).
         # REJECTED is reserved for explicit IBKR error callbacks — never timeout.
         timed_out_position_ids = _order_manager.check_timeouts()
+        timed_out_this_cycle: set = set()
         for pos_id in timed_out_position_ids:
             order_result = (
                 client.table("orders")
@@ -463,15 +471,19 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 # Entry zero fill (TIMEOUT) — revert to APPROVED so next cycle can retry
                 client.table("positions").update({"status": "APPROVED"}).eq("id", pos_id).execute()
                 logger.info(
-                    "Position %s reverted to APPROVED after zero-fill timeout (status=%s)",
+                    "Position %s reverted to APPROVED after zero-fill timeout (status=%s) — retry next cycle",
                     pos_id, order_status,
                 )
 
+            # Track every position whose IBKR order was just cancelled this cycle.
+            # Exit and entry loops below skip these so a replacement order is never
+            # submitted before the cancel has cleared in IBKR.
+            timed_out_this_cycle.add(pos_id)
             summary.orders_timeout += 1
 
         # ── E: Exit cycle — sell OPEN positions flagged by PM Agent ──────────
         # Run before new-entry processing so capital is freed before new orders are sized.
-        exit_result = _run_exit_cycle(client, outside_rth=False)
+        exit_result = _run_exit_cycle(client, outside_rth=False, skip_position_ids=timed_out_this_cycle)
         summary.exits_placed = exit_result["exits_placed"]
         summary.exits_error = exit_result["exits_error"]
         exit_order_ids = exit_result["exit_order_ids"]
@@ -501,6 +513,16 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
         # ── E + F: Check for existing active orders, then build + place ───────
         for pos in approved:
+            # Skip positions whose IBKR order was just cancelled this cycle — the
+            # cancel may not have cleared yet and submitting immediately risks a
+            # duplicate fill. The position stays APPROVED and retries next cycle.
+            if pos["id"] in timed_out_this_cycle:
+                logger.debug(
+                    "Position %s (%s) just had order cancelled this cycle — deferring entry retry to next cycle",
+                    pos["id"], pos.get("ticker"),
+                )
+                continue
+
             # E: Skip if an active order already exists (avoids duplicate orders)
             existing = (
                 client.table("orders")
