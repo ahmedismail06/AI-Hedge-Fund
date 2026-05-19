@@ -5,6 +5,7 @@ Converts an APPROVED positions table row into a validated (OrderRequest, Contrac
 triple ready for submission via order_manager.place_order().
 """
 
+import asyncio
 import logging
 from typing import Literal, Optional
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -48,20 +49,57 @@ def _fetch_adv(ticker: str) -> float:
 
 
 def _fetch_live_price(ticker: str, fallback: float) -> float:
-    """Fetch the latest available market price via yfinance.
+    """Fetch live price from IBKR, falling back to yfinance then DB value.
 
-    Uses fast_info for speed. Falls back to the DB value so the order is never
-    blocked by a price-fetch failure.
+    Priority:
+      1. ib.portfolio() — synchronous, no subscription needed, covers positions we hold.
+      2. reqTickersAsync snapshot — for new entries not yet in the portfolio.
+      3. yfinance fast_info — when IBKR is offline (paper/dev/testing).
+      4. DB fallback value — last resort so the order is never blocked.
     """
+    # 1 & 2: Try IBKR.
+    try:
+        from backend.broker.ibkr import connect as _ibkr_connect, get_loop as _get_loop
+
+        ib = _ibkr_connect()
+
+        # Portfolio cache covers exits and positions already held (no subscription needed).
+        for item in ib.portfolio():
+            if item.contract and item.contract.symbol == ticker and item.marketPrice > 0:
+                logger.debug("IBKR portfolio price for %s: %.4f", ticker, item.marketPrice)
+                return float(item.marketPrice)
+
+        # New entry — request a snapshot via the ib_insync event loop.
+        contract = Stock(ticker, "SMART", "USD")
+
+        async def _req_snapshot() -> Optional[float]:
+            contracts = await ib.qualifyContractsAsync(contract)
+            if not contracts:
+                return None
+            [tkr] = await ib.reqTickersAsync(contracts[0])
+            if tkr.last and tkr.last > 0:
+                return float(tkr.last)
+            if tkr.bid and tkr.bid > 0 and tkr.ask and tkr.ask > 0:
+                return (tkr.bid + tkr.ask) / 2.0
+            return float(tkr.close) if tkr.close and tkr.close > 0 else None
+
+        price = asyncio.run_coroutine_threadsafe(_req_snapshot(), _get_loop()).result(timeout=5)
+        if price and price > 0:
+            logger.debug("IBKR snapshot price for %s: %.4f", ticker, price)
+            return price
+    except Exception as exc:
+        logger.warning("IBKR price fetch failed for %s: %s — falling back to yfinance", ticker, exc)
+
+    # 3: yfinance fallback.
     try:
         info = yf.Ticker(ticker).fast_info
-        # fast_info.last_price reflects the most recent trade (includes pre/post market).
         price = getattr(info, "last_price", None)
         if price and float(price) > 0:
-            logger.debug("Live price for %s: %.4f (DB fallback was %.4f)", ticker, price, fallback)
+            logger.debug("yfinance price for %s: %.4f", ticker, float(price))
             return float(price)
     except Exception as exc:
-        logger.warning("_fetch_live_price failed for %s: %s — using DB fallback %.4f", ticker, exc, fallback)
+        logger.warning("yfinance price fetch failed for %s: %s — using DB fallback %.4f", ticker, exc, fallback)
+
     return fallback
 
 

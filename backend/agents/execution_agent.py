@@ -113,10 +113,11 @@ def _requeue_memo_after_expiry(
             "note": (
                 f"This position was previously approved but the entry order timed out "
                 f"{len(timeout_orders)} time(s) without a single fill. "
-                f"The last limit price submitted was ${last_price:.4f}. "
-                f"The limit is set at approval-time price + 0.1% — if the stock moved up "
-                f"after approval the limit will be stale and sit below the ask indefinitely. "
-                f"Re-evaluate: retry at current market price, adjust size, or pass."
+                f"The last limit price submitted was ${last_price:.4f} (anchored to live IBKR "
+                f"market price at each submission, not the approval-time snapshot). "
+                f"Likely cause: stock is illiquid at this order size, the bid-ask spread is too "
+                f"wide for a +0.1% limit to fill, or ADV is too low for the requested quantity. "
+                f"Re-evaluate: reduce size, widen the limit, or pass."
             ),
             "timeout_count": len(timeout_orders),
             "last_limit_price": last_price,
