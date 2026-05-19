@@ -115,6 +115,20 @@ def _get_embed_model() -> "SentenceTransformer":
     return _embed_model
 
 
+def _release_embed_model() -> None:
+    """Unload the embedding model and free ~400MB of RAM.
+
+    Call after a batch embedding job completes. The model reloads on next use.
+    Prevents RAM exhaustion when the PM cycle fires shortly after research indexing.
+    """
+    global _embed_model
+    if _embed_model is not None:
+        import gc
+        _embed_model = None
+        gc.collect()
+        logger.info("Embedding model released from RAM")
+
+
 def upsert_chunks(chunks: list[dict]) -> None:
     """
     Bulk upsert document chunks into document_chunks table.

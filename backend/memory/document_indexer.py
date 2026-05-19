@@ -13,7 +13,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from backend.memory.vector_store import upsert_chunks, _get_embed_model
+from backend.memory.vector_store import upsert_chunks, _get_embed_model, _release_embed_model
 
 load_dotenv()
 
@@ -74,6 +74,7 @@ def index_documents(
 
     upsert_chunks(chunks)
     logger.info("index_documents(%s): upserted %d chunks", ticker, len(chunks))
+    _release_embed_model()
     return len(chunks)
 
 
@@ -233,5 +234,5 @@ def _make_chunk(
 def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed texts using local SentenceTransformer model. No API call."""
     model = _get_embed_model()
-    embeddings = model.encode(texts, batch_size=64, show_progress_bar=False)
+    embeddings = model.encode(texts, batch_size=16, show_progress_bar=False)
     return embeddings.tolist()
