@@ -189,7 +189,7 @@ def _poll_research_queue() -> list[str]:
         logger.error("_poll_research_queue: Supabase unavailable — %s", exc)
         return []
 
-    today = date.today().isoformat()
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # ── P1 / P3: screener queue ────────────────────────────────────────────────
