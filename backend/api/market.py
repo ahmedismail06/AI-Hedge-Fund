@@ -41,7 +41,7 @@ RANGE_MULTIPLIER = {
 @router.get("/bars/{ticker}")
 def get_ticker_bars(
     ticker: str,
-    range: str = Query("1M", regex="^(1D|1W|1M|3M|1Y)$"),
+    range: str = Query("1M", pattern="^(1D|1W|1M|3M|1Y)$"),
 ):
     """Returns price bars for a ticker for the frontend Robinhood-style chart."""
     if not POLYGON_API_KEY:
