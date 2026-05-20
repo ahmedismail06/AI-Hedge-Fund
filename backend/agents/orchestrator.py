@@ -1002,7 +1002,7 @@ def _call_claude(system_prompt: str, user_message: str) -> Dict[str, Any]:
             kwargs: Dict[str, Any] = {
                 "model": "claude-sonnet-4-6",
                 "max_tokens": 16000,
-                "system": system_prompt,
+                "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 "messages": messages,
                 "tools": _PM_TOOLS,
             }

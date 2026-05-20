@@ -1379,7 +1379,7 @@ def _run_red_team(client: anthropic.Anthropic, memo: dict, raw_context: dict, di
             model="claude-sonnet-4-6",
             max_tokens=2000,
             temperature=0.3,
-            system=_build_red_team_system_prompt(direction=direction),
+            system=[{"type": "text", "text": _build_red_team_system_prompt(direction=direction), "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": _build_red_team_user_message(memo, raw_context)}],
         )
         raw = response.content[0].text or ""
@@ -1482,7 +1482,7 @@ def _run_update_mode(ticker: str, macro_context: Optional[str], direction: str =
         model="claude-sonnet-4-6",
         max_tokens=4000,
         temperature=0.3,
-        system=_build_update_system_prompt(),
+        system=[{"type": "text", "text": _build_update_system_prompt(), "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": update_message}],
     )
     raw_content = response.content[0].text if response.content else ""
@@ -1490,6 +1490,8 @@ def _run_update_mode(ticker: str, macro_context: Optional[str], direction: str =
         "phase": "Update-mode synthesis (Claude)",
         "input": response.usage.input_tokens,
         "output": response.usage.output_tokens,
+        "cache_write": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
     })
 
     # Parse the delta JSON
@@ -1824,13 +1826,13 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
         direction=direction,
     )
     response = client.messages.create(
-      model="claude-sonnet-4-6",
-      max_tokens=16000,
-      temperature=1,           # required for extended thinking
-      thinking={"type": "enabled", "budget_tokens": 10000},
-      system=_build_system_prompt(direction=direction),                                                       
-      messages=[{"role": "user", "content": synthesis_message}],                           
-  ) 
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        temperature=1,           # required for extended thinking
+        thinking={"type": "enabled", "budget_tokens": 10000},
+        system=[{"type": "text", "text": _build_system_prompt(direction=direction), "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": synthesis_message}],
+    )
     # response = client.messages.create(
     #     model="claude-sonnet-4-6",
     #     max_tokens=8000,
