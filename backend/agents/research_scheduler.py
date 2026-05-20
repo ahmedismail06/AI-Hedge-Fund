@@ -191,14 +191,18 @@ def _poll_research_queue() -> list[str]:
 
     today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Look back up to 7 days so items queued by prior screener runs aren't silently dropped
+    lookback_cutoff = (
+        datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=7)
+    ).isoformat()
 
     # ── P1 / P3: screener queue ────────────────────────────────────────────────
     try:
         wl_result = (
             client.table("watchlist")
-            .select("ticker,rank,priority,material_event")
+            .select("ticker,rank,priority,material_event,run_date")
             .eq("queued_for_research", True)
-            .eq("run_date", today)
+            .gte("run_date", lookback_cutoff)
             .order("priority", desc=False)
             .order("rank", desc=False)
             .execute()
@@ -215,16 +219,16 @@ def _poll_research_queue() -> list[str]:
     try:
         sc_result = (
             client.table("short_candidates")
-            .select("ticker,priority,trigger_count,source")
+            .select("ticker,priority,trigger_count,source,run_date")
             .eq("queued_for_research", True)
-            .eq("run_date", today)
+            .gte("run_date", lookback_cutoff)
             .order("priority", desc=False)
             .order("trigger_count", desc=True)
             .execute()
         )
         short_rows = [
             {"ticker": r["ticker"], "rank": 999, "priority": 3,
-             "material_event": False, "_direction": "SHORT"}
+             "material_event": False, "_direction": "SHORT", "run_date": r["run_date"]}
             for r in (sc_result.data or [])
         ]
     except Exception as exc:
@@ -329,11 +333,12 @@ def _poll_research_queue() -> list[str]:
         is_short = row.get("_direction") == "SHORT"
 
         # ── Dequeue from watchlist or short_candidates ────────────────────────
+        row_run_date = row.get("run_date", today)
         if is_short:
             try:
                 client.table("short_candidates").update({"queued_for_research": False}).eq(
                     "ticker", ticker
-                ).eq("run_date", today).execute()
+                ).eq("run_date", row_run_date).execute()
             except Exception as exc:
                 logger.warning(
                     "_poll_research_queue: failed to dequeue short %s — %s; skipping", ticker, exc
@@ -343,7 +348,7 @@ def _poll_research_queue() -> list[str]:
             try:
                 client.table("watchlist").update({"queued_for_research": False}).eq(
                     "ticker", ticker
-                ).eq("run_date", today).execute()
+                ).eq("run_date", row_run_date).execute()
             except Exception as exc:
                 logger.warning(
                     "_poll_research_queue: failed to dequeue %s before research — %s; skipping",
@@ -366,7 +371,7 @@ def _poll_research_queue() -> list[str]:
             continue
 
         if not from_deferred:
-            _clear_material_event(client, ticker, today)
+            _clear_material_event(client, ticker, row_run_date)
 
         # ── PM handoff ────────────────────────────────────────────────────────
         try:
@@ -399,7 +404,7 @@ def _poll_research_queue() -> list[str]:
         try:
             client.table("watchlist").update({"queued_for_research": False}).in_(
                 "ticker", staleness_skipped_wl
-            ).eq("run_date", today).execute()
+            ).gte("run_date", lookback_cutoff).execute()
             logger.info(
                 "_poll_research_queue: cleared staleness-skipped watchlist rows: %s",
                 staleness_skipped_wl,
