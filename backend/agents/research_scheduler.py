@@ -170,13 +170,16 @@ def _clear_material_event(client, ticker: str, today: str) -> None:
 # ── Main queue poller ─────────────────────────────────────────────────────────
 
 def _poll_research_queue() -> list[str]:
-    """Build a unified research queue from screener rows and expired deferrals.
+    """Build a unified research queue and run it to completion.
 
     Priority order:
       P1 — watchlist.priority=1  (held positions + material events)
       P2 — memos.status=DEFERRED AND deferred_until <= NOW() (expired deferrals)
-      P3 — watchlist.priority>=2 (new candidates + material events)
+      P3 — watchlist.priority>=2 (new candidates)
 
+    Longs and shorts are interleaved 1:1 until one side is exhausted, then the
+    remaining side is drained.  The AV budget gate stops the loop early if the
+    Alpha Vantage daily request budget runs out mid-run.
     Tickers skipped by the staleness gate are cleared from the screener queue.
     P2 items have no screener queue row to clear.
     """
@@ -272,10 +275,14 @@ def _poll_research_queue() -> list[str]:
     existing_tickers = p1_tickers | p2_tickers | {r["ticker"] for r in p3_rows}
     short_rows = [r for r in short_rows if r["ticker"] not in existing_tickers]
 
-    # Strict 1:1 cap — exactly one long and one short per run regardless of trigger source.
-    long_rows = (p1_rows + p2_rows + p3_rows)[:1]
-    short_rows = short_rows[:1]
-    unified_rows = long_rows + short_rows
+    # Interleave longs and shorts 1:1; drain whichever side remains when the other is exhausted.
+    long_rows = p1_rows + p2_rows + p3_rows
+    unified_rows = []
+    for i in range(max(len(long_rows), len(short_rows))):
+        if i < len(long_rows):
+            unified_rows.append(long_rows[i])
+        if i < len(short_rows):
+            unified_rows.append(short_rows[i])
 
     if not unified_rows:
         logger.info("_poll_research_queue: no tickers queued for research today")
@@ -284,13 +291,13 @@ def _poll_research_queue() -> list[str]:
     from backend.memory.vector_store import store_memo
 
     logger.info(
-        "_poll_research_queue: 1:1 cap applied — long=%s, short=%s",
-        long_rows[0]["ticker"] if long_rows else "none",
-        short_rows[0]["ticker"] if short_rows else "none",
+        "_poll_research_queue: queue built — %d longs, %d shorts",
+        len(long_rows), len(short_rows),
     )
 
     processed: list[str] = []
     staleness_skipped_wl: list[str] = []  # watchlist rows to clear
+    staleness_skipped_sc: list[str] = []  # short_candidates rows to clear
 
     for row in unified_rows:
         ticker = row["ticker"]
@@ -311,7 +318,10 @@ def _poll_research_queue() -> list[str]:
                 "staleness gate: skipping %s — memo fresh, no material event", ticker,
             )
             if not from_deferred:
-                staleness_skipped_wl.append(ticker)
+                if row.get("_direction") == "SHORT":
+                    staleness_skipped_sc.append(ticker)
+                else:
+                    staleness_skipped_wl.append(ticker)
             continue
 
         # ── Determine update_mode ─────────────────────────────────────────────
@@ -399,7 +409,7 @@ def _poll_research_queue() -> list[str]:
         except Exception as exc:
             logger.error("_poll_research_queue: PM handoff failed for %s — %s", ticker, exc)
 
-    # Clear queued_for_research for watchlist staleness-skips
+    # Clear queued_for_research for staleness-skipped rows
     if staleness_skipped_wl:
         try:
             client.table("watchlist").update({"queued_for_research": False}).in_(
@@ -411,7 +421,20 @@ def _poll_research_queue() -> list[str]:
             )
         except Exception as exc:
             logger.warning(
-                "_poll_research_queue: failed to clear staleness-skipped flag — %s", exc
+                "_poll_research_queue: failed to clear staleness-skipped watchlist flag — %s", exc
+            )
+    if staleness_skipped_sc:
+        try:
+            client.table("short_candidates").update({"queued_for_research": False}).in_(
+                "ticker", staleness_skipped_sc
+            ).gte("run_date", lookback_cutoff).execute()
+            logger.info(
+                "_poll_research_queue: cleared staleness-skipped short_candidates rows: %s",
+                staleness_skipped_sc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "_poll_research_queue: failed to clear staleness-skipped short_candidates flag — %s", exc
             )
 
     # ── Update pm_config after every research run ─────────────────────────────
