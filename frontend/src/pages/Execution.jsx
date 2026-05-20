@@ -189,7 +189,7 @@ export default function Execution() {
   const mkt = MKT_COLORS[marketStatus.colorKey] || MKT_COLORS.gray;
 
   return (
-    <div className="p-4 sm:p-6 space-y-6 max-w-7xl mx-auto">
+    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
 
       {/* ── Status Bar ── */}
       <div
@@ -299,7 +299,7 @@ export default function Execution() {
       </div>
 
       {/* ── Order Activity Timeline ── */}
-      <section className="rounded-xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+      <section className="panel overflow-hidden">
         <div className="px-5 py-4 flex items-center justify-between" style={{ borderBottom: '1px solid var(--border)' }}>
           <div>
             <SL>Order Activity</SL>
@@ -435,7 +435,7 @@ export default function Execution() {
       </section>
 
       {/* ── Fills Table ── */}
-      <section className="rounded-xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+      <section className="panel overflow-hidden">
         <div className="px-5 py-4 flex items-center justify-between" style={{ borderBottom: '1px solid var(--border)' }}>
           <div>
             <SL>Fills</SL>
