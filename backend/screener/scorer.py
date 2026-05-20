@@ -10,7 +10,7 @@ Pipeline:
   4. Compute composite = Quality×w + Value×w + Momentum×w (regime-adjusted weights)
   5. Apply discrete adjustments: FLAGGED penalty, insider bonus, regime caps
   6. Sort descending, assign rank
-  7. Return all ScreenerResult objects (caller filters ≥ 6.5)
+  7. Return all ScreenerResult objects (caller filters ≥ 7.0)
 
 Regime weights:
   Risk-On:      Quality 50%, Value 30%, Momentum 20%
