@@ -86,7 +86,7 @@ export default function DecisionCard({ decision: d, onOverride, onDefer }) {
             lineHeight: 1.6,
             ...(expanded ? {} : { overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }),
           }}
-          onClick={() => setExpanded(v => !v)}
+          onClick={(e) => { e.stopPropagation(); setExpanded(v => !v); }}
         >
           {d.reasoning}
         </p>
@@ -96,7 +96,7 @@ export default function DecisionCard({ decision: d, onOverride, onDefer }) {
       {isAdmin && d.execution_status === 'PENDING_HUMAN' && (
         <div className="flex gap-2 mt-2">
           <button
-            onClick={() => onOverride?.(d.decision_id, 'FORCE_EXECUTE')}
+            onClick={(e) => { e.stopPropagation(); onOverride?.(d.decision_id, 'FORCE_EXECUTE'); }}
             style={{
               flex: 1, padding: '4px 0', fontSize: '10px', fontWeight: 700, fontFamily: 'Syne',
               borderRadius: '5px', cursor: 'pointer',
@@ -106,7 +106,7 @@ export default function DecisionCard({ decision: d, onOverride, onDefer }) {
             Approve
           </button>
           <button
-            onClick={() => onDefer?.(d.decision_id, d.ticker)}
+            onClick={(e) => { e.stopPropagation(); onDefer?.(d.decision_id, d.ticker); }}
             style={{
               padding: '4px 8px', fontSize: '10px', fontWeight: 700, fontFamily: 'Syne',
               borderRadius: '5px', cursor: 'pointer',
@@ -116,7 +116,7 @@ export default function DecisionCard({ decision: d, onOverride, onDefer }) {
             Defer
           </button>
           <button
-            onClick={() => onOverride?.(d.decision_id, 'BLOCK')}
+            onClick={(e) => { e.stopPropagation(); onOverride?.(d.decision_id, 'BLOCK'); }}
             style={{
               padding: '4px 8px', fontSize: '10px', fontWeight: 700, fontFamily: 'Syne',
               borderRadius: '5px', cursor: 'pointer',
@@ -141,7 +141,7 @@ export default function DecisionCard({ decision: d, onOverride, onDefer }) {
         </span>
         {d.reasoning && (
           <button
-            onClick={() => setExpanded(v => !v)}
+            onClick={(e) => { e.stopPropagation(); setExpanded(v => !v); }}
             style={{ fontSize: '9px', color: 'var(--text-3)', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'Syne' }}
           >
             {expanded ? 'collapse' : 'expand'}

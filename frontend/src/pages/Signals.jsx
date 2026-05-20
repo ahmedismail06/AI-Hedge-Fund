@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getWatchlist, runScreener } from '../api/screener';
-import { getHistory as getMemoHistory, triggerResearch } from '../api/research';
+import { getHistory as getMemoHistory, triggerResearch, getLatestMemo } from '../api/research';
 import { getPMDecisions } from '../api/pm';
 import SignalPipeline from '../components/SignalPipeline';
 import MemoCardCompact from '../components/MemoCardCompact';
+import MemoDetailDrawer from '../components/MemoDetailDrawer';
 
 const SECTOR_FILTERS = ['All', 'Technology', 'Healthcare', 'Consumer', 'Industrials', 'Energy', 'Financials', 'Materials', 'Real Estate', 'Utilities'];
 
@@ -71,6 +72,8 @@ export default function Signals() {
   const [researchStatus, setResearchStatus] = useState(null);
   const [sortKey, setSortKey]       = useState('composite_score');
   const [beneishOnly, setBeneishOnly] = useState(false);
+  const [drawerMemo, setDrawerMemo] = useState(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -97,6 +100,19 @@ export default function Signals() {
     setRunning(false);
   };
 
+  const handleOpenMemo = async (ticker) => {
+    setDrawerLoading(true);
+    setDrawerMemo(null);
+    try {
+      const full = await getLatestMemo(ticker);
+      setDrawerMemo(full);
+    } catch {
+      setDrawerMemo(null);
+    } finally {
+      setDrawerLoading(false);
+    }
+  };
+
   const handleResearch = async () => {
     const t = researchTicker.trim().toUpperCase();
     if (!t) return;
@@ -115,8 +131,8 @@ export default function Signals() {
   // Pipeline counts
   const universeCount = 800;
   const screenedCount = watchlist.length;
-  const inResearchCount = memos.filter(m => m.status === 'GENERATING' || m.status === 'PENDING').length;
-  const memosDone = memos.filter(m => m.status === 'COMPLETE').length;
+  const inResearchCount = 0; // no in-flight tracking in DB; memos are stored only on completion
+  const memosDone = memos.length;
   const pmQueueCount = pmDecisions.filter(d => d.status === 'PENDING_HUMAN').length;
 
   // Filter + sort screener table
@@ -338,7 +354,7 @@ export default function Signals() {
           <Panel>
             <PanelHeader
               label="Research Memos"
-              title={`${memosDone} complete · ${inResearchCount} in progress`}
+              title={`${memosDone} total · ${memos.filter(m => m.status === 'APPROVED').length} approved · ${memos.filter(m => m.status === 'PENDING_PM_REVIEW').length} pending`}
             />
             <div className="p-3 space-y-2 term-scroll" style={{ maxHeight: '560px', overflowY: 'auto' }}>
               {memos.length === 0 ? (
@@ -347,13 +363,37 @@ export default function Signals() {
                 </div>
               ) : (
                 memos.map(m => (
-                  <MemoCardCompact key={m.memo_id ?? m.id ?? m.ticker} memo={m} />
+                  <MemoCardCompact
+                    key={m.memo_id ?? m.id ?? m.ticker}
+                    memo={m}
+                    onClick={() => handleOpenMemo(m.ticker)}
+                  />
                 ))
               )}
             </div>
           </Panel>
         </div>
       </div>
+
+      {/* Memo loading overlay (while fetching full memo) */}
+      {drawerLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 100,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{ fontSize: '12px', fontFamily: 'Syne', color: 'var(--text-2)', fontWeight: 700 }}>
+            Loading memo…
+          </div>
+        </div>
+      )}
+
+      {/* Full memo detail drawer */}
+      {drawerMemo && !drawerLoading && (
+        <MemoDetailDrawer
+          memo={drawerMemo}
+          onClose={() => setDrawerMemo(null)}
+        />
+      )}
     </div>
   );
 }

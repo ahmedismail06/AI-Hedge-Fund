@@ -9,6 +9,7 @@ import PositionTableCompact from '../components/PositionTableCompact';
 import AttributionChart from '../components/AttributionChart';
 import OrchestratorBrain from '../components/OrchestratorBrain';
 import DecisionCard from '../components/DecisionCard';
+import PMDecisionDrawer from '../components/PMDecisionDrawer';
 import TickerDrawer from '../components/TickerDrawer';
 import ConfirmDialog from '../components/ConfirmDialog';
 
@@ -67,6 +68,7 @@ export default function CommandCenter() {
   const [pmStatus,    setPmStatus]    = useState(null);
   const [selectedTicker, setSelectedTicker] = useState(null);
   const [selectedMemo,   setSelectedMemo]   = useState(null);
+  const [selectedDecision, setSelectedDecision] = useState(null);
   const [chartTab,    setChartTab]    = useState(null);
   const [confirm,     setConfirm]     = useState(null);
   const [memoMap,     setMemoMap]     = useState({});
@@ -153,6 +155,14 @@ export default function CommandCenter() {
           position={selectedTicker}
           memo={selectedMemo}
           onClose={() => { setSelectedTicker(null); setSelectedMemo(null); }}
+        />
+      )}
+
+      {selectedDecision && (
+        <PMDecisionDrawer
+          decision={selectedDecision}
+          onClose={() => setSelectedDecision(null)}
+          onOverrideApplied={loadData}
         />
       )}
 
@@ -329,12 +339,13 @@ export default function CommandCenter() {
                 </div>
               ) : (
                 decisions.map(d => (
-                  <DecisionCard
-                    key={d.decision_id}
-                    decision={d}
-                    onOverride={handleOverride}
-                    onDefer={(id, ticker) => {/* defer modal — link to full page */}}
-                  />
+                  <div key={d.decision_id} onClick={() => setSelectedDecision(d)} style={{ cursor: 'pointer' }}>
+                    <DecisionCard
+                      decision={d}
+                      onOverride={handleOverride}
+                      onDefer={(id) => setSelectedDecision(decisions.find(x => x.decision_id === id) ?? null)}
+                    />
+                  </div>
                 ))
               )}
             </div>
