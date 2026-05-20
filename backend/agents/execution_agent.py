@@ -438,7 +438,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
             order_row = order_result.data[0]
             order_status = order_row.get("status")
             total_filled = float(order_row.get("total_filled_qty") or 0)
-            is_sell = order_row.get("order_side") == "SELL"
+            is_sell = order_row.get("exit_type") in ("EXIT_CLOSE", "EXIT_TRIM")
 
             if is_sell:
                 if order_status == "PARTIAL_FILLED" and total_filled > 0:

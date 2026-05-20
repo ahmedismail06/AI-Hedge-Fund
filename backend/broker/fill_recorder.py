@@ -436,18 +436,37 @@ def _handle_exit_fill(
         else:  # EXIT_TRIM
             remaining_shares = max(0.0, float(pos.get("share_count") or 0) - filled_qty)
             new_dollar_size = round(remaining_shares * exit_price, 2)
-            client.table("positions").update(
-                {
-                    "share_count": remaining_shares,
-                    "dollar_size": new_dollar_size,
-                    "current_price": round(exit_price, 4),
-                    "pnl": round((pos.get("pnl") or 0) + realized_pnl, 2),
-                }
-            ).eq("id", position_id).execute()
-            logger.info(
-                "Position %s TRIMMED: sold %.0f shares at $%.4f — %.0f shares remain",
-                position_id, filled_qty, exit_price, remaining_shares,
-            )
+            if remaining_shares == 0:
+                # Trim sold every remaining share — treat as a full close to avoid ghost position.
+                client.table("positions").update(
+                    {
+                        "status": "CLOSED",
+                        "share_count": 0,
+                        "dollar_size": 0.0,
+                        "current_price": round(exit_price, 4),
+                        "pnl": round((pos.get("pnl") or 0) + realized_pnl, 2),
+                        "pnl_pct": pnl_pct,
+                        "closed_at": datetime.utcnow().isoformat(),
+                    }
+                ).eq("id", position_id).execute()
+                logger.info(
+                    "Position %s CLOSED (trim drained to zero): sold %.0f shares at $%.4f — P&L: $%.2f",
+                    position_id, filled_qty, exit_price, realized_pnl,
+                )
+                _write_pm_calibration(pos, exit_price, pnl_pct, client)
+            else:
+                client.table("positions").update(
+                    {
+                        "share_count": remaining_shares,
+                        "dollar_size": new_dollar_size,
+                        "current_price": round(exit_price, 4),
+                        "pnl": round((pos.get("pnl") or 0) + realized_pnl, 2),
+                    }
+                ).eq("id", position_id).execute()
+                logger.info(
+                    "Position %s TRIMMED: sold %.0f shares at $%.4f — %.0f shares remain",
+                    position_id, filled_qty, exit_price, remaining_shares,
+                )
 
     except Exception as exc:
         logger.error("_handle_exit_fill failed for position %s: %s", position_id, exc)

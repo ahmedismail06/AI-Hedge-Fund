@@ -1522,6 +1522,51 @@ def _route_decision(
                 logger.info("PM: PRE_EARNINGS EXIT for %s — exit_action=CLOSE written to positions", ticker)
             return "SENT_TO_EXECUTION"
 
+        elif category == "REBALANCE" and decision == "DEPLOY_CASH":
+            # Process per-ticker adjustments before triggering the deployment pipeline.
+            # ADD entries overwrite any stale exit_action=TRIM — without this, the
+            # execution agent will sell positions the PM just decided to grow.
+            # TRIM/CLOSE entries arm exits for positions the PM wants to shed while deploying.
+            action = decision_data.get("action_details", {})
+            adjustments = action.get("adjustments", [])
+            for adj in adjustments:
+                adj_ticker = adj.get("ticker")
+                adj_action = adj.get("action", "TRIM")
+                if not adj_ticker:
+                    continue
+                if adj_action == "ADD":
+                    add_pct = _clean_float(adj.get("pct_change"))
+                    update: Dict[str, Any] = {"exit_action": "ADD"}
+                    if add_pct:
+                        update["exit_trim_pct"] = abs(add_pct) / 100.0
+                    # Unconditional update — overrides any stale TRIM on this position.
+                    client.table("positions").update(update).eq(
+                        "ticker", adj_ticker
+                    ).eq("status", "OPEN").execute()
+                    logger.info(
+                        "PM: DEPLOY_CASH ADD for %s — exit_action=ADD written, stale TRIM cleared",
+                        adj_ticker,
+                    )
+                else:
+                    pct_change = _clean_float(adj.get("pct_change"))
+                    if not pct_change:
+                        continue
+                    trim_pct = abs(pct_change) / 100.0
+                    exit_act = "CLOSE" if adj_action == "CLOSE" else "TRIM"
+                    client.table("positions").update({
+                        "exit_action": exit_act,
+                        "exit_trim_pct": trim_pct,
+                    }).eq("ticker", adj_ticker).eq("status", "OPEN").is_("exit_action", "null").execute()
+                    logger.info("PM: DEPLOY_CASH %s %s %.0f%%", exit_act, adj_ticker, trim_pct * 100)
+            detail = _trigger_deploy_cash_pipeline()
+            _log_event(
+                "DEPLOY_CASH_ACTION",
+                "PM",
+                detail,
+                mode_snapshot=decision_record.get("context_snapshot", {}).get("macro_regime", ""),
+            )
+            return "TRIGGERED_PIPELINE"
+
     except Exception as exc:
         logger.error("_route_decision: routing failed for %s — %s", ticker, exc)
 

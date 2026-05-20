@@ -71,7 +71,7 @@ Round to 2 decimal places.
 
 For REBALANCE: adjustments is a list of {"ticker": str, "action": "TRIM|ADD", "pct_change": float, "reason": str}
 For RAISE_CASH: adjustments lists positions to close with reason
-For DEPLOY_CASH: deploy_criteria describes what opportunities would trigger deployment
+For DEPLOY_CASH: deploy_criteria describes what opportunities would trigger new entries. ALSO populate adjustments with ADD entries for any existing OPEN positions you want to size up — same format as REBALANCE (action="ADD", pct_change as a positive % of portfolio to add, e.g. 2.0 for +2% NAV). If you also want to close/trim positions as part of deploying (e.g. ghost positions, low-conviction shorts), include TRIM or CLOSE entries too. This ensures the system clears any stale exit intent before growing a position.
 """
 
 
