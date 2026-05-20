@@ -10,7 +10,7 @@ export default function Layout() {
     <div className="min-h-screen" style={{ background: 'var(--bg)', color: 'var(--text)' }}>
       <TopNav mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
       <PnlRibbon />
-      <main style={{ paddingTop: '88px' }}>
+      <main style={{ paddingTop: '88px', overflowX: 'hidden', minWidth: 0 }}>
         <Outlet />
       </main>
     </div>

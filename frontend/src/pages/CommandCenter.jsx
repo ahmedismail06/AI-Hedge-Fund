@@ -176,7 +176,7 @@ export default function CommandCenter() {
       )}
 
       {/* Three-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 320px', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start' }}>
 
         {/* ── LEFT: Position list ──────────────────────────────── */}
         <div className="space-y-3">

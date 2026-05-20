@@ -182,7 +182,7 @@ export default function Signals() {
       </Panel>
 
       {/* Two-column: screener left, memos right */}
-      <div style={{ display: 'grid', gridTemplateColumns: '55fr 45fr', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 55fr) minmax(0, 45fr)', gap: '12px', alignItems: 'start' }}>
 
         {/* ── LEFT: Screener table ── */}
         <Panel>

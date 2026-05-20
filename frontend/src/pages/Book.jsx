@@ -254,7 +254,7 @@ export default function Book() {
       </div>
 
       {/* Main grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) clamp(240px, 25vw, 340px)', gap: '12px', alignItems: 'start' }}>
 
         {/* Left: position table */}
         <Panel>

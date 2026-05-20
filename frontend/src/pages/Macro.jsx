@@ -225,7 +225,7 @@ export default function Macro() {
       {regime && (
         <Panel style={{ marginBottom: '12px' }}>
           <div className="p-4">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '16px' }}>
               {Object.entries(SUB_SCORES).map(([key, label]) => (
                 <SubScorePill key={key} label={label} value={regime[key] ?? briefing?.[key]} />
               ))}
@@ -235,7 +235,7 @@ export default function Macro() {
       )}
 
       {/* Three-column body */}
-      <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr 280px', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(180px, 20vw, 280px) minmax(0, 1fr) clamp(180px, 20vw, 280px)', gap: '12px', alignItems: 'start' }}>
 
         {/* ── LEFT: Indicator grid ── */}
         <div className="space-y-2">

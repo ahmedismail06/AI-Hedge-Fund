@@ -162,7 +162,7 @@ export default function RiskEngine() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 300px', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 300px)', gap: '12px', alignItems: 'start' }}>
 
         {/* ── LEFT: Alerts + Stop Ladder ── */}
         <div className="space-y-3">
@@ -234,7 +234,7 @@ export default function RiskEngine() {
         {/* ── CENTER: Metrics Grid + Sharpe History ── */}
         <div className="space-y-3">
           {/* 2×4 metric cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '8px' }}>
             {Object.entries(METRIC_META).map(([key, meta]) => {
               const val = metrics?.[key];
               return (
