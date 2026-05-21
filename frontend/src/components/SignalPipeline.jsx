@@ -1,6 +1,6 @@
 const STAGES = [
   { key: 'universe',  label: 'Universe',    icon: 'public',       sub: '~800 stocks'  },
-  { key: 'screened',  label: 'Screened',    icon: 'filter_list',  sub: 'Score ≥ 7.0'  },
+  { key: 'screened',  label: 'Screened',    icon: 'filter_list',  sub: 'Score ≥ 6.5'  },
   { key: 'research',  label: 'In Research', icon: 'query_stats',  sub: 'Queued memos' },
   { key: 'memos',     label: 'Memos Done',  icon: 'description',  sub: 'Completed'    },
   { key: 'decisions', label: 'PM Queue',    icon: 'psychology',   sub: 'Decisions'    },
