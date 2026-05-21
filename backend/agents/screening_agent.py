@@ -251,6 +251,14 @@ _BENEISH_MIN_ADV_K = 5_000.0      # $5M ADV floor for shortable names
 _BENEISH_MAX_MISSING_FIELDS = 3   # M-score with 3+ missing inputs is low-confidence
 _BENEISH_HEALTHY_ROIC = 0.15      # ROIC threshold for "fundamentals look healthy"
 
+# Gates applied AFTER trigger-count backfill (decide queued_for_research=True).
+# Beneish-EXCLUDED is a quarterly accounting signal — re-researching daily is
+# wasted compute. Only requeue on a catalyst (new earnings) or periodic refresh.
+_BENEISH_MIN_TRIGGER_COUNT  = 3    # mirror short_trigger_scorer.MIN_TRIGGERS
+_BENEISH_MEMO_FRESH_DAYS    = 14   # skip if SHORT memo this recent
+_BENEISH_MEMO_STALE_DAYS    = 90   # always refresh after this long
+_BENEISH_MAX_QUEUED_PER_RUN = 5    # per-direction parity with _TOP_N_FOR_RESEARCH
+
 
 def _beneish_enqueue_skip_reason(r: ScreenerResult) -> str | None:
     """
@@ -302,6 +310,71 @@ def _beneish_enqueue_skip_reason(r: ScreenerResult) -> str | None:
     return None
 
 
+def _beneish_catalyst_skip_reason(client, ticker: str, today: date) -> str | None:
+    """
+    Decide whether a Beneish-EXCLUDED ticker should be queued for SHORT research.
+
+    Beneish-EXCLUDED is a fundamental accounting signal — once researched, there
+    is no value re-running the same memo daily. Re-trigger only on a catalyst.
+
+    Returns None to queue, or a string reason to skip:
+      - No prior SHORT memo                              → queue (first time)
+      - SHORT memo < _BENEISH_MEMO_FRESH_DAYS old        → skip (stale-redundant)
+      - 14d ≤ memo age < 90d, NO earnings since memo    → skip (stable signal)
+      - 14d ≤ memo age < 90d, earnings since memo       → queue (catalyst)
+      - SHORT memo ≥ _BENEISH_MEMO_STALE_DAYS old        → queue (periodic refresh)
+    """
+    try:
+        memo_resp = (
+            client.table("memos")
+            .select("date")
+            .eq("ticker", ticker)
+            .eq("verdict", "SHORT")
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("_beneish_catalyst_skip_reason: memo read failed for %s — %s; queuing", ticker, exc)
+        return None
+
+    if not memo_resp.data:
+        return None  # first time — queue
+
+    memo_date_raw = memo_resp.data[0].get("date")
+    try:
+        memo_date = date.fromisoformat(str(memo_date_raw)[:10])
+    except (TypeError, ValueError):
+        return None  # un-parseable memo date — fail open
+
+    age_days = (today - memo_date).days
+    if age_days < _BENEISH_MEMO_FRESH_DAYS:
+        return f"SHORT memo {age_days}d old (< {_BENEISH_MEMO_FRESH_DAYS}d freshness gate)"
+    if age_days >= _BENEISH_MEMO_STALE_DAYS:
+        return None  # periodic refresh
+
+    # 14 ≤ age < 90: require an earnings event since the memo
+    try:
+        ev_resp = (
+            client.table("earnings_events")
+            .select("event_date")
+            .eq("ticker", ticker)
+            .gt("event_date", memo_date.isoformat())
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning(
+            "_beneish_catalyst_skip_reason: earnings_events read failed for %s — %s; queuing",
+            ticker, exc,
+        )
+        return None
+
+    if ev_resp.data:
+        return None  # catalyst found — queue
+    return f"SHORT memo {age_days}d old, no earnings catalyst since"
+
+
 def _enqueue_beneish_excluded_as_shorts(
     results: list[ScreenerResult], run_date: date, regime: str,
 ) -> int:
@@ -346,7 +419,7 @@ def _enqueue_beneish_excluded_as_shorts(
             "beneish_m_score":     r.beneish_m_score,
             "beneish_flag":        "EXCLUDED",
             "raw_factors":         r.raw_factors,
-            "queued_for_research": True,
+            "queued_for_research": False,   # audit-only until trigger/catalyst gates pass below
             "regime":              regime,
         })
 
@@ -366,18 +439,85 @@ def _enqueue_beneish_excluded_as_shorts(
             rows, on_conflict="run_date,ticker"
         ).execute()
         logger.info(
-            "Beneish short auto-enqueue: queued %d EXCLUDED tickers (filtered %d) for short research",
-            len(rows), len(skipped),
+            "Beneish short auto-enqueue: %d EXCLUDED rows upserted (audit); applying trigger/catalyst gates",
+            len(rows),
         )
     except Exception as exc:
         logger.error("Beneish short auto-enqueue: upsert failed — %s", exc)
         return 0
 
-    _backfill_trigger_scores(rows, run_date)
-    return len(rows)
+    # Compute trigger counts then apply trigger-count + catalyst gates before flipping queued_for_research.
+    trigger_counts = _backfill_trigger_scores(rows, run_date)
+    return _flip_queued_on_survivors(client, rows, trigger_counts, run_date)
 
 
-def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
+def _flip_queued_on_survivors(
+    client,
+    upserted_rows: list[dict],
+    trigger_counts: dict[str, int],
+    run_date: date,
+) -> int:
+    """
+    Final gate for Beneish-EXCLUDED short auto-enqueue:
+      1. trigger_count ≥ _BENEISH_MIN_TRIGGER_COUNT (drop Beneish-only weak signals)
+      2. catalyst gate (drop redundant re-research; require event when 14d≤age<90d)
+      3. cap at _BENEISH_MAX_QUEUED_PER_RUN by trigger_count desc
+
+    Sets queued_for_research=True on survivors. Returns the count actually queued.
+    """
+    today = date.today()
+    gated: list[tuple[str, int, str | None]] = []  # (ticker, trigger_count, skip_reason)
+    for row in upserted_rows:
+        ticker = row["ticker"]
+        tc = trigger_counts.get(ticker)
+
+        if tc is None or tc < _BENEISH_MIN_TRIGGER_COUNT:
+            gated.append((ticker, tc or 0, f"trigger_count={tc} < {_BENEISH_MIN_TRIGGER_COUNT}"))
+            continue
+
+        catalyst_skip = _beneish_catalyst_skip_reason(client, ticker, today)
+        if catalyst_skip is not None:
+            gated.append((ticker, tc, catalyst_skip))
+            continue
+
+        gated.append((ticker, tc, None))  # passes all gates
+
+    survivors = sorted(
+        [(t, tc) for t, tc, skip in gated if skip is None],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:_BENEISH_MAX_QUEUED_PER_RUN]
+
+    survivor_tickers = [t for t, _ in survivors]
+    dropped = [(t, skip) for t, _, skip in gated if skip is not None]
+    if dropped:
+        logger.info(
+            "Beneish short auto-enqueue: %d rows audit-only (gated): %s",
+            len(dropped),
+            ", ".join(f"{t} ({reason})" for t, reason in dropped[:10]),
+        )
+
+    if not survivor_tickers:
+        logger.info("Beneish short auto-enqueue: 0 candidates queued for research after gates")
+        return 0
+
+    try:
+        client.table("short_candidates").update(
+            {"queued_for_research": True}
+        ).eq("run_date", run_date.isoformat()).in_("ticker", survivor_tickers).execute()
+    except Exception as exc:
+        logger.error("Beneish short auto-enqueue: queue flip failed — %s", exc)
+        return 0
+
+    logger.info(
+        "Beneish short auto-enqueue: queued %d for SHORT research: %s",
+        len(survivor_tickers),
+        ", ".join(f"{t}(tc={tc})" for t, tc in survivors),
+    )
+    return len(survivor_tickers)
+
+
+def _backfill_trigger_scores(rows: list[dict], run_date: date) -> dict[str, int]:
     """
     Fetch trigger-scorer inputs for BENEISH_EXCLUDED rows and write back
     trigger_count + triggers_fired to short_candidates.
@@ -385,6 +525,9 @@ def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
     BENEISH_EXCLUDED tickers come from the long screener ($50M–$2B cap) and
     won't be in the short universe cache ($2B–$20B), so data is fetched fresh.
     T4 (Beneish) is already known from the ScreenerResult — no re-computation.
+
+    Returns {ticker: trigger_count} for the rows that were scored. Tickers
+    skipped (e.g. FMP missing) are omitted; caller treats absent → trigger=0.
     """
     import time as _time
     from backend.screener.short_trigger_scorer import score_triggers
@@ -399,7 +542,7 @@ def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
     polygon_key = os.getenv("POLYGON_API_KEY")
     if not fmp_key:
         logger.warning("Beneish trigger backfill: FMP_API_KEY missing — skipping")
-        return
+        return {}
 
     universe_rows: list[dict] = []
     beneish_lookup: dict[str, dict] = {}
@@ -436,7 +579,7 @@ def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
     scored = score_triggers(universe_rows, beneish_lookup=beneish_lookup)
     if not scored:
         logger.info("Beneish trigger backfill: no trigger results returned")
-        return
+        return {}
 
     try:
         client = _get_client()
@@ -456,6 +599,8 @@ def _backfill_trigger_scores(rows: list[dict], run_date: date) -> None:
         logger.info("Beneish trigger backfill: scored %d/%d tickers", len(scored), len(rows))
     except Exception as exc:
         logger.error("Beneish trigger backfill: update failed — %s", exc)
+
+    return {r.ticker: r.trigger_count for r in scored}
 
 
 def _queue_top_n_for_research(
