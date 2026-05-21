@@ -29,12 +29,18 @@ load_dotenv()
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from backend.macro.indicators.fred_fetcher import FredBlock
 from backend.macro.indicators.market_fetcher import MarketBlock
 from backend.macro.inflation_engine import normalize
 from backend.macro.inflation_engine import config as inflation_config
+from backend.macro.inflation_engine.staleness import (
+    confidence_from_meta,
+    staleness_confidence,
+)
+from backend.macro.inflation_engine.types import FREQUENCY_DAYS, IndicatorMeta
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +86,19 @@ class RawIndicators:
 
     breakeven_5y: Optional[float] = None
     """5-year breakeven inflation rate level (e.g. 2.35)."""
+
+    inflation_release_dates: Optional[dict[str, datetime]] = None
+    """Optional per-series last-release dates for the five inflation indicators.
+
+    Keys: ``"cpi"``, ``"core_cpi"``, ``"ppi"``, ``"pce"``, ``"breakeven_5y"``.
+    When provided, ``_score_inflation`` uses confidence-weighted aggregation
+    (PR 2). When None (default), all series are treated as equally fresh and
+    the aggregation falls back to the unweighted mean from PR 1.
+
+    Populated by ``build_raw_indicators()`` from ``FredBlock.last_release_dates``.
+    Existing callers that construct ``RawIndicators`` manually (tests, etc.)
+    receive ``None`` by default — no code changes needed.
+    """
 
     # Fed / Rates
     rate_direction: float = 0.0
@@ -155,6 +174,25 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
     jobless_raw = fred.raw_values.get("jobless")
     jobless_actual: Optional[float] = float(jobless_raw) if jobless_raw is not None else None
 
+    # Build inflation release dates from FredBlock (PR 2: mixed-frequency handling).
+    # Map from scorer key → FredBlock series cache key so confidence decay works.
+    _fred_key_map = {
+        "cpi":          "cpi",
+        "core_cpi":     "core_cpi",
+        "ppi":          "ppi",
+        "pce":          "pce",
+        "breakeven_5y": "breakeven_5y",
+    }
+    inflation_release_dates: Optional[dict[str, datetime]] = None
+    if fred.last_release_dates:
+        dates: dict[str, datetime] = {}
+        for scorer_key, fred_key in _fred_key_map.items():
+            dt = fred.last_release_dates.get(fred_key)
+            if dt is not None:
+                dates[scorer_key] = dt
+        if dates:
+            inflation_release_dates = dates
+
     return RawIndicators(
         # Growth
         gdp_yoy=fred.yoy_changes.get("gdp"),
@@ -177,6 +215,7 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
         vix=market.vix,
         dxy=market.dxy,
         spx_pct_above_sma=market.spx_pct_above_sma,
+        inflation_release_dates=inflation_release_dates,
     )
 
 
@@ -305,15 +344,17 @@ def _score_inflation(ind: RawIndicators) -> float:
     """Score inflationary pressure on a -1.0 to +1.0 scale.
 
     Positive scores indicate elevated inflation. Each CPI/Core CPI/PPI/PCE
-    series and the 5Y breakeven are scored independently via `tanh_norm`
+    series and the 5Y breakeven are scored independently via ``tanh_norm``
     against an economically anchored center (Fed target) and a series-specific
-    scale, then averaged over non-None signals.
+    scale.
 
-    Replaces the legacy 5-step bucket scorer (PR1 of the inflation engine
-    refactor — see docs/inflation_engine_design.md). The bucket version
-    produced 50bp score swings from 10bp data moves at threshold boundaries
-    and zero sensitivity elsewhere; the tanh version is smooth and monotone
-    everywhere.
+    **PR 2 — mixed-frequency handling:** when ``ind.inflation_release_dates``
+    is populated, the aggregation uses confidence-weighted averaging so that
+    fresh daily series (breakeven_5y) outweigh stale monthly series between
+    FRED releases. When dates are absent, falls back to the unweighted mean
+    from PR 1 — no change for existing callers.
+
+    Signature is preserved exactly: ``(ind: RawIndicators) -> float``.
 
     Parameters
     ----------
@@ -325,23 +366,78 @@ def _score_inflation(ind: RawIndicators) -> float:
     float
         Inflation score in [-1.0, +1.0].
     """
-    signals: list[Optional[float]] = []
+    # ── 1. Per-series tanh-normed signals ────────────────────────────────────
+    # (key, value, config_params, native_frequency)
+    _INDICATOR_SPECS = [
+        ("cpi",          ind.cpi_yoy,        inflation_config.CPI_YOY,      "monthly"),
+        ("core_cpi",     ind.core_cpi_yoy,   inflation_config.CORE_CPI_YOY, "monthly"),
+        ("ppi",          ind.ppi_yoy,        inflation_config.PPI_YOY,      "monthly"),
+        ("pce",          ind.pce_yoy,        inflation_config.PCE_YOY,      "monthly"),
+        ("breakeven_5y", ind.breakeven_5y,   inflation_config.BREAKEVEN_5Y, "daily"),
+    ]
 
-    def _score_one(value: Optional[float], params: inflation_config.TanhParams, name: str) -> Optional[float]:
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Build (signal, confidence) pairs for each present indicator.
+    scored: list[tuple[float, float]] = []   # (tanh_signal, confidence)
+
+    for key, value, params, native_freq in _INDICATOR_SPECS:
         if value is None:
-            return None
-        s = normalize.tanh_norm(value, params.center, params.scale)
-        logger.debug("inflation/%s=%.2f → signal=%.3f", name, value, s)
-        return s
+            continue
+        signal = normalize.tanh_norm(value, params.center, params.scale)
+        logger.debug("inflation/%s=%.2f → tanh_signal=%.3f", key, value, signal)
 
-    signals.append(_score_one(ind.cpi_yoy,        inflation_config.CPI_YOY,      "cpi_yoy"))
-    signals.append(_score_one(ind.core_cpi_yoy,   inflation_config.CORE_CPI_YOY, "core_cpi_yoy"))
-    signals.append(_score_one(ind.ppi_yoy,        inflation_config.PPI_YOY,      "ppi_yoy"))
-    signals.append(_score_one(ind.pce_yoy,        inflation_config.PCE_YOY,      "pce_yoy"))
-    signals.append(_score_one(ind.breakeven_5y,   inflation_config.BREAKEVEN_5Y, "breakeven_5y"))
+        # Compute confidence from release date if available.
+        confidence: float = 1.0  # default: treat as fully fresh
+        if ind.inflation_release_dates is not None:
+            release_dt = ind.inflation_release_dates.get(key)
+            if release_dt is not None:
+                staleness = max(0, (today - release_dt).days)
+                meta = IndicatorMeta(
+                    series_id=key,
+                    native_frequency=native_freq,
+                    last_release_dt=release_dt,
+                    staleness_days=staleness,
+                )
+                confidence = confidence_from_meta(meta)
+                logger.debug(
+                    "inflation/%s staleness=%d days → confidence=%.3f",
+                    key, staleness, confidence,
+                )
+            else:
+                # Series is in the block but release date is missing: use a
+                # conservative fallback (assume one full native period has elapsed).
+                fallback_staleness = FREQUENCY_DAYS[native_freq]
+                confidence = staleness_confidence(fallback_staleness, native_freq)
+                logger.debug(
+                    "inflation/%s no release_date → fallback staleness=%d → confidence=%.3f",
+                    key, fallback_staleness, confidence,
+                )
 
-    score = _safe_avg(signals)
-    logger.debug("_score_inflation → %.4f", score)
+        scored.append((signal, confidence))
+
+    if not scored:
+        logger.debug("_score_inflation → 0.0 (no signals)")
+        return 0.0
+
+    # ── 2. Confidence-weighted aggregation ───────────────────────────────────
+    # sum(signal_i × conf_i) / sum(conf_i)
+    # Edge case: all confidences are 0 → fall back to unweighted mean so the
+    # function always returns a finite value.
+    total_conf = sum(c for _, c in scored)
+    if total_conf == 0.0:
+        score = sum(s for s, _ in scored) / len(scored)
+        logger.debug(
+            "_score_inflation → %.4f (all-zero confidence fallback, unweighted mean)",
+            score,
+        )
+    else:
+        score = sum(s * c for s, c in scored) / total_conf
+        logger.debug(
+            "_score_inflation → %.4f (confidence-weighted, Σconf=%.3f)",
+            score, total_conf,
+        )
+
     return score
 
 
