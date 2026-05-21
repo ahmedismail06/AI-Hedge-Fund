@@ -35,6 +35,10 @@ FRED_SERIES: dict[str, str] = {
     "ppi":          "WPSFD49207",    # PPI Final Demand (BLS headline, SA) — replaced PPIACO (all commodities, too volatile)
     "pce":          "PCEPI",         # PCE deflator
     "breakeven_5y": "T5YIE",         # 5Y breakeven inflation rate (daily)
+    # PR 3 additions: structural layer (monthly) + market-expectations layer (daily)
+    "sticky_cpi":        "STICKCPIM157SFRBATL",  # Atlanta Fed sticky-price CPI, monthly
+    "trimmed_mean_pce":  "PCETRIM12M159SFRBDAL",  # Dallas Fed 12m trimmed-mean PCE, monthly
+    "five_y_five_y_fwd": "T5YIFR",               # 5-year, 5-year forward inflation rate, daily
     # ISM Mfg PMI (NAPM) was removed from FRED by ISM due to licensing restrictions.
     # Philadelphia Fed proxy also dropped — adding 50 to a 0-centered diffusion index
     # produces garbage PMI-shaped numbers. Mfg PMI slot is empty until a real source is found.
@@ -51,12 +55,17 @@ FRED_SERIES: dict[str, str] = {
 # Series for which we compute year-over-year changes and the number of
 # periods per year for each.
 _YOY_SERIES: dict[str, int] = {
-    "gdp":      4,   # quarterly
-    "cpi":      12,  # monthly
-    "core_cpi": 12,
-    "ppi":      12,
-    "pce":      12,
-    "payrolls": 12,
+    "gdp":              4,   # quarterly
+    "cpi":              12,  # monthly
+    "core_cpi":         12,
+    "ppi":              12,
+    "pce":              12,
+    "payrolls":         12,
+    # PR 3 additions — monthly structural layer series
+    "sticky_cpi":       12,  # Atlanta Fed sticky-price CPI, monthly
+    "trimmed_mean_pce": 12,  # Dallas Fed trimmed-mean PCE, monthly
+    # Note: five_y_five_y_fwd (T5YIFR) is a rate (not a level), already
+    # expressed as a % — no YoY computation needed; raw value is used directly.
 }
 
 # Series for which we compute month-over-month changes.

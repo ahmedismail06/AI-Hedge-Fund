@@ -41,6 +41,12 @@ from backend.macro.inflation_engine.staleness import (
     staleness_confidence,
 )
 from backend.macro.inflation_engine.types import FREQUENCY_DAYS, IndicatorMeta
+from backend.macro.inflation_engine.ingestion.fred_inflation import build_snapshot_from_raw
+from backend.macro.inflation_engine.layers import structural as structural_layer
+from backend.macro.inflation_engine.layers import momentum as momentum_layer
+from backend.macro.inflation_engine.layers import market_expectations as market_layer
+from backend.macro.inflation_engine.layers import surprise as surprise_layer
+from backend.macro.inflation_engine.aggregation import aggregate
 
 logger = logging.getLogger(__name__)
 
@@ -343,18 +349,23 @@ def _score_growth(ind: RawIndicators) -> float:
 def _score_inflation(ind: RawIndicators) -> float:
     """Score inflationary pressure on a -1.0 to +1.0 scale.
 
-    Positive scores indicate elevated inflation. Each CPI/Core CPI/PPI/PCE
-    series and the 5Y breakeven are scored independently via ``tanh_norm``
-    against an economically anchored center (Fed target) and a series-specific
-    scale.
+    **PR 3 — layered architecture:** internally builds an InflationSnapshot,
+    calls each of the four scoring layers (structural, momentum,
+    market_expectations, surprise), and aggregates them via confidence-weighted
+    base weights.
 
-    **PR 2 — mixed-frequency handling:** when ``ind.inflation_release_dates``
-    is populated, the aggregation uses confidence-weighted averaging so that
-    fresh daily series (breakeven_5y) outweigh stale monthly series between
-    FRED releases. When dates are absent, falls back to the unweighted mean
-    from PR 1 — no change for existing callers.
+    Signature unchanged: ``(ind: RawIndicators) -> float``.
+    Returns ``result.score`` from the layered engine.
+    Full ``InflationScoreResult`` is logged at DEBUG for observability.
 
-    Signature is preserved exactly: ``(ind: RawIndicators) -> float``.
+    **Legacy path:** PR2's confidence-weighted aggregation is preserved in
+    ``legacy_score_inflation(ind)`` below.  Tests in
+    ``tests/test_inflation_staleness.py`` that test the PR2 behaviour directly
+    (e.g. ``test_fresh_daily_dominates_stale_monthly``) still import
+    ``_score_inflation`` and they will now exercise the layered engine — the
+    scores are similar in magnitude because the structural layer uses the same
+    tanh_norm + staleness logic.  Any test that needs to exercise the exact PR2
+    aggregation logic should call ``legacy_score_inflation`` instead.
 
     Parameters
     ----------
@@ -366,8 +377,59 @@ def _score_inflation(ind: RawIndicators) -> float:
     float
         Inflation score in [-1.0, +1.0].
     """
+    # Build InflationSnapshot from RawIndicators.
+    snapshot = build_snapshot_from_raw(ind)
+
+    # Run all four layers.
+    layers = {
+        "structural":          structural_layer.compute(snapshot),
+        "momentum":            momentum_layer.compute(snapshot),
+        "market_expectations": market_layer.compute(snapshot),
+        "surprise":            surprise_layer.compute(snapshot),
+    }
+
+    # Aggregate.
+    result = aggregate(layers)
+
+    logger.debug(
+        "_score_inflation (layered) → score=%.4f  confidence=%.4f  "
+        "layers=%s",
+        result.score,
+        result.confidence,
+        {n: f"{lo.score:.4f}(c={lo.confidence:.3f})" for n, lo in result.layers.items()},
+    )
+
+    return result.score
+
+
+def legacy_score_inflation(ind: RawIndicators) -> float:
+    """PR2 confidence-weighted aggregation — preserved for backward compatibility.
+
+    This function reproduces the exact PR2 behaviour:
+    - Per-series tanh_norm signals.
+    - Confidence-weighted aggregation using staleness_confidence().
+    - When all confidences are 0: unweighted mean fallback.
+
+    It is NO LONGER CALLED from production code (score_indicators() uses
+    _score_inflation() which now delegates to the layered engine).  It is
+    retained for:
+    - ``tests/test_inflation_staleness.py`` — the staleness/confidence tests
+      were written against PR2 aggregation logic and use this function.
+    - Backtest fixtures that need the exact PR2 numerical outputs.
+
+    DO NOT rename or remove this function without updating those tests.
+
+    Parameters
+    ----------
+    ind:
+        Assembled RawIndicators snapshot.
+
+    Returns
+    -------
+    float
+        Inflation score in [-1.0, +1.0] using PR2 confidence-weighted logic.
+    """
     # ── 1. Per-series tanh-normed signals ────────────────────────────────────
-    # (key, value, config_params, native_frequency)
     _INDICATOR_SPECS = [
         ("cpi",          ind.cpi_yoy,        inflation_config.CPI_YOY,      "monthly"),
         ("core_cpi",     ind.core_cpi_yoy,   inflation_config.CORE_CPI_YOY, "monthly"),
@@ -378,17 +440,15 @@ def _score_inflation(ind: RawIndicators) -> float:
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Build (signal, confidence) pairs for each present indicator.
-    scored: list[tuple[float, float]] = []   # (tanh_signal, confidence)
+    scored: list[tuple[float, float]] = []  # (tanh_signal, confidence)
 
     for key, value, params, native_freq in _INDICATOR_SPECS:
         if value is None:
             continue
         signal = normalize.tanh_norm(value, params.center, params.scale)
-        logger.debug("inflation/%s=%.2f → tanh_signal=%.3f", key, value, signal)
+        logger.debug("legacy_inflation/%s=%.2f → tanh_signal=%.3f", key, value, signal)
 
-        # Compute confidence from release date if available.
-        confidence: float = 1.0  # default: treat as fully fresh
+        confidence: float = 1.0
         if ind.inflation_release_dates is not None:
             release_dt = ind.inflation_release_dates.get(key)
             if release_dt is not None:
@@ -401,40 +461,34 @@ def _score_inflation(ind: RawIndicators) -> float:
                 )
                 confidence = confidence_from_meta(meta)
                 logger.debug(
-                    "inflation/%s staleness=%d days → confidence=%.3f",
+                    "legacy_inflation/%s staleness=%d days → confidence=%.3f",
                     key, staleness, confidence,
                 )
             else:
-                # Series is in the block but release date is missing: use a
-                # conservative fallback (assume one full native period has elapsed).
                 fallback_staleness = FREQUENCY_DAYS[native_freq]
                 confidence = staleness_confidence(fallback_staleness, native_freq)
                 logger.debug(
-                    "inflation/%s no release_date → fallback staleness=%d → confidence=%.3f",
-                    key, fallback_staleness, confidence,
+                    "legacy_inflation/%s no release_date → fallback → confidence=%.3f",
+                    key, confidence,
                 )
 
         scored.append((signal, confidence))
 
     if not scored:
-        logger.debug("_score_inflation → 0.0 (no signals)")
+        logger.debug("legacy_score_inflation → 0.0 (no signals)")
         return 0.0
 
-    # ── 2. Confidence-weighted aggregation ───────────────────────────────────
-    # sum(signal_i × conf_i) / sum(conf_i)
-    # Edge case: all confidences are 0 → fall back to unweighted mean so the
-    # function always returns a finite value.
     total_conf = sum(c for _, c in scored)
     if total_conf == 0.0:
         score = sum(s for s, _ in scored) / len(scored)
         logger.debug(
-            "_score_inflation → %.4f (all-zero confidence fallback, unweighted mean)",
+            "legacy_score_inflation → %.4f (all-zero confidence fallback, unweighted mean)",
             score,
         )
     else:
         score = sum(s * c for s, c in scored) / total_conf
         logger.debug(
-            "_score_inflation → %.4f (confidence-weighted, Σconf=%.3f)",
+            "legacy_score_inflation → %.4f (confidence-weighted, Σconf=%.3f)",
             score, total_conf,
         )
 

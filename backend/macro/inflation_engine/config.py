@@ -69,3 +69,66 @@ PCE_YOY        = TanhParams(center=2.0, scale=1.2)
 #   1.75 → -0.76  1.25 → -0.96
 # Breakevens are highly stable; a small deviation carries meaningful information.
 BREAKEVEN_5Y   = TanhParams(center=2.25, scale=0.5)
+
+# ── New in PR3 ───────────────────────────────────────────────────────────────
+
+# ── Sticky-price CPI (Atlanta Fed) ───────────────────────────────────────────
+# Sticky-price CPI is structurally less volatile than headline CPI; same center
+# (2%) but slightly tighter scale (1.2) to match its historically lower variance.
+STICKY_CPI_YOY = TanhParams(center=2.0, scale=1.2)
+
+# ── Trimmed-mean PCE (Dallas Fed) ────────────────────────────────────────────
+# 12-month trimmed-mean PCE: closely tracks core PCE; same parameters as PCE.
+TRIMMED_MEAN_PCE_YOY = TanhParams(center=2.0, scale=1.2)
+
+# ── 5Y5Y Forward Inflation Rate ──────────────────────────────────────────────
+# T5YIFR: the market's view of inflation 5 years out.  Anchored at 2.30%
+# (historically trades 5-10bp above the 5Y breakeven).  Tight scale = 0.5
+# (same reasoning as BREAKEVEN_5Y — forward rates are highly stable).
+FIVE_Y_FIVE_Y_FWD = TanhParams(center=2.30, scale=0.5)
+
+# ── Momentum layer tanh parameters ───────────────────────────────────────────
+# For 3m-annualised and regression-slope inputs, the anchor is 0.0 (flat trend),
+# and the scale is chosen so that a 1 pp annualised CPI change maps to ≈ 0.46
+# (= tanh(1/2.0)).  This gives good sensitivity in the ±1-2 pp range where
+# most inflation momentum moves occur, without saturating during large swings.
+#
+# Calibration example for CPI_MOM_3M (scale=2.0):
+#   +2 pp ann → tanh(1.0) ≈ +0.76  (acceleration)
+#   +1 pp ann → tanh(0.5) ≈ +0.46  (moderate acceleration)
+#    0 pp ann →  0.0                (flat trend)
+#   -1 pp ann → tanh(-0.5) ≈ -0.46 (moderate deceleration)
+#   -2 pp ann → tanh(-1.0) ≈ -0.76 (deceleration)
+MOMENTUM_3M = TanhParams(center=0.0, scale=2.0)
+
+# Regression slope: OLS slope over 6 months (pp per month).
+# A slope of ±0.15 pp/month (≈ ±1.8 pp annualised acceleration) maps to ≈ ±0.46.
+MOMENTUM_SLOPE_6M = TanhParams(center=0.0, scale=0.3)
+
+
+# ── Aggregation layer weights ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class AggregationWeights:
+    """Base weights per layer before confidence scaling.
+
+    Effective weight = base_weight × layer.confidence.  Surprise layer is
+    absent (confidence=0) in PR3, so its 10% is redistributed proportionally
+    to the remaining three layers.
+    """
+    structural: float = 0.40
+    momentum: float = 0.25
+    market_expectations: float = 0.25
+    surprise: float = 0.10
+
+    def as_dict(self) -> dict:
+        return {
+            "structural": self.structural,
+            "momentum": self.momentum,
+            "market_expectations": self.market_expectations,
+            "surprise": self.surprise,
+        }
+
+
+# Default instance used by aggregation.py and scorer.py.
+DEFAULT_AGGREGATION_WEIGHTS = AggregationWeights()

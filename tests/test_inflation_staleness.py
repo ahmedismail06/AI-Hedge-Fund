@@ -35,7 +35,7 @@ from backend.macro.inflation_engine.types import (
     FREQUENCY_DAYS,
     IndicatorMeta,
 )
-from backend.macro.scorer import RawIndicators, _score_inflation
+from backend.macro.scorer import RawIndicators, _score_inflation, legacy_score_inflation
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +354,11 @@ def test_fresh_daily_dominates_stale_monthly():
     Use an extreme staleness for monthly (90 days → very low confidence)
     and staleness=0 for breakeven. The final score should be closer to
     the breakeven's signal than the monthly average.
+
+    Uses legacy_score_inflation (PR2 behaviour) because this test validates
+    the flat confidence-weighted aggregation logic that was introduced in PR2.
+    The PR3 layered engine separates these into different layers, so the
+    exact numerical comparison is tested against the PR2 legacy path.
     """
     from backend.macro.inflation_engine.normalize import tanh_norm
     from backend.macro.inflation_engine import config as cfg
@@ -370,7 +375,7 @@ def test_fresh_daily_dominates_stale_monthly():
         "breakeven_5y": today,  # perfectly fresh
     }
     ind = _ind_with_dates(release_dates)
-    score = _score_inflation(ind)
+    score = legacy_score_inflation(ind)
 
     # Compute expected: breakeven signal at staleness=0
     be_signal = tanh_norm(2.35, cfg.BREAKEVEN_5Y.center, cfg.BREAKEVEN_5Y.scale)

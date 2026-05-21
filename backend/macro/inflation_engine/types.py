@@ -1,18 +1,17 @@
-"""Types for the inflation engine's mixed-frequency handling.
+"""Types for the inflation engine's mixed-frequency handling and layered architecture.
 
-PR 2 of the inflation engine redesign (docs/inflation_engine_design.md §2.3).
+PR 2 (IndicatorMeta, FREQUENCY_DAYS): staleness-based confidence weighting.
+PR 3 (Contribution, LayerOutput, InflationSnapshot, InflationScoreResult):
+    types for the four-layer scoring architecture.
 
-IndicatorMeta carries freshness metadata for a single indicator series.
-The confidence field (computed externally via staleness.py) lets the aggregator
-downweight stale monthly inputs rather than treating them equal to fresh
-daily ones.
+Design reference: docs/inflation_engine_design.md §2.1, §2.3, §2.7
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 # Map each frequency label to its canonical period length in days.
@@ -79,3 +78,154 @@ class IndicatorMeta:
                 f"IndicatorMeta.native_frequency must be one of "
                 f"{list(FREQUENCY_DAYS)}, got '{self.native_frequency}'"
             )
+
+
+# ---------------------------------------------------------------------------
+# PR 3 — Layer architecture types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Contribution:
+    """Per-indicator decomposition for one layer's score.
+
+    Carries both the raw observation and the score contribution so that
+    every final score is fully attributable to its inputs.
+    """
+
+    indicator: str
+    """Series name, e.g. ``"cpi_yoy"``."""
+
+    raw_value: float
+    """The underlying observation before any normalisation."""
+
+    signal: float
+    """tanh-normed signal in [-1, +1]."""
+
+    weight: float
+    """This layer's base weight for the indicator (sums to 1.0 across a layer)."""
+
+    confidence: float
+    """Freshness confidence in [0, 1]."""
+
+    age_days: Optional[int] = None
+    """Days since last release. None if release date not available."""
+
+
+@dataclass
+class LayerOutput:
+    """Output of a single scoring layer.
+
+    Each layer is a pure function returning a ``LayerOutput``.  The
+    ``score`` field is the layer's view of inflation pressure, the
+    ``confidence`` field shrinks when inputs are stale, sparse, or
+    contradictory, and the ``contributors`` list allows full attribution.
+    """
+
+    score: float
+    """Layer score in [-1, +1]."""
+
+    confidence: float
+    """Aggregate confidence for this layer in [0, 1].
+
+    Used by the aggregator to scale the layer's effective weight.
+    ``confidence = 0`` signals the layer has no usable data and the
+    aggregator will drop it and redistribute weight to other layers.
+    """
+
+    contributors: List[Contribution]
+    """Per-indicator breakdown ordered by indicator name (or contribution magnitude)."""
+
+    notes: List[str]
+    """Human-readable diagnostics for this layer (e.g. missing inputs, fallbacks used)."""
+
+
+@dataclass
+class InflationSnapshot:
+    """All inputs the scoring engine needs for one scoring run.
+
+    A small pure dataclass — built by ingestion modules, consumed by layers.
+    Fields are None when data is unavailable; layers degrade confidence
+    proportionally so the engine still runs.
+
+    Stays small in PR3; PR4 may add fields (consensus data).
+    """
+
+    # ── Level / YoY series (from FRED, monthly) ──────────────────────────────
+    cpi_yoy: Optional[float] = None
+    core_cpi_yoy: Optional[float] = None
+    ppi_yoy: Optional[float] = None
+    pce_yoy: Optional[float] = None
+    sticky_cpi_yoy: Optional[float] = None
+    """Atlanta Fed sticky-price CPI YoY (STICKCPIM157SFRBATL)."""
+    trimmed_mean_pce_yoy: Optional[float] = None
+    """Dallas Fed 12m trimmed-mean PCE (PCETRIM12M159SFRBDAL)."""
+
+    # ── Market expectations (daily, from FRED + Polygon) ─────────────────────
+    breakeven_5y: Optional[float] = None
+    five_y_five_y_forward: Optional[float] = None
+    """5-year, 5-year forward inflation rate (T5YIFR)."""
+    treasury_10y: Optional[float] = None
+    """10Y Treasury yield (DGS10)."""
+
+    # ── Market commodities (from Polygon — ETF proxies) ──────────────────────
+    wti_oil_price: Optional[float] = None
+    """WTI crude proxy via USO ETF."""
+    brent_oil_price: Optional[float] = None
+    """Brent crude proxy via BNO ETF."""
+    gasoline_price: Optional[float] = None
+    """Gasoline proxy via UGA ETF."""
+    copper_price: Optional[float] = None
+    """Copper proxy via CPER ETF."""
+    commodity_composite: Optional[float] = None
+    """Broad commodity composite via DBC ETF."""
+
+    # ── Momentum series (pre-computed by transforms.momentum) ────────────────
+    # Layers consume these directly rather than recomputing.
+    cpi_yoy_3m: Optional[float] = None
+    """3m-annualised CPI momentum."""
+    core_cpi_yoy_3m: Optional[float] = None
+    """3m-annualised core CPI momentum."""
+    cpi_slope_6m: Optional[float] = None
+    """6m OLS regression slope of CPI YoY."""
+
+    # ── Historical context for rolling normalisation ──────────────────────────
+    history: Dict[str, List[float]] = field(default_factory=dict)
+    """Rolling history per series key. Used by rolling_zscore and percentile_rank."""
+
+    # ── Freshness metadata ────────────────────────────────────────────────────
+    release_dates: Dict[str, datetime] = field(default_factory=dict)
+    """Last release date per series key. Populated by ingestion modules."""
+
+
+@dataclass
+class InflationScoreResult:
+    """Full output of the layered inflation scoring engine.
+
+    Returned by ``score_inflation()`` and logged at DEBUG level from
+    ``_score_inflation()`` in scorer.py.  The ``score`` field is the only
+    value exposed to upstream callers for backward compatibility.
+    """
+
+    score: float
+    """Final inflation score in [-1, +1]."""
+
+    confidence: float
+    """Aggregate confidence across all layers in [0, 1]."""
+
+    layers: Dict[str, LayerOutput]
+    """Per-layer outputs keyed by layer name: structural, momentum,
+    market_expectations, surprise."""
+
+    contributors_top5: List[Contribution]
+    """Top-5 contributors ranked by |signal × weight × confidence|."""
+
+    aggregate_method: str
+    """How layers were combined. ``"static"`` in PR3; ``"dynamic"`` added in PR4."""
+
+    stale_warnings: List[str]
+    """Human-readable staleness warnings from all layers."""
+
+    diagnostics: Dict[str, Any]
+    """Raw values, layer weights, effective weights, and per-layer confidence.
+    Used for observability; surfaced via API in PR4."""
