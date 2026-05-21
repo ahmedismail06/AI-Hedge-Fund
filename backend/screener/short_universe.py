@@ -25,14 +25,15 @@ Per-ticker enrichment (trigger inputs):
 Beneish is NOT computed here — that's the long screener's authoritative path,
 and EXCLUDED tickers auto-enqueue to short_candidates via screening_agent.
 
-On-disk JSON cache, 7-day TTL. Background rebuild on miss.
+On-disk JSON cache, 7-day TTL. Rebuild is run by the weekly
+`short_universe_weekly` APScheduler job (see backend/screener/scheduler.py);
+on cache miss the daily screener simply returns [] and logs a warning.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -117,15 +118,6 @@ def _save_cache(rows: list[dict]) -> None:
         logger.info("Short universe cache saved (%d rows)", len(rows))
     except Exception as exc:
         logger.warning("Short universe cache write failed: %s", exc)
-
-
-def _rebuild_cache_background() -> None:
-    try:
-        rows = _fetch_universe_fresh()
-        if rows:
-            _save_cache(rows)
-    except Exception as exc:
-        logger.error("Short universe background rebuild failed: %s", exc)
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -329,9 +321,23 @@ def _collect_polygon_tickers(polygon_key: str) -> list[str]:
     return out
 
 
+def _log_phase_progress(phase: str, done: int, total: int, kept: int, started_at: float) -> None:
+    elapsed = max(time.monotonic() - started_at, 1e-6)
+    rate = done / elapsed
+    eta_s = (total - done) / rate if rate > 0 else 0.0
+    logger.info(
+        "Short universe %s: %d/%d (kept=%d, %.1f/s, ETA %.1fm)",
+        phase, done, total, kept, rate, eta_s / 60.0,
+    )
+
+
 def _fetch_universe_fresh() -> list[dict]:
     """
-    Full rebuild. Expensive — ~5–10 min depending on universe size. Cached weekly.
+    Full rebuild. Expensive — ~30–60 min depending on universe size.
+
+    Designed to run as a scheduled weekly job (Sun 2 AM ET) on a worker
+    thread, not fire-and-forget. Progress is logged every 200 tickers so
+    failures are observable.
     """
     polygon_key = os.getenv("POLYGON_API_KEY")
     fmp_key = os.getenv("FMP_API_KEY")
@@ -345,43 +351,49 @@ def _fetch_universe_fresh() -> list[dict]:
         _resolve_sector_with_fmp_backstop,
     )
 
+    job_started = time.monotonic()
     all_symbols = _collect_polygon_tickers(polygon_key)
-    logger.info("Short universe: %d raw tickers from Polygon", len(all_symbols))
+    logger.info("Short universe rebuild: %d raw tickers from Polygon", len(all_symbols))
 
     # ── Step 1: market cap + sector filter (with FMP backstop) ────────────────
     band: list[dict] = []
-    for sym in all_symbols:
+    phase_start = time.monotonic()
+    total = len(all_symbols)
+    for i, sym in enumerate(all_symbols, 1):
         detail = _fetch_ticker_detail(sym, polygon_key)
         time.sleep(0.2)
-        if not detail:
-            continue
-        mc = detail.get("market_cap")
-        if mc is None:
-            continue
-        cap_m = mc / 1_000_000
-        if not (_MIN_CAP_M <= cap_m <= _MAX_CAP_M):
-            continue
-        sic = detail.get("sic_code")
-        sector = _resolve_sector_with_fmp_backstop(sym, sic, fmp_key)
-        if sector is None:
-            # SIC-excluded, FMP-excluded, or unknown to both → drop.
-            continue
-        band.append({"ticker": sym, "market_cap_m": round(cap_m, 2), "sector": sector})
+        if detail:
+            mc = detail.get("market_cap")
+            if mc is not None:
+                cap_m = mc / 1_000_000
+                if _MIN_CAP_M <= cap_m <= _MAX_CAP_M:
+                    sic = detail.get("sic_code")
+                    sector = _resolve_sector_with_fmp_backstop(sym, sic, fmp_key)
+                    if sector is not None:
+                        band.append({"ticker": sym, "market_cap_m": round(cap_m, 2), "sector": sector})
+        if i % 200 == 0 or i == total:
+            _log_phase_progress("cap/sector", i, total, len(band), phase_start)
     logger.info("Short universe: %d after cap/sector filter", len(band))
 
     # ── Step 2: ADV filter ────────────────────────────────────────────────────
     adv_filtered: list[dict] = []
-    for c in band:
+    phase_start = time.monotonic()
+    total = len(band)
+    for i, c in enumerate(band, 1):
         adv = _fetch_adv_k(c["ticker"], polygon_key)
         time.sleep(0.1)
         if adv is not None and adv >= _MIN_ADV_K:
             c["adv_k"] = round(adv, 2)
             adv_filtered.append(c)
+        if i % 200 == 0 or i == total:
+            _log_phase_progress("ADV", i, total, len(adv_filtered), phase_start)
     logger.info("Short universe: %d after ADV filter", len(adv_filtered))
 
     # ── Step 3: per-ticker trigger-input enrichment ──────────────────────────
     enriched: list[dict] = []
-    for c in adv_filtered:
+    phase_start = time.monotonic()
+    total = len(adv_filtered)
+    for i, c in enumerate(adv_filtered, 1):
         sym = c["ticker"]
 
         # Squeeze filter — skip early to save FMP calls
@@ -389,11 +401,15 @@ def _fetch_universe_fresh() -> list[dict]:
         if si_pct is not None and si_pct > _SI_SQUEEZE_THRESHOLD:
             logger.debug("Short universe: %s skipped (SI=%.1f%% > %.0f%% squeeze)",
                          sym, si_pct, _SI_SQUEEZE_THRESHOLD)
+            if i % 200 == 0 or i == total:
+                _log_phase_progress("enrich", i, total, len(enriched), phase_start)
             continue
 
         revenue_q, gm_q, shares_q = _fetch_quarterly_history(sym, fmp_key, limit=4)
         time.sleep(0.15)
         if len([x for x in revenue_q if x is not None]) < _MIN_QUARTERS:
+            if i % 200 == 0 or i == total:
+                _log_phase_progress("enrich", i, total, len(enriched), phase_start)
             continue
 
         km = _fetch_key_metrics_ttm(sym, fmp_key)
@@ -418,8 +434,14 @@ def _fetch_universe_fresh() -> list[dict]:
             short_interest_pct=si_pct,
         )
         enriched.append(asdict(row))
+        if i % 200 == 0 or i == total:
+            _log_phase_progress("enrich", i, total, len(enriched), phase_start)
 
-    logger.info("Short universe: %d enriched rows ready for trigger scorer", len(enriched))
+    total_min = (time.monotonic() - job_started) / 60.0
+    logger.info(
+        "Short universe rebuild complete: %d enriched rows in %.1fm",
+        len(enriched), total_min,
+    )
     return enriched
 
 
@@ -446,8 +468,11 @@ def build_short_universe(
     else:
         rows = _load_cache()
         if rows is None:
-            logger.info("Short universe cache miss — spawning background rebuild; today returns []")
-            threading.Thread(target=_rebuild_cache_background, daemon=True).start()
+            logger.warning(
+                "Short universe cache missing — today's TRIGGER_SCORER run returns []. "
+                "Cache is populated by the weekly 'short_universe_weekly' scheduled job. "
+                "To seed manually: python -c 'from backend.screener.short_universe import _fetch_universe_fresh, _save_cache; rows=_fetch_universe_fresh(); _save_cache(rows) if rows else None'"
+            )
             return []
 
     if exclude_tickers:

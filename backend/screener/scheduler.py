@@ -7,7 +7,9 @@ the macro scheduler.
 Pattern mirrors backend/macro/scheduler.py.
 """
 
+import asyncio
 import logging
+import time
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -67,6 +69,37 @@ async def run_peer_multiples_job() -> None:
 
     except Exception as exc:
         logger.exception("Peer multiples refresh failed: %s", exc)
+
+
+async def run_short_universe_rebuild_job() -> None:
+    """
+    Weekly rebuild of the short-universe cache (~30–60 min). Runs in a worker
+    thread so the asyncio loop and other scheduled jobs aren't blocked. The
+    daily short screener reads this cache; no rebuild = empty TRIGGER_SCORER
+    output that day.
+    """
+    from backend.screener.short_universe import _fetch_universe_fresh, _save_cache
+
+    started = time.monotonic()
+    logger.info("=== Short universe weekly rebuild starting ===")
+    try:
+        rows = await asyncio.to_thread(_fetch_universe_fresh)
+        elapsed_m = (time.monotonic() - started) / 60.0
+        if rows:
+            _save_cache(rows)
+            logger.info(
+                "=== Short universe rebuild complete | %d rows | %.1fm ===",
+                len(rows), elapsed_m,
+            )
+        else:
+            # Cache deliberately not overwritten so a stale-but-real cache wins
+            # over an empty rebuild (e.g. transient FMP/Polygon outage).
+            logger.error(
+                "Short universe rebuild returned 0 rows after %.1fm — cache NOT overwritten",
+                elapsed_m,
+            )
+    except Exception as exc:
+        logger.exception("Short universe rebuild failed: %s", exc)
 
 
 async def run_short_screening_job() -> None:
@@ -131,5 +164,22 @@ def create_screener_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         misfire_grace_time=3600,  # run within 1 hour if missed (e.g. server restart)
     )
-    logger.info("Screener scheduler configured — daily at 16:00 ET (Mon–Fri)")
+    scheduler.add_job(
+        run_short_universe_rebuild_job,
+        trigger=CronTrigger(
+            day_of_week="sun",
+            hour=2,
+            minute=0,
+            timezone=ZoneInfo("America/New_York"),
+        ),
+        id="short_universe_weekly",
+        replace_existing=True,
+        misfire_grace_time=6 * 3600,  # generous — rebuild itself takes ~30–60m
+        coalesce=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Screener scheduler configured — daily 16:00 ET (Mon–Fri); "
+        "short_universe rebuild Sun 02:00 ET"
+    )
     return scheduler
