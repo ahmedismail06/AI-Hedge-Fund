@@ -33,6 +33,8 @@ from typing import Optional
 
 from backend.macro.indicators.fred_fetcher import FredBlock
 from backend.macro.indicators.market_fetcher import MarketBlock
+from backend.macro.inflation_engine import normalize
+from backend.macro.inflation_engine import config as inflation_config
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +304,16 @@ def _score_growth(ind: RawIndicators) -> float:
 def _score_inflation(ind: RawIndicators) -> float:
     """Score inflationary pressure on a -1.0 to +1.0 scale.
 
-    Positive scores indicate elevated inflation. Each CPI/PPI/PCE series and the
-    5Y breakeven are scored independently then averaged over non-None signals.
+    Positive scores indicate elevated inflation. Each CPI/Core CPI/PPI/PCE
+    series and the 5Y breakeven are scored independently via `tanh_norm`
+    against an economically anchored center (Fed target) and a series-specific
+    scale, then averaged over non-None signals.
+
+    Replaces the legacy 5-step bucket scorer (PR1 of the inflation engine
+    refactor — see docs/inflation_engine_design.md). The bucket version
+    produced 50bp score swings from 10bp data moves at threshold boundaries
+    and zero sensitivity elsewhere; the tanh version is smooth and monotone
+    everywhere.
 
     Parameters
     ----------
@@ -317,88 +327,18 @@ def _score_inflation(ind: RawIndicators) -> float:
     """
     signals: list[Optional[float]] = []
 
-    def _cpi_like(value: float) -> float:
-        """Step function for CPI and Core CPI YoY %."""
-        if value > 5:
-            return 1.0
-        elif value >= 3:
-            return 0.5
-        elif value >= 2:
-            return 0.0
-        elif value >= 1:
-            return -0.5   # below Fed target — disinflationary
-        else:
-            return -1.0   # < 1%: significant undershoot / deflation risk
+    def _score_one(value: Optional[float], params: inflation_config.TanhParams, name: str) -> Optional[float]:
+        if value is None:
+            return None
+        s = normalize.tanh_norm(value, params.center, params.scale)
+        logger.debug("inflation/%s=%.2f → signal=%.3f", name, value, s)
+        return s
 
-    # CPI YoY
-    if ind.cpi_yoy is not None:
-        s = _cpi_like(ind.cpi_yoy)
-        signals.append(s)
-        logger.debug("inflation/cpi_yoy=%.2f → signal=%.1f", ind.cpi_yoy, s)
-    else:
-        signals.append(None)
-
-    # Core CPI YoY
-    if ind.core_cpi_yoy is not None:
-        s = _cpi_like(ind.core_cpi_yoy)
-        signals.append(s)
-        logger.debug("inflation/core_cpi_yoy=%.2f → signal=%.1f", ind.core_cpi_yoy, s)
-    else:
-        signals.append(None)
-
-    # PPI YoY
-    if ind.ppi_yoy is not None:
-        ppi = ind.ppi_yoy
-        if ppi > 6:
-            s = 1.0
-        elif ppi >= 3:
-            s = 0.5
-        elif ppi >= 1:
-            s = 0.0
-        elif ppi >= 0:
-            s = -0.5   # flat producer prices
-        else:
-            s = -1.0   # outright PPI deflation
-        signals.append(s)
-        logger.debug("inflation/ppi_yoy=%.2f → signal=%.1f", ppi, s)
-    else:
-        signals.append(None)
-
-    # PCE YoY
-    if ind.pce_yoy is not None:
-        pce = ind.pce_yoy
-        if pce > 4:
-            s = 1.0
-        elif pce >= 2.5:
-            s = 0.5
-        elif pce >= 2.0:
-            s = 0.0
-        elif pce >= 1.5:
-            s = -0.5   # below Fed 2% target
-        else:
-            s = -1.0   # significantly below target / deflationary territory
-        signals.append(s)
-        logger.debug("inflation/pce_yoy=%.2f → signal=%.1f", pce, s)
-    else:
-        signals.append(None)
-
-    # 5Y Breakeven level
-    if ind.breakeven_5y is not None:
-        be = ind.breakeven_5y
-        if be > 3.0:
-            s = 1.0
-        elif be >= 2.5:
-            s = 0.5
-        elif be >= 2.0:
-            s = 0.0
-        elif be >= 1.5:
-            s = -0.5   # expectations anchored below target
-        else:
-            s = -1.0   # market pricing deflation / de-anchored to downside
-        signals.append(s)
-        logger.debug("inflation/breakeven_5y=%.2f → signal=%.1f", be, s)
-    else:
-        signals.append(None)
+    signals.append(_score_one(ind.cpi_yoy,        inflation_config.CPI_YOY,      "cpi_yoy"))
+    signals.append(_score_one(ind.core_cpi_yoy,   inflation_config.CORE_CPI_YOY, "core_cpi_yoy"))
+    signals.append(_score_one(ind.ppi_yoy,        inflation_config.PPI_YOY,      "ppi_yoy"))
+    signals.append(_score_one(ind.pce_yoy,        inflation_config.PCE_YOY,      "pce_yoy"))
+    signals.append(_score_one(ind.breakeven_5y,   inflation_config.BREAKEVEN_5Y, "breakeven_5y"))
 
     score = _safe_avg(signals)
     logger.debug("_score_inflation → %.4f", score)
