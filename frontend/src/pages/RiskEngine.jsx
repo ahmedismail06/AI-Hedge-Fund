@@ -8,6 +8,7 @@ import CorrelationMatrix from '../components/CorrelationMatrix';
 import StopLadderGauge from '../components/StopLadderGauge';
 import VarGauge from '../components/VarGauge';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
+import { SkeletonPanel, SkeletonStat, SkeletonChart } from '../components/Skeleton';
 
 const METRIC_META = {
   sharpe_ratio:      { label: 'Sharpe',          fmt: v => v.toFixed(2),  good: v => v >= 1,   warn: v => v >= 0.5 },
@@ -79,6 +80,7 @@ export default function RiskEngine() {
   const [showResolved, setShowResolved] = useState(false);
   const [runningMonitor, setRunningMonitor] = useState(false);
   const [runningMetrics, setRunningMetrics] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const loadAlerts = useCallback(async () => {
     try {
@@ -99,8 +101,7 @@ export default function RiskEngine() {
   }, []);
 
   useEffect(() => {
-    loadAlerts();
-    loadData();
+    Promise.all([loadAlerts(), loadData()]).finally(() => setLoading(false));
     const t1 = setInterval(loadAlerts, 30_000);
     const t2 = setInterval(loadData, 300_000);
     return () => { clearInterval(t1); clearInterval(t2); };
@@ -140,6 +141,24 @@ export default function RiskEngine() {
     date: h.date ? new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '',
     value: h.sharpe_ratio ?? null,
   })).filter(d => d.value != null);
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '12px' }}>
+        {[...Array(4)].map((_, i) => <SkeletonStat key={i} />)}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 320px', gap: '12px', alignItems: 'start' }}>
+        <div className="space-y-3">
+          <div className="panel"><SkeletonChart height={180} /></div>
+          <SkeletonPanel label="Risk Alerts" rows={5} />
+        </div>
+        <div className="space-y-3">
+          <SkeletonPanel label="Stop Ladder" rows={3} />
+          <SkeletonPanel label="Correlation" rows={4} />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>

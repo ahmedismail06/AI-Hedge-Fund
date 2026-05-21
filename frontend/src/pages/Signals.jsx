@@ -6,6 +6,7 @@ import { getPMDecisions } from '../api/pm';
 import SignalPipeline from '../components/SignalPipeline';
 import MemoCardCompact from '../components/MemoCardCompact';
 import MemoDetailDrawer from '../components/MemoDetailDrawer';
+import { SkeletonPanel, SkeletonBlock } from '../components/Skeleton';
 
 const SECTOR_FILTERS = ['All', 'Technology', 'Healthcare', 'Consumer', 'Industrials', 'Energy', 'Financials', 'Materials', 'Real Estate', 'Utilities'];
 
@@ -74,6 +75,7 @@ export default function Signals() {
   const [beneishOnly, setBeneishOnly] = useState(false);
   const [drawerMemo, setDrawerMemo] = useState(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
     try {
@@ -85,7 +87,9 @@ export default function Signals() {
       setWatchlist(Array.isArray(wl) ? wl : []);
       setMemos(Array.isArray(mh) ? mh : []);
       setPmDecisions(Array.isArray(dec) ? dec : []);
-    } catch {}
+    } catch {} finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -153,6 +157,21 @@ export default function Signals() {
     { key: 'value_score',     label: 'Value' },
     { key: 'momentum_score',  label: 'Momentum' },
   ];
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div className="panel" style={{ marginBottom: '12px', padding: '16px' }}>
+        <SkeletonBlock height={36} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: '12px', alignItems: 'start' }}>
+        <SkeletonPanel label="Screener Watchlist" rows={10} />
+        <div className="space-y-3">
+          <SkeletonPanel label="Research Memos" rows={4} />
+          <SkeletonPanel rows={3} />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>

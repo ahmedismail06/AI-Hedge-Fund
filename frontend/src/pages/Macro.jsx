@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { getBriefing, getRegime, getMacroHistory, getIndicators, runMacroAgent } from '../api/macro';
 import YieldCurveChart from '../components/YieldCurveChart';
 import { LineChart, Line, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { SkeletonPanel, SkeletonBlock, SkeletonChart } from '../components/Skeleton';
 
 const REGIME_STYLE = {
   'Risk-On':      { text: 'var(--green)',  bg: 'rgba(0,217,138,0.08)',  border: 'var(--green-border)'  },
@@ -117,11 +118,12 @@ export default function Macro() {
   const [history, setHistory]     = useState([]);
   const [indicators, setIndicators] = useState(null);
   const [running, setRunning]     = useState(false);
-  const [loading, setLoading]     = useState(false);
+  const [loading, setLoading]     = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const load = useCallback(async (force = false) => {
-    if (force) setLoading(true);
+    if (force) setRefreshing(true);
     try {
       const [r, b, h, ind] = await Promise.all([getRegime(), getBriefing(), getMacroHistory(), getIndicators()]);
       setRegime(r);
@@ -129,8 +131,10 @@ export default function Macro() {
       setHistory(Array.isArray(h) ? h.slice(-30) : []);
       setIndicators(ind);
       setLastUpdated(new Date());
-    } catch {}
-    if (force) setLoading(false);
+    } catch {} finally {
+      setLoading(false);
+      if (force) setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -157,6 +161,22 @@ export default function Macro() {
     date: h.date ? new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '',
     score: h.regime_score ?? null,
   })).filter(d => d.score != null);
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div className="panel rounded-xl p-4 mb-4"><SkeletonBlock height={56} /></div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 300px', gap: '12px', alignItems: 'start' }}>
+        <div className="space-y-3">
+          <SkeletonPanel label="Macro Briefing" rows={5} />
+          <div className="panel"><SkeletonChart height={140} /></div>
+        </div>
+        <div className="space-y-3">
+          <SkeletonPanel label="Indicators" rows={8} />
+          <SkeletonPanel label="Sub-scores" rows={4} />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
@@ -192,16 +212,16 @@ export default function Macro() {
           </div>
           <button
             onClick={() => load(true)}
-            disabled={loading}
+            disabled={refreshing}
             style={{
               fontSize: '9px', fontWeight: 700, fontFamily: 'Syne',
               padding: '5px 10px', borderRadius: '6px',
               background: 'var(--surface)', color: 'var(--text-2)',
               border: '1px solid var(--border)', cursor: 'pointer',
-              opacity: loading ? 0.5 : 1,
+              opacity: refreshing ? 0.5 : 1,
             }}
           >
-            {loading ? '…' : 'Refresh'}
+            {refreshing ? '…' : 'Refresh'}
           </button>
           {isAdmin && (
             <button

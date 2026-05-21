@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { cancelOrder, getFills, getExecutionStatus, getOrders, runExecutionCycle } from '../api/execution';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { BarChart, Bar, ReferenceLine, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
+import { SkeletonPanel, SkeletonStat, SkeletonChart } from '../components/Skeleton';
 
 /* ─── Helper components ──────────────────────────────────────────── */
 function SL({ children }) {
@@ -118,12 +119,13 @@ export default function Execution() {
   const [running, setRunning] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [marketStatus, setMarketStatus] = useState(getMarketStatus());
+  const [loading, setLoading] = useState(true);
   const autoCycleRef = useRef(false);
 
   const load = () => {
-    getOrders({ limit: 100 }).then(r => setOrders(Array.isArray(r) ? r : (r?.data || []))).catch(() => {});
-    getFills().then(r => setFills(Array.isArray(r) ? r : (r?.data || []))).catch(() => {});
-    getExecutionStatus()
+    const p1 = getOrders({ limit: 100 }).then(r => setOrders(Array.isArray(r) ? r : (r?.data || []))).catch(() => {});
+    const p2 = getFills().then(r => setFills(Array.isArray(r) ? r : (r?.data || []))).catch(() => {});
+    const p3 = getExecutionStatus()
       .then(r => {
         const data = r?.data || r || {};
         const connected = data.connected ?? data.ibkr_connected ?? false;
@@ -131,10 +133,11 @@ export default function Execution() {
         setExecStatus({ ...data, connected, env });
       })
       .catch(() => {});
+    return Promise.all([p1, p2, p3]);
   };
 
   useEffect(() => {
-    load();
+    load().finally(() => setLoading(false));
     const pollId = setInterval(load, 10_000);
     const clockId = setInterval(() => setMarketStatus(getMarketStatus()), 30_000);
     const cycleId = setInterval(async () => {
@@ -187,6 +190,22 @@ export default function Execution() {
   const slippageChartData = todayFills.map((f, i) => ({ i: i + 1, slippage: f.slippage_bps ?? 0, ticker: f.ticker }));
 
   const mkt = MKT_COLORS[marketStatus.colorKey] || MKT_COLORS.gray;
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div className="panel rounded-xl p-4 mb-3"><SkeletonStat style={{ border: 'none', padding: 0, background: 'none' }} /></div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '12px' }}>
+        {[...Array(3)].map((_, i) => <SkeletonStat key={i} />)}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 300px', gap: '12px', alignItems: 'start' }}>
+        <div className="space-y-3">
+          <SkeletonPanel label="Orders" rows={6} />
+          <SkeletonPanel label="Fills" rows={5} />
+        </div>
+        <div className="panel"><SkeletonChart height={200} /></div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>

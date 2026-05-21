@@ -12,6 +12,7 @@ import DecisionCard from '../components/DecisionCard';
 import PMDecisionDrawer from '../components/PMDecisionDrawer';
 import TickerDrawer from '../components/TickerDrawer';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { SkeletonPanel, SkeletonChart, SkeletonBlock } from '../components/Skeleton';
 
 const DECISION_STATUS_STYLE = {
   SENT_TO_EXECUTION:  { color: 'var(--green)',  bg: 'var(--green-bg)' },
@@ -72,6 +73,7 @@ export default function CommandCenter() {
   const [chartTab,    setChartTab]    = useState(null);
   const [confirm,     setConfirm]     = useState(null);
   const [memoMap,     setMemoMap]     = useState({});
+  const [loading,     setLoading]     = useState(true);
 
   const loadData = useCallback(async () => {
     try {
@@ -87,7 +89,9 @@ export default function CommandCenter() {
       setCriticals(Array.isArray(crit) ? crit : []);
       setDecisions(Array.isArray(dec) ? dec : []);
       setPmStatus(status);
-    } catch {}
+    } catch {} finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -136,6 +140,26 @@ export default function CommandCenter() {
   };
 
   const tickers = displayPositions.map(p => p.ticker);
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start' }}>
+        <div className="space-y-3">
+          <SkeletonPanel label="Open Book" rows={6} />
+          <SkeletonPanel rows={2} />
+        </div>
+        <div className="space-y-3">
+          <div className="panel"><SkeletonChart height={200} /></div>
+          <div className="panel"><SkeletonChart height={140} /></div>
+        </div>
+        <div className="space-y-3">
+          <SkeletonPanel label="PM Status" rows={3} />
+          <SkeletonPanel label="Risk Alerts" rows={3} />
+          <SkeletonPanel label="Decisions" rows={4} />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>

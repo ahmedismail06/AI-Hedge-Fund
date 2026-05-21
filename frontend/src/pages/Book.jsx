@@ -7,6 +7,7 @@ import SectorBreakdownChart from '../components/SectorBreakdownChart';
 import TickerDrawer from '../components/TickerDrawer';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ConvictionBadge from '../components/ConvictionBadge';
+import { SkeletonPanel, SkeletonStat, SkeletonChart } from '../components/Skeleton';
 
 const fmt$ = (v) => {
   if (v == null) return '—';
@@ -158,6 +159,7 @@ export default function Book() {
   const [regime,    setRegime]    = useState(null);
   const [selectedPosition, setSelectedPosition] = useState(null);
   const [confirm,   setConfirm]   = useState(null);
+  const [loading,   setLoading]   = useState(true);
 
   const loadPending   = useCallback(async () => { try { setPending(await getPending()); } catch {} }, []);
   const loadPositions = useCallback(async () => { try { setPositions(await getPositions()); } catch {} }, []);
@@ -171,7 +173,7 @@ export default function Book() {
         setClosed(Array.isArray(hist) ? hist : []);
       } catch {}
     };
-    init(); loadPending(); loadPositions();
+    Promise.all([init(), loadPending(), loadPositions()]).finally(() => setLoading(false));
     const t1 = setInterval(loadPending,   30_000);
     const t2 = setInterval(loadPositions, 60_000);
     return () => { clearInterval(t1); clearInterval(t2); };
@@ -216,6 +218,21 @@ export default function Book() {
     { key: 'active', label: `Active (${displayPositions.length})` },
     { key: 'closed', label: `Closed (${closed.length})` },
   ];
+
+  if (loading) return (
+    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '12px' }}>
+        {[...Array(4)].map((_, i) => <SkeletonStat key={i} />)}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 280px', gap: '12px', alignItems: 'start' }}>
+        <SkeletonPanel label="Positions" rows={8} />
+        <div className="space-y-3">
+          <SkeletonPanel label="Exposure" rows={3} />
+          <div className="panel"><SkeletonChart height={140} /></div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>

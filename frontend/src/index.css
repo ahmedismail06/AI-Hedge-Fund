@@ -594,4 +594,31 @@
     transition: opacity 0.15s;
   }
   .pipeline-node:hover { opacity: 0.8; }
+
+  /* ── Skeleton shimmer ─────────────────────────────── */
+  @keyframes shimmer {
+    0%   { background-position: -200% 0; }
+    100% { background-position:  200% 0; }
+  }
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--surface-2) 25%,
+      var(--surface-3) 50%,
+      var(--surface-2) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+    border-radius: 4px;
+  }
+  [data-theme="light"] .skeleton {
+    background: linear-gradient(
+      90deg,
+      #ede8e0 25%,
+      #e0d9cf 50%,
+      #ede8e0 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
 }
