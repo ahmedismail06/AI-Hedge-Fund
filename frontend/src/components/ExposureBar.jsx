@@ -1,5 +1,6 @@
 export const REGIME_CAPS = {
   'Risk-On': 150,
+  'Constructive': 135,
   'Risk-Off': 80,
   'Transitional': 120,
   'Stagflation': 100,

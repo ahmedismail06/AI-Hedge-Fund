@@ -90,7 +90,7 @@ class ExposureState(BaseModel):
     position_count: int = Field(
         description="Total number of open positions (long + short)."
     )
-    regime: Literal["Risk-On", "Risk-Off", "Transitional", "Stagflation"] = Field(
+    regime: Literal["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"] = Field(
         description="Active macro regime at the time this state was computed."
     )
 
@@ -197,7 +197,7 @@ class SizingRecommendation(BaseModel):
         default=None,
         description="GICS sector of the ticker, e.g. 'Healthcare'. Used for concentration checks.",
     )
-    regime_at_sizing: Literal["Risk-On", "Risk-Off", "Transitional", "Stagflation"] = Field(
+    regime_at_sizing: Literal["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"] = Field(
         description="Macro regime active when this sizing was computed."
     )
     portfolio_state_after: PortfolioSnapshot = Field(

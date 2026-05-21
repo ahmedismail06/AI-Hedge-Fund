@@ -62,7 +62,12 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
 confidence_breakdown dimensions (each 0.0–1.0):
 - data_quality: how reliable is the exposure and macro data driving this assessment
 - thesis_quality: how clearly does the portfolio state deviate from regime guidance — large, unambiguous deviation scores high; marginal or ambiguous deviation scores low
-- timing: analytical confidence in the rebalancing timing — consider regime clarity (confidence score), current stress signals, whether exposure drift is accelerating or stabilising, and proximity of known catalysts (earnings, macro events) that could shift the regime. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the rebalancing rationale itself).
+- timing: analytical confidence in the rebalancing timing — consider current stress signals, whether exposure drift is accelerating or stabilising, and proximity of known catalysts (earnings, macro events) that could shift the regime. Use these anchors:
+  0.0–0.30 = poor timing — about to flip into Risk-Off, or rebalancing into a deteriorating tape, or regime_confidence < 3
+  0.30–0.50 = ambiguous — drift is small or non-directional
+  0.50–0.70 = neutral-to-favourable — drift is clear and unlikely to reverse imminently; this is the DEFAULT in normal Transitional/Constructive markets (regime_confidence 5–7)
+  0.70–1.00 = strong — drift is large, accelerating, and a clear regime tailwind is reinforcing the rebalance direction
+  Do NOT mechanically tie timing to regime_confidence; 5–7 is the steady state, not weak timing. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the rebalancing rationale itself).
 - portfolio_fit: how appropriate is the target exposure given the current opportunity set and regime tilt
 
 Set the overall `confidence` as a weighted average of the breakdown:

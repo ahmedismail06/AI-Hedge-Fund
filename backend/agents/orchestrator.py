@@ -2098,7 +2098,10 @@ def run_pm_cycle(
                         action_details={"hard_block_reason": failed},
                         reasoning=f"Hard block: {', '.join(failed)}",
                         risk_assessment="Position violated hard constraints before PM evaluation.",
-                        confidence=1.0,
+                        # Pre-Claude hard blocks bypass PM evaluation entirely — no view was
+                        # formed, so confidence is 0.0. Dashboards / calibration must filter
+                        # execution_status='BLOCKED' to avoid biasing REJECT-bucket averages.
+                        confidence=0.0,
                         context_snapshot=_snapshot(base_ctx),
                         hard_blocks_checked=hard_blocks,
                         execution_status="BLOCKED",

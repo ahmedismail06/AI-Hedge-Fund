@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Regime guidance: gross/net caps per regime (fractions, not %)
 _REGIME_CAPS = {
     "Risk-On":       {"gross": 1.50, "net": 0.50},
+    "Constructive":  {"gross": 1.35, "net": 0.35},
     "Risk-Off":      {"gross": 0.80, "net": 0.10},
     "Transitional":  {"gross": 1.20, "net": 0.20},
     "Stagflation":   {"gross": 1.00, "net": 0.00},
@@ -232,12 +233,21 @@ def format_calibration_context(base_ctx: dict) -> str:
 
     calibration = base_ctx.get("calibration_anchor", {})
     if calibration:
+        total_n = sum(stats["n"] for stats in calibration.values())
         parts.append("### Historical Calibration (conviction bucket → avg outcome)")
-        for bucket, stats in calibration.items():
+        if total_n < 10:
             parts.append(
-                f"  {bucket}: n={stats['n']}, avg={stats['avg_return_pct']:+.1f}%, "
-                f"win_rate={stats['win_rate']:.0%}"
+                f"  ⚠ Small sample (n={total_n} total). Treat these stats as directional, "
+                f"not load-bearing. Empty buckets are shown so you can see where evidence is missing."
             )
+        for bucket, stats in calibration.items():
+            if stats["n"] == 0:
+                parts.append(f"  {bucket}: n=0 (no evidence yet)")
+            else:
+                parts.append(
+                    f"  {bucket}: n={stats['n']}, avg={stats['avg_return_pct']:+.1f}%, "
+                    f"win_rate={stats['win_rate']:.0%}"
+                )
         parts.append("")
 
     return "\n".join(parts)
@@ -279,12 +289,20 @@ def format_capabilities_context(base_ctx: dict) -> str:
     return "\n".join(lines)
 
 
+_CALIBRATION_MIN_ROWS = 3
+
+
 def _build_calibration_anchor(rows: list) -> dict:
     """
     Aggregate pm_calibration rows into conviction bucket → outcome stats.
-    Returns empty dict if insufficient data (<5 rows).
+
+    Activates whenever ≥3 rows with a non-null return_pct exist. Buckets with
+    zero rows are still returned (with n=0) so Claude can see the gap rather
+    than silently inferring "no data". The prompt-formatting layer should
+    surface small-sample warnings when total n < 10.
     """
-    if len(rows) < 5:
+    valid_rows = [r for r in rows if r.get("return_pct") is not None]
+    if len(valid_rows) < _CALIBRATION_MIN_ROWS:
         return {}
 
     buckets: dict = {
@@ -294,11 +312,9 @@ def _build_calibration_anchor(rows: list) -> dict:
         "low (<0.4)": [],
     }
 
-    for row in rows:
+    for row in valid_rows:
         conf = row.get("confidence_at_entry") or 0
-        ret = row.get("return_pct")
-        if ret is None:
-            continue
+        ret = row["return_pct"]
         if conf >= 0.8:
             buckets["high (0.8–1.0)"].append(ret)
         elif conf >= 0.6:
@@ -311,6 +327,7 @@ def _build_calibration_anchor(rows: list) -> dict:
     result = {}
     for label, returns in buckets.items():
         if not returns:
+            result[label] = {"n": 0, "avg_return_pct": None, "win_rate": None}
             continue
         avg = sum(returns) / len(returns)
         win_rate = sum(1 for r in returns if r > 0) / len(returns)

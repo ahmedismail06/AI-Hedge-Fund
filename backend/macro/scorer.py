@@ -117,7 +117,7 @@ class DimensionalScores:
     """Market stress level, -1.0 (calm) to +1.0 (high stress)."""
 
     regime: str
-    """Classified macro regime: Risk-On | Risk-Off | Stagflation | Transitional."""
+    """Classified macro regime: Risk-On | Constructive | Risk-Off | Stagflation | Transitional."""
 
     regime_score: float
     """Overall macro health score, 0–100 (higher = better environment)."""
@@ -563,9 +563,11 @@ def _score_stress(ind: RawIndicators) -> float:
 def classify_regime(growth: float, inflation: float, fed: float, stress: float) -> str:
     """Classify the macro regime from dimensional scores.
 
-    Checks in strict priority order: Risk-On, Risk-Off, Stagflation, Transitional.
-    Risk-Off is evaluated before Stagflation because acute stress always overrides
-    stagflationary concerns for positioning purposes.
+    Checks in strict priority order: Risk-On, Risk-Off, Stagflation, Constructive,
+    Transitional. Risk-Off is evaluated before Stagflation because acute stress
+    always overrides stagflationary concerns for positioning purposes.
+    Constructive sits between Risk-On and Transitional — growth is positive and
+    stress is contained, but inflation runs ≥0.5 (the only block to full Risk-On).
 
     Parameters
     ----------
@@ -581,7 +583,7 @@ def classify_regime(growth: float, inflation: float, fed: float, stress: float) 
     Returns
     -------
     str
-        One of: "Risk-On", "Risk-Off", "Stagflation", "Transitional".
+        One of: "Risk-On", "Constructive", "Risk-Off", "Stagflation", "Transitional".
     """
     if growth > 0 and inflation < 0.5 and stress < 0.3:
         return "Risk-On"
@@ -589,6 +591,10 @@ def classify_regime(growth: float, inflation: float, fed: float, stress: float) 
         return "Risk-Off"
     if growth < 0 and inflation > 0.6:
         return "Stagflation"
+    # Constructive: growth positive, stress contained, but inflation blocks Risk-On.
+    # Distinguishes "OK environment with sticky inflation" from genuine signal uncertainty.
+    if growth > 0 and stress < 0.3:
+        return "Constructive"
     return "Transitional"
 
 
@@ -649,6 +655,16 @@ def compute_regime_confidence(
             score += 4.0
         if stress > 0.3:
             score += 3.0
+
+    elif regime == "Constructive":
+        if growth > 0.3:
+            score += 3.0
+        if stress < 0.2:
+            score += 3.0
+        if inflation < 0.7:
+            score += 2.0
+        if fed > -0.2:
+            score += 2.0
 
     elif regime == "Transitional":
         # Fallback only — macro_agent overrides this with the LLM's signal-clarity assessment

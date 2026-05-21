@@ -33,6 +33,7 @@ REGIME_CAPS: dict[str, dict[str, float]] = {
     # max_gross_short — absolute cap on summed short notional / portfolio_value.
     # Tighter than total gross because shorts carry asymmetric loss.
     "Risk-On":      {"max_gross": 1.50, "max_net_long":  0.50, "max_net_short":  0.00, "max_gross_short": 0.50},
+    "Constructive": {"max_gross": 1.35, "max_net_long":  0.35, "max_net_short": -0.15, "max_gross_short": 0.55},
     "Transitional": {"max_gross": 1.20, "max_net_long":  0.20, "max_net_short": -0.20, "max_gross_short": 0.60},
     "Risk-Off":     {"max_gross": 0.80, "max_net_long":  0.10, "max_net_short": -0.10, "max_gross_short": 0.40},
     "Stagflation":  {"max_gross": 1.00, "max_net_long":  0.00, "max_net_short": -0.20, "max_gross_short": 0.60},

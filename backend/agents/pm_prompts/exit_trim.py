@@ -66,7 +66,7 @@ confidence_breakdown dimensions (each 0.0–1.0):
   0.25–0.50 = unresolved binary — thesis is alive but outcome is a coin flip on a single upcoming event with no intermediate signals
   0.50–0.75 = thesis intact and progressing — evidence accumulating toward the catalyst, intermediate signals supportive
   0.75–1.00 = thesis confirmed and ahead of expectations — catalyst materialising or repricing clearly underway
-- timing: analytical/strategic timing quality of this decision — consider price action vs. recent range, stop proximity, days to next catalyst, and whether the stock is trending or mean-reverting. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the analytical decision itself).
+- timing: analytical/strategic timing quality of this decision — consider price action vs. recent range, stop proximity, days to next catalyst, and whether the stock is trending or mean-reverting. Default to 0.5–0.7 in normal markets; reserve <0.3 for acute stress or imminent adverse catalyst, and >0.7 for clear, decision-supporting price action. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the analytical decision itself).
 - portfolio_fit: how well does this decision fit the current portfolio exposure and regime
 
 Set the overall `confidence` as a weighted average of the breakdown:

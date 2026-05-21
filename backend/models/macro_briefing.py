@@ -39,7 +39,7 @@ class MacroBriefing(BaseModel):
 
     # ── Required fields (quantitative scorer + LLM overlay) ──────────────────
     date: str  # YYYY-MM-DD
-    regime: Literal["Risk-On", "Risk-Off", "Transitional", "Stagflation"]
+    regime: Literal["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"]
     regime_score: float           # 0–100 composite quantitative score
     override_flag: bool           # True if LLM qualitative overlay overrode quant score
     indicator_scores: list[IndicatorScore]
@@ -51,7 +51,7 @@ class MacroBriefing(BaseModel):
 
     # ── Optional / defaulted fields ───────────────────────────────────────────
     override_reason: Optional[str] = None
-    previous_regime: Optional[Literal["Risk-On", "Risk-Off", "Transitional", "Stagflation"]] = None
+    previous_regime: Optional[Literal["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"]] = None
     regime_changed: bool = False      # True if regime differs from previous day's briefing
     growth_score: float = 0.0         # -1.0 to +1.0; avg of GDP, PMI, Payrolls, Jobless Claims signals
     inflation_score: float = 0.0      # -1.0 to +1.0; high = more inflationary pressure

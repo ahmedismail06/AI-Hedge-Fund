@@ -183,13 +183,17 @@ THINKING ORDER — complete these steps in sequence before producing any output:
    provide your best estimate from available signals.
 
 3. REGIME CLASSIFICATION:
-   Classify as one of: Risk-On | Risk-Off | Stagflation | Transitional.
+   Classify as one of: Risk-On | Constructive | Risk-Off | Stagflation | Transitional.
    Evaluate in priority order (use your dimensional scores from Step 2):
 
    a. Risk-On: growth_score > 0 AND inflation_score < 0.5 AND stress_score < 0.3. All three must hold.
    b. Risk-Off: stress_score > 0.4 OR (growth_score < -0.3 AND fed_score < 0). Stress overrides all.
    c. Stagflation: growth_score < 0 AND inflation_score > 0.6.
-   d. Transitional: none of the above — signals genuinely mixed or inconclusive.
+   d. Constructive: growth_score > 0 AND stress_score < 0.3, but inflation_score ≥ 0.5
+      blocks full Risk-On. The environment is constructive for risk-taking but not unambiguously
+      bullish — sticky inflation is the binding constraint, growth and stress are favorable.
+   e. Transitional: none of the above — signals genuinely mixed, growth is flat-to-negative,
+      or stress is elevated without crossing the Risk-Off threshold.
 
    These guardrails are directional guides, not mechanical rules. If FOMC language provides
    a clear, explicit signal that the above priority order alone would miss, you may deviate —
@@ -227,6 +231,7 @@ THINKING ORDER — complete these steps in sequence before producing any output:
 
    Regime defaults:
    Risk-On: SaaS overweight; Industrials overweight (book-to-bill > 1.0); Healthcare neutral.
+   Constructive: SaaS neutral-to-overweight (rate-sensitivity is the watch-item); Industrials overweight if book-to-bill > 1.0; Healthcare neutral.
    Risk-Off: SaaS underweight; Healthcare overweight; Industrials neutral (backlog coverage > 12m).
    Stagflation: SaaS underweight; Healthcare overweight (CMS reimbursement certainty); Industrials neutral.
    Transitional OR regime_confidence < 7.0: all three neutral. Name what signal would change each tilt.
@@ -285,6 +290,12 @@ Risk-On:
   Sector tilt: favor SaaS (revenue visibility) and high-growth Industrials (book-to-bill > 1.0)
   Stop posture: standard Tier 1 at -8% position, Tier 2 at -15% strategy
 
+Constructive:
+  Gross exposure: up to 135% gross, max 35% net long (between Risk-On and Transitional)
+  Entry sizing: Large positions (>6% NAV) require conviction ≥ 8.0 AND a non-rate-sensitive thesis.
+  Sector tilt: SaaS neutral-to-overweight only with explicit rate-resilience evidence; Industrials overweight on book-to-bill > 1.0
+  Stop posture: standard Tier 1 at -8% position, Tier 2 at -15% strategy
+
 Risk-Off:
   Gross exposure: reduce to 80% gross maximum; no new longs above medium conviction
   Sector tilt: rotate toward asset-light Healthcare and Industrials with backlog coverage > 12 months
@@ -330,7 +341,7 @@ Required JSON schema:
   "inflation_score": <float in [-1.0, +1.0]>,
   "fed_score": <float in [-1.0, +1.0]>,
   "stress_score": <float in [-1.0, +1.0]>,
-  "regime": <"Risk-On" | "Risk-Off" | "Stagflation" | "Transitional">,
+  "regime": <"Risk-On" | "Constructive" | "Risk-Off" | "Stagflation" | "Transitional">,
   "regime_score": <float in [0.0, 100.0]>,
   "regime_confidence": <float in [0.0, 10.0]>,
   "fed_tone": <float in [-1.0, +1.0]>,

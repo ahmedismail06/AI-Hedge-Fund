@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _REGIME_WEIGHTS: dict[str, dict[str, float]] = {
     "Risk-On":      {"quality": 0.50, "value": 0.30, "momentum": 0.20},
+    "Constructive": {"quality": 0.52, "value": 0.30, "momentum": 0.18},
     "Transitional": {"quality": 0.55, "value": 0.30, "momentum": 0.15},
     "Risk-Off":     {"quality": 0.60, "value": 0.30, "momentum": 0.10},
     "Stagflation":  {"quality": 0.55, "value": 0.35, "momentum": 0.10},

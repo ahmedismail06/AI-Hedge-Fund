@@ -26,7 +26,7 @@ Risk-Off / Stagflation : entry × (1 − 0.05)  (tighter)
 
 # ── Conviction parameter table ────────────────────────────────────────────────
 
-_VALID_REGIMES = {"Risk-On", "Risk-Off", "Transitional", "Stagflation"}
+_VALID_REGIMES = {"Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"}
 
 _TIERS: list[dict] = [
     {

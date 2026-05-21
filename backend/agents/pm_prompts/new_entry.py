@@ -89,7 +89,12 @@ confidence_breakdown dimensions (each 0.0–1.0):
   0.25–0.50 = thesis present but binary / high uncertainty on a single event
   0.50–0.75 = differentiated variant perception with identifiable catalyst and supporting evidence
   0.75–1.00 = strong variant perception, catalyst imminent or already partially confirming
-- timing: analytical/strategic entry timing quality — consider technical setup, earnings proximity, macro regime clarity, and whether the catalyst window is open. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the entry rationale itself).
+- timing: analytical/strategic entry timing quality — consider technical setup vs. recent range, proximity to known catalysts (earnings within 30 days, upcoming macro releases), and whether the catalyst window is open vs. already-priced. Use these anchors:
+  0.0–0.30 = entry is actively poor (extended chase, days from earnings with no edge, or genuinely acute macro stress — Risk-Off / regime_confidence < 3)
+  0.30–0.50 = no clear edge on timing — drifting / range-bound, neutral setup
+  0.50–0.70 = neutral-to-favourable setup, no acute headwinds; this is the DEFAULT for an unremarkable normal market (including Transitional/Constructive regimes with regime_confidence 5–7)
+  0.70–1.00 = setup is actively favourable — pullback near support, catalyst imminent, or stock breaking out of accumulation
+  Do NOT penalize timing just because the regime is Transitional or regime_confidence sits in 5–7. That is the normal steady state — penalize only on acute stress signals or explicit catalyst headwinds. Do NOT factor in market hours (that constraint is enforced as a separate hard block and has no bearing on the quality of the entry rationale itself).
 - portfolio_fit: how well does this position fit current exposure, regime, and concentration limits
 
 Set the overall `confidence` as a weighted average of the breakdown:

@@ -23,6 +23,7 @@ DEFAULT_BETA = 1.2
 DEFAULT_RISK_FREE_RATE = 0.045
 TERMINAL_GROWTH_BY_REGIME = {
     "Risk-On": 0.030,
+    "Constructive": 0.028,
     "Transitional": 0.025,
     "Risk-Off": 0.020,
     "Stagflation": 0.015,

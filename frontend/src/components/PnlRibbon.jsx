@@ -5,6 +5,7 @@ import { getRegime } from '../api/macro';
 
 const REGIME_CONFIG = {
   'Risk-On':      { dotClass: 'dot-green', colorVar: 'var(--regime-on-text)',  label: 'RISK-ON' },
+  'Constructive': { dotClass: 'dot-green', colorVar: 'var(--regime-on-text)',  label: 'CONSTRUCTIVE' },
   'Risk-Off':     { dotClass: 'dot-red',   colorVar: 'var(--regime-off-text)', label: 'RISK-OFF' },
   'Stagflation':  { dotClass: 'dot-amber', colorVar: 'var(--regime-st-text)',  label: 'STAGFLATION' },
   'Transitional': { dotClass: 'dot-blue',  colorVar: 'var(--regime-tr-text)',  label: 'TRANSITIONAL' },
