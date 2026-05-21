@@ -17,7 +17,12 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
+
+# ── ensure repo root on sys.path ─────────────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 
