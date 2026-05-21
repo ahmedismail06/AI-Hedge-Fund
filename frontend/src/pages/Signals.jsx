@@ -135,9 +135,9 @@ export default function Signals() {
   // Pipeline counts — keys must match STAGES in SignalPipeline.jsx
   const universeCount  = 800;
   const screenedCount  = watchlist.length;
-  // PENDING memos = research just completed but not yet reviewed (closest proxy to "in research")
-  const researchCount  = memos.filter(m => m.status === 'PENDING').length;
-  const memosDoneCount = memos.filter(m => m.status !== 'PENDING').length;
+  // PENDING_PM_REVIEW = research done, awaiting PM decision
+  const researchCount  = memos.filter(m => m.status === 'PENDING_PM_REVIEW').length;
+  const memosDoneCount = memos.filter(m => ['APPROVED', 'REJECTED', 'WATCHLIST', 'DEFERRED'].includes(m.status)).length;
   const decisionsCount = pmDecisions.filter(d => d.status === 'PENDING_HUMAN').length;
 
   // Filter + sort screener table
@@ -374,7 +374,7 @@ export default function Signals() {
           <Panel>
             <PanelHeader
               label="Research Memos"
-              title={`${memosDone} total · ${memos.filter(m => m.status === 'APPROVED').length} approved · ${memos.filter(m => m.status === 'PENDING_PM_REVIEW').length} pending`}
+              title={`${memos.length} total · ${memos.filter(m => m.status === 'APPROVED').length} approved · ${memos.filter(m => m.status === 'PENDING_PM_REVIEW').length} pending review`}
             />
             <div className="p-3 space-y-2 term-scroll" style={{ maxHeight: '560px', overflowY: 'auto' }}>
               {memos.length === 0 ? (

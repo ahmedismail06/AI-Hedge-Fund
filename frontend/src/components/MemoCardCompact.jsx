@@ -7,10 +7,12 @@ const VERDICT_STYLES = {
 };
 
 const STATUS_STYLES = {
-  COMPLETE:   { color: 'var(--green)',  label: 'Done' },
-  GENERATING: { color: 'var(--amber)',  label: 'Generating…' },
-  PENDING:    { color: 'var(--text-3)', label: 'Pending' },
-  ERROR:      { color: 'var(--red)',    label: 'Error' },
+  PENDING:           { color: 'var(--text-3)', label: 'New' },
+  PENDING_PM_REVIEW: { color: 'var(--amber)',  label: 'Pending Review' },
+  APPROVED:          { color: 'var(--green)',  label: 'Approved' },
+  REJECTED:          { color: 'var(--red)',    label: 'Rejected' },
+  WATCHLIST:         { color: 'var(--blue)',   label: 'Watchlist' },
+  DEFERRED:          { color: 'var(--text-3)', label: 'Deferred' },
 };
 
 function fmtDate(d) {
