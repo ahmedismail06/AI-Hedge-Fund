@@ -14,58 +14,65 @@ Design reference: docs/inflation_engine_design.md §2.5
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
 from datetime import datetime
-from typing import Optional, Protocol, runtime_checkable
+
+from backend.db.utils import get_supabase_client
+from backend.macro.inflation_engine.types import ConsensusExpectation, ConsensusSource
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Data types
+# ManualConsensusSource — PR4 implementation
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ConsensusExpectation:
-    """A single consensus expectation for one indicator release.
+class ManualConsensusSource:
+    """Reads from the ``inflation_consensus`` Supabase table.
 
-    Fields
-    ------
-    indicator:
-        Series name, e.g. ``"cpi_yoy"``.
-    expected_value:
-        Consensus estimate before the release.
-    actual_value:
-        Actual printed value. None if not yet released.
-    release_dt:
-        When the release occurred (or is scheduled).
-    source:
-        Vendor / data source identifier, e.g. ``"Manual"`` or
-        ``"TradingEconomics"``.
-    """
-
-    indicator: str
-    expected_value: float
-    actual_value: Optional[float]
-    release_dt: datetime
-    source: str
-
-
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ConsensusSource(Protocol):
-    """Interface for consensus-expectation data sources.
-
-    Any adapter (Manual, TradingEconomics, Econoday, …) must implement this
-    single method.  The surprise layer calls it on every scoring run.
+    The table is populated by hand or by scheduled vendor-scraping scripts.
     """
 
     def get_expectations(self, since: datetime) -> list[ConsensusExpectation]:
-        """Return all consensus expectations with release_dt >= ``since``."""
-        ...  # pragma: no cover
+        """Fetch expectations from Supabase."""
+        try:
+            supabase = get_supabase_client()
+            # We use .isoformat() to ensure proper date/time comparison in Supabase/PostgREST.
+            response = (
+                supabase.table("inflation_consensus")
+                .select("*")
+                .gte("release_dt", since.isoformat())
+                .order("release_dt", desc=True)
+                .execute()
+            )
+
+            results: list[ConsensusExpectation] = []
+            for row in response.data:
+                results.append(
+                    ConsensusExpectation(
+                        indicator=row["indicator"],
+                        expected_value=float(row["expected_value"]),
+                        actual_value=float(row["actual_value"])
+                        if row["actual_value"] is not None
+                        else None,
+                        release_dt=datetime.fromisoformat(
+                            row["release_dt"].replace("Z", "+00:00")
+                        ),
+                        source=row["source"],
+                    )
+                )
+
+            logger.debug(
+                "ManualConsensusSource: fetched %d expectations since %s",
+                len(results),
+                since.date(),
+            )
+            return results
+
+        except Exception as e:
+            logger.error("ManualConsensusSource: failed to fetch from Supabase: %s", e)
+            return []
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +87,6 @@ class NullConsensusSource:
     confidence=0.0, ...)``, which the aggregator treats as "no data" and
     drops, redistributing the surprise layer's weight proportionally to
     the remaining three layers.
-
-    This is the default in PR3.  Swap to ``ManualConsensusSource`` in PR4
-    without changing any other code.
     """
 
     def get_expectations(self, since: datetime) -> list[ConsensusExpectation]:  # noqa: ARG002

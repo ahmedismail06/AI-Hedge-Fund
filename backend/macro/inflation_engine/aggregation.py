@@ -41,6 +41,7 @@ _LAYER_NAMES = ["structural", "momentum", "market_expectations", "surprise"]
 def aggregate(
     layers: dict[str, LayerOutput],
     weights: Optional[AggregationWeights] = None,
+    layer_ics: Optional[dict[str, float]] = None,
 ) -> InflationScoreResult:
     """Combine layer outputs into a final InflationScoreResult.
 
@@ -53,6 +54,10 @@ def aggregate(
     weights:
         Base weights per layer.  Defaults to ``DEFAULT_AGGREGATION_WEIGHTS``
         (structural=0.40, momentum=0.25, market=0.25, surprise=0.10).
+    layer_ics:
+        Optional information coefficients (IC) per layer. Used for dynamic
+        weighting in PR4. When provided, the effective weight is scaled by
+        ``max(0.5, IC)``. When None, all ICs are treated as 1.0 (static mode).
 
     Returns
     -------
@@ -64,19 +69,29 @@ def aggregate(
         weights = DEFAULT_AGGREGATION_WEIGHTS
 
     base_weights = weights.as_dict()
+    
+    # ── 1. Determine aggregate method and ICs ────────────────────────────────
+    method = "dynamic" if layer_ics is not None else "static"
+    ics = layer_ics if layer_ics is not None else {n: 1.0 for n in _LAYER_NAMES}
 
-    # ── 1. Compute effective weights ─────────────────────────────────────────
-    # effective_weight = base_weight × confidence
+    # ── 2. Compute effective weights ─────────────────────────────────────────
+    # effective_weight = base_weight × confidence × max(0.5, IC)
     effective: dict[str, float] = {}
     for name in _LAYER_NAMES:
         layer = layers.get(name)
         conf = layer.confidence if layer is not None else 0.0
         bw = base_weights.get(name, 0.0)
-        effective[name] = bw * conf
+        ic = ics.get(name, 1.0)
+        
+        # IC-based multiplier: floor at 0.5 to prevent silencing layers entirely
+        # when they have bad recent performance (avoids over-fitting).
+        ic_multiplier = max(0.5, ic)
+        
+        effective[name] = bw * conf * ic_multiplier
 
     total_eff = sum(effective.values())
 
-    # ── 2. Compute normalised weights and final score ─────────────────────────
+    # ── 3. Compute normalised weights and final score ─────────────────────────
     normalised: dict[str, float] = {}
     if total_eff == 0.0:
         # All layers have zero confidence — equal weighting fallback.
@@ -90,7 +105,7 @@ def aggregate(
                 confidence=0.0,
                 layers=layers,
                 contributors_top5=[],
-                aggregate_method="static",
+                aggregate_method=method,
                 stale_warnings=["all layers have zero confidence"],
                 diagnostics={"base_weights": base_weights, "effective_weights": effective},
             )
@@ -113,7 +128,7 @@ def aggregate(
 
     score = max(-1.0, min(1.0, score))
 
-    # ── 3. Aggregate confidence ───────────────────────────────────────────────
+    # ── 4. Aggregate confidence ───────────────────────────────────────────────
     # Aggregate confidence = weighted average of layer confidences (by base weight,
     # excluding layers with base_weight=0).
     total_bw = sum(base_weights[n] for n in _LAYER_NAMES)
@@ -125,14 +140,14 @@ def aggregate(
     else:
         agg_confidence = 0.0
 
-    # ── 4. Collect stale warnings ─────────────────────────────────────────────
+    # ── 5. Collect stale warnings ─────────────────────────────────────────────
     stale_warnings: list[str] = []
     for name in _LAYER_NAMES:
         layer = layers.get(name)
         if layer is not None:
             stale_warnings.extend(layer.notes)
 
-    # ── 5. Top-5 contributors by |signal × weight × confidence| ─────────────
+    # ── 6. Top-5 contributors by |signal × weight × confidence| ─────────────
     all_contributions: list[tuple[float, Contribution]] = []
     for name in _LAYER_NAMES:
         layer = layers.get(name)
@@ -147,9 +162,10 @@ def aggregate(
     all_contributions.sort(key=lambda x: x[0], reverse=True)
     top5 = [c for _, c in all_contributions[:5]]
 
-    # ── 6. Diagnostics ────────────────────────────────────────────────────────
+    # ── 7. Diagnostics ────────────────────────────────────────────────────────
     diagnostics: dict = {
         "base_weights": base_weights,
+        "layer_ics": {n: round(ics.get(n, 1.0), 4) for n in _LAYER_NAMES},
         "effective_weights": {n: round(effective[n], 6) for n in _LAYER_NAMES},
         "normalised_weights": {n: round(normalised[n], 6) for n in _LAYER_NAMES},
         "layer_scores": {
@@ -163,8 +179,9 @@ def aggregate(
     }
 
     logger.debug(
-        "aggregate → score=%.4f  confidence=%.4f  "
+        "aggregate (%s) → score=%.4f  confidence=%.4f  "
         "norm_weights=%s  layer_scores=%s",
+        method,
         score,
         agg_confidence,
         {n: f"{normalised[n]:.3f}" for n in _LAYER_NAMES},
@@ -176,7 +193,7 @@ def aggregate(
         confidence=agg_confidence,
         layers=layers,
         contributors_top5=top5,
-        aggregate_method="static",
+        aggregate_method=method,
         stale_warnings=stale_warnings,
         diagnostics=diagnostics,
     )

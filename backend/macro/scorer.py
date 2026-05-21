@@ -34,19 +34,19 @@ from typing import Optional
 
 from backend.macro.indicators.fred_fetcher import FredBlock
 from backend.macro.indicators.market_fetcher import MarketBlock
-from backend.macro.inflation_engine import normalize
+from backend.macro.inflation_engine import (
+    score_inflation,
+    IndicatorMeta,
+    FREQUENCY_DAYS,
+    normalize,
+)
 from backend.macro.inflation_engine import config as inflation_config
 from backend.macro.inflation_engine.staleness import (
     confidence_from_meta,
     staleness_confidence,
 )
-from backend.macro.inflation_engine.types import FREQUENCY_DAYS, IndicatorMeta
 from backend.macro.inflation_engine.ingestion.fred_inflation import build_snapshot_from_raw
-from backend.macro.inflation_engine.layers import structural as structural_layer
-from backend.macro.inflation_engine.layers import momentum as momentum_layer
-from backend.macro.inflation_engine.layers import market_expectations as market_layer
-from backend.macro.inflation_engine.layers import surprise as surprise_layer
-from backend.macro.inflation_engine.aggregation import aggregate
+from backend.macro.inflation_engine.ingestion.consensus import ManualConsensusSource
 
 logger = logging.getLogger(__name__)
 
@@ -349,23 +349,14 @@ def _score_growth(ind: RawIndicators) -> float:
 def _score_inflation(ind: RawIndicators) -> float:
     """Score inflationary pressure on a -1.0 to +1.0 scale.
 
-    **PR 3 — layered architecture:** internally builds an InflationSnapshot,
-    calls each of the four scoring layers (structural, momentum,
-    market_expectations, surprise), and aggregates them via confidence-weighted
-    base weights.
+    **PR 4 — dynamic weighting + surprises:** delegates to the layered
+    scoring engine entry point (``score_inflation``) with the manual
+    consensus source enabled.
 
     Signature unchanged: ``(ind: RawIndicators) -> float``.
     Returns ``result.score`` from the layered engine.
-    Full ``InflationScoreResult`` is logged at DEBUG for observability.
-
-    **Legacy path:** PR2's confidence-weighted aggregation is preserved in
-    ``legacy_score_inflation(ind)`` below.  Tests in
-    ``tests/test_inflation_staleness.py`` that test the PR2 behaviour directly
-    (e.g. ``test_fresh_daily_dominates_stale_monthly``) still import
-    ``_score_inflation`` and they will now exercise the layered engine — the
-    scores are similar in magnitude because the structural layer uses the same
-    tanh_norm + staleness logic.  Any test that needs to exercise the exact PR2
-    aggregation logic should call ``legacy_score_inflation`` instead.
+    Full ``InflationScoreResult`` is logged at DEBUG for observability and
+    persisted to Supabase for the macro dashboard.
 
     Parameters
     ----------
@@ -377,25 +368,23 @@ def _score_inflation(ind: RawIndicators) -> float:
     float
         Inflation score in [-1.0, +1.0].
     """
-    # Build InflationSnapshot from RawIndicators.
+    # 1. Build InflationSnapshot from RawIndicators.
     snapshot = build_snapshot_from_raw(ind)
 
-    # Run all four layers.
-    layers = {
-        "structural":          structural_layer.compute(snapshot),
-        "momentum":            momentum_layer.compute(snapshot),
-        "market_expectations": market_layer.compute(snapshot),
-        "surprise":            surprise_layer.compute(snapshot),
-    }
-
-    # Aggregate.
-    result = aggregate(layers)
+    # 2. Run the engine with the manual consensus source and persistence enabled.
+    # We use date.today() for persistence by default.
+    result = score_inflation(
+        snapshot,
+        consensus_source=ManualConsensusSource(),
+        persist=True
+    )
 
     logger.debug(
-        "_score_inflation (layered) → score=%.4f  confidence=%.4f  "
-        "layers=%s",
+        "_score_inflation (PR4) → score=%.4f  confidence=%.4f  "
+        "method=%s  layers=%s",
         result.score,
         result.confidence,
+        result.aggregate_method,
         {n: f"{lo.score:.4f}(c={lo.confidence:.3f})" for n, lo in result.layers.items()},
     )
 

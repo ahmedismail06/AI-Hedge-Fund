@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Protocol, runtime_checkable
 
 
 # Map each frequency label to its canonical period length in days.
@@ -78,6 +78,50 @@ class IndicatorMeta:
                 f"IndicatorMeta.native_frequency must be one of "
                 f"{list(FREQUENCY_DAYS)}, got '{self.native_frequency}'"
             )
+
+
+# ---------------------------------------------------------------------------
+# PR 4 — Consensus / Surprise data types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConsensusExpectation:
+    """A single consensus expectation for one indicator release.
+
+    Fields
+    ------
+    indicator:
+        Series name, e.g. ``"cpi_yoy"``.
+    expected_value:
+        Consensus estimate before the release.
+    actual_value:
+        Actual printed value. None if not yet released.
+    release_dt:
+        When the release occurred (or is scheduled).
+    source:
+        Vendor / data source identifier, e.g. ``"Manual"`` or
+        ``"TradingEconomics"``.
+    """
+
+    indicator: str
+    expected_value: float
+    actual_value: Optional[float]
+    release_dt: datetime
+    source: str
+
+
+@runtime_checkable
+class ConsensusSource(Protocol):
+    """Interface for consensus-expectation data sources.
+
+    Any adapter (Manual, TradingEconomics, Econoday, …) must implement this
+    single method.  The surprise layer calls it on every scoring run.
+    """
+
+    def get_expectations(self, since: datetime) -> list[ConsensusExpectation]:
+        """Return all consensus expectations with release_dt >= ``since``."""
+        ...  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +240,11 @@ class InflationSnapshot:
     # ── Freshness metadata ────────────────────────────────────────────────────
     release_dates: Dict[str, datetime] = field(default_factory=dict)
     """Last release date per series key. Populated by ingestion modules."""
+
+    # ── PR 4 — Consensus / Surprise data ──────────────────────────────────────
+    expectations: List[ConsensusExpectation] = field(default_factory=list)
+    """Consensus expectations for recent/upcoming releases.
+    Used by the surprise layer to compute actual-vs-expected scores."""
 
 
 @dataclass

@@ -133,6 +133,29 @@ async def get_macro_indicators():
     return await asyncio.to_thread(_run)
 
 
+# ── GET /macro/inflation/diagnostics ─────────────────────────────────────────
+
+
+@router.get("/inflation/diagnostics")
+async def get_inflation_diagnostics(limit: int = Query(10, ge=1, le=30)):
+    """Return the recent layered inflation engine diagnostics."""
+    def _run():
+        try:
+            client = _get_client()
+            result = (
+                client.table("inflation_diagnostics")
+                .select("*")
+                .order("date", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Supabase error: {exc}")
+        return result.data or []
+
+    return await asyncio.to_thread(_run)
+
+
 # ── POST /macro/run ───────────────────────────────────────────────────────────
 
 
