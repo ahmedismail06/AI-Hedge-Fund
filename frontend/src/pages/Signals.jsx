@@ -132,12 +132,13 @@ export default function Signals() {
     }
   };
 
-  // Pipeline counts
-  const universeCount = 800;
-  const screenedCount = watchlist.length;
-  const inResearchCount = 0; // no in-flight tracking in DB; memos are stored only on completion
-  const memosDone = memos.length;
-  const pmQueueCount = pmDecisions.filter(d => d.status === 'PENDING_HUMAN').length;
+  // Pipeline counts — keys must match STAGES in SignalPipeline.jsx
+  const universeCount  = 800;
+  const screenedCount  = watchlist.length;
+  // PENDING memos = research just completed but not yet reviewed (closest proxy to "in research")
+  const researchCount  = memos.filter(m => m.status === 'PENDING').length;
+  const memosDoneCount = memos.filter(m => m.status !== 'PENDING').length;
+  const decisionsCount = pmDecisions.filter(d => d.status === 'PENDING_HUMAN').length;
 
   // Filter + sort screener table
   const filtered = watchlist
@@ -206,11 +207,11 @@ export default function Signals() {
           </div>
           <SignalPipeline
             counts={{
-              universe: universeCount,
-              screened: screenedCount,
-              inResearch: inResearchCount,
-              memosDone,
-              pmQueue: pmQueueCount,
+              universe:  universeCount,
+              screened:  screenedCount,
+              research:  researchCount,
+              memos:     memosDoneCount,
+              decisions: decisionsCount,
             }}
           />
         </div>

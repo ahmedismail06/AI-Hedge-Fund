@@ -595,6 +595,12 @@
   }
   .pipeline-node:hover { opacity: 0.8; }
 
+  /* ── Pipeline active-dot pulse ───────────────────── */
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1;   transform: scale(1);   }
+    50%       { opacity: 0.4; transform: scale(1.5); }
+  }
+
   /* ── Skeleton shimmer ─────────────────────────────── */
   @keyframes shimmer {
     0%   { background-position: -200% 0; }
