@@ -143,7 +143,7 @@ async def execution_status():
 
         ibkr_connected = False
         try:
-            if _ibkr._ib is not None and _ibkr._ib.isConnected():
+            if _ibkr._ib is not None and _ibkr._is_connected_safe():
                 ibkr_connected = True
             else:
                 _ibkr.connect()

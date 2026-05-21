@@ -76,6 +76,25 @@ def _start_ib_thread() -> None:
 # Core connection logic
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _is_connected_safe() -> bool:
+    """Thread-safe isConnected() check — marshals to the IB loop.
+
+    ib_insync is not thread-safe; touching `_ib` from any thread other than
+    the one running its event loop can corrupt asyncio state and segfault.
+    """
+    if _ib is None or _ib_loop is None or not _ib_loop.is_running():
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_isconn_async(), _ib_loop)
+        return bool(fut.result(timeout=2))
+    except Exception:
+        return False
+
+
+async def _isconn_async() -> bool:
+    return _ib is not None and _ib.isConnected()
+
+
 def _get_ib() -> IB:
     global _ib
 
@@ -85,7 +104,7 @@ def _get_ib() -> IB:
             "Install with `pip install ib_insync` to enable live trading."
         )
 
-    if _ib is not None and _ib.isConnected():
+    if _ib is not None and _is_connected_safe():
         return _ib
 
     _start_ib_thread()
@@ -135,7 +154,7 @@ def connect() -> IB:
 def disconnect() -> None:
     global _ib
     try:
-        if _ib is not None and _ib.isConnected():
+        if _ib is not None and _ib_loop is not None and _ib_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(
                 _disconnect_async(), _ib_loop
             )
@@ -148,9 +167,9 @@ def disconnect() -> None:
 
 async def _disconnect_async() -> None:
     global _ib
-    if _ib is not None:
+    if _ib is not None and _ib.isConnected():
         _ib.disconnect()
-        _ib = None
+    _ib = None
 
 
 def get_loop() -> asyncio.AbstractEventLoop:
@@ -266,26 +285,38 @@ def get_account_summary() -> dict:
     ib_insync keeps this cache updated automatically once connected.
     Auto-reconnects silently if the connection was dropped (e.g. after an
     execution cycle). Returns empty dict only if reconnect also fails.
+
+    All access to `_ib` is marshaled onto the dedicated ib_insync event loop
+    via run_coroutine_threadsafe. Touching ib_insync objects from any other
+    thread is not thread-safe and has historically caused SEGV core-dumps
+    plus TWS/Gateway disconnects from corrupted socket writes.
     """
     global _ib
     with _lock:
-        if _ib is None or not _ib.isConnected():
+        if _ib is None or not _is_connected_safe():
             try:
                 _get_ib()  # attempt reconnect
             except Exception:
                 return {}
     try:
-        result = {}
-        for av in _ib.accountValues():
-            if av.tag in _ACCOUNT_TAGS_WANTED and av.currency == 'USD':
-                try:
-                    result[av.tag] = float(av.value)
-                except (ValueError, TypeError):
-                    pass
-        return result
+        fut = asyncio.run_coroutine_threadsafe(_account_summary_async(), _ib_loop)
+        return fut.result(timeout=5)
     except Exception as exc:
         logger.warning("Failed to fetch account summary: %s", exc)
         return {}
+
+
+async def _account_summary_async() -> dict:
+    if _ib is None or not _ib.isConnected():
+        return {}
+    result: dict = {}
+    for av in _ib.accountValues():
+        if av.tag in _ACCOUNT_TAGS_WANTED and av.currency == 'USD':
+            try:
+                result[av.tag] = float(av.value)
+            except (ValueError, TypeError):
+                pass
+    return result
 
 
 def get_cash_balance() -> Optional[float]:
