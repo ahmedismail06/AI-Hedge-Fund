@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getBriefing, getRegime, getMacroHistory, getIndicators, runMacroAgent } from '../api/macro';
 import YieldCurveChart from '../components/YieldCurveChart';
-import { LineChart, Line, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { ComposedChart, Area, Line, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, XAxis, YAxis, ReferenceArea } from 'recharts';
 import { SkeletonPanel, SkeletonBlock, SkeletonChart } from '../components/Skeleton';
 
 const REGIME_STYLE = {
@@ -303,18 +303,63 @@ export default function Macro() {
 
           {historyChart.length > 1 && (
             <Panel>
-              <PanelHeader label="Regime History" title={`Last ${historyChart.length} sessions`} />
-              <div className="p-4">
-                <ResponsiveContainer width="100%" height={100}>
-                  <LineChart data={historyChart}>
-                    <Line type="monotone" dataKey="score" stroke="var(--accent)" strokeWidth={2} dot={false} isAnimationActive={false} />
-                    <ReferenceLine y={50} stroke="var(--border)" strokeDasharray="3 3" />
+              <PanelHeader label="Regime History" title={`Regime Score — Last ${historyChart.length} Sessions`} />
+              <div className="px-4 pt-2 pb-4">
+                {/* Legend */}
+                <div className="flex gap-4 mb-2 flex-wrap">
+                  {[
+                    { label: 'Risk-On', color: 'var(--green)',  range: '>70' },
+                    { label: 'Transitional', color: 'var(--blue)', range: '40–70' },
+                    { label: 'Risk-Off', color: 'var(--red)',   range: '<40' },
+                  ].map(({ label, color, range }) => (
+                    <div key={label} className="flex items-center gap-1">
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: color, opacity: 0.7 }} />
+                      <span style={{ fontSize: 9, color: 'var(--text-3)', fontFamily: 'Syne' }}>{label}</span>
+                      <span style={{ fontSize: 9, color: 'var(--text-3)', fontFamily: 'JetBrains Mono', opacity: 0.6 }}>{range}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <ResponsiveContainer width="100%" height={120}>
+                  <ComposedChart data={historyChart} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    {/* Zone bands */}
+                    <ReferenceArea y1={70} y2={100} fill="rgba(0,217,138,0.06)" ifOverflow="hidden" />
+                    <ReferenceArea y1={40}  y2={70}  fill="rgba(74,158,255,0.06)" ifOverflow="hidden" />
+                    <ReferenceArea y1={0}   y2={40}  fill="rgba(255,51,71,0.06)"  ifOverflow="hidden" />
+
+                    <XAxis
+                      dataKey="date"
+                      tick={{ fontSize: 9, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                      axisLine={false} tickLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      domain={[0, 100]}
+                      tick={{ fontSize: 9, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
+                      axisLine={false} tickLine={false}
+                      width={24}
+                    />
+                    <ReferenceLine y={70} stroke="rgba(0,217,138,0.3)"  strokeDasharray="3 3" />
+                    <ReferenceLine y={40} stroke="rgba(255,51,71,0.3)"  strokeDasharray="3 3" />
                     <RTooltip
-                      contentStyle={{ fontSize: 11, borderRadius: 6, background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}
-                      formatter={v => [v, 'Regime Score']}
+                      contentStyle={{ fontSize: 11, borderRadius: 8, background: 'var(--chart-tooltip-bg)', border: '1px solid var(--border-2)', color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                      formatter={v => [
+                        `${v} — ${v >= 70 ? 'Risk-On' : v >= 40 ? 'Transitional' : 'Risk-Off'}`,
+                        'Score',
+                      ]}
                       labelFormatter={(_, pl) => pl?.[0]?.payload?.date ?? ''}
                     />
-                  </LineChart>
+                    <Area
+                      type="monotone"
+                      dataKey="score"
+                      stroke="var(--accent)"
+                      strokeWidth={2}
+                      fill="var(--accent-muted)"
+                      fillOpacity={0.35}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
             </Panel>

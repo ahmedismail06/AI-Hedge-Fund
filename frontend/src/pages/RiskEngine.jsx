@@ -7,8 +7,17 @@ import RiskAlert from '../components/RiskAlert';
 import CorrelationMatrix from '../components/CorrelationMatrix';
 import StopLadderGauge from '../components/StopLadderGauge';
 import VarGauge from '../components/VarGauge';
-import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, ReferenceLine, Cell, AreaChart, Area } from 'recharts';
 import { SkeletonPanel, SkeletonStat, SkeletonChart } from '../components/Skeleton';
+
+const HISTORY_METRICS = [
+  { key: 'sharpe_ratio',  label: 'Sharpe',  fmt: v => v.toFixed(2), good: v => v >= 1,    warn: v => v >= 0.5,  refLines: [{ y: 1, color: 'var(--green)' }, { y: 0, color: 'var(--border)' }] },
+  { key: 'sortino_ratio', label: 'Sortino', fmt: v => v.toFixed(2), good: v => v >= 1,    warn: v => v >= 0.5,  refLines: [{ y: 1, color: 'var(--green)' }, { y: 0, color: 'var(--border)' }] },
+  { key: 'calmar_ratio',  label: 'Calmar',  fmt: v => v.toFixed(2), good: v => v >= 1,    warn: v => v >= 0.5,  refLines: [{ y: 1, color: 'var(--green)' }, { y: 0, color: 'var(--border)' }] },
+  { key: 'max_drawdown',  label: 'Max DD',  fmt: v => `${v.toFixed(2)}%`, good: v => v > -10, warn: v => v > -20, refLines: [{ y: -10, color: 'var(--amber)' }, { y: -20, color: 'var(--red)' }] },
+  { key: 'var_95',        label: 'VaR 95%', fmt: v => `${v.toFixed(2)}%`, good: v => v > -5,  warn: v => v > -10, refLines: [{ y: -5,  color: 'var(--amber)' }, { y: -10, color: 'var(--red)' }] },
+  { key: 'beta',          label: 'Beta',    fmt: v => v.toFixed(2), good: v => Math.abs(v) < 0.8, warn: v => Math.abs(v) < 1.2, refLines: [{ y: 1, color: 'var(--amber)' }, { y: 0, color: 'var(--border)' }] },
+];
 
 const METRIC_META = {
   sharpe_ratio:      { label: 'Sharpe',          fmt: v => v.toFixed(2),  good: v => v >= 1,   warn: v => v >= 0.5 },
@@ -81,6 +90,7 @@ export default function RiskEngine() {
   const [runningMonitor, setRunningMonitor] = useState(false);
   const [runningMetrics, setRunningMetrics] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [histMetricKey, setHistMetricKey] = useState('sharpe_ratio');
 
   const loadAlerts = useCallback(async () => {
     try {
@@ -137,9 +147,10 @@ export default function RiskEngine() {
   const varValue = metrics?.var_95 ?? null;
   const currentDrawdown = metrics?.current_drawdown ?? null;
 
+  const histMeta  = HISTORY_METRICS.find(m => m.key === histMetricKey) ?? HISTORY_METRICS[0];
   const chartData = history.map(h => ({
-    date: h.date ? new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '',
-    value: h.sharpe_ratio ?? null,
+    date:  h.date ? new Date(h.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '',
+    value: h[histMetricKey] ?? null,
   })).filter(d => d.value != null);
 
   if (loading) return (
@@ -280,10 +291,25 @@ export default function RiskEngine() {
             })}
           </div>
 
-          {/* Sharpe history chart */}
+          {/* Risk metrics history chart */}
           <Panel>
-            <PanelHeader label="History" title="Rolling Sharpe Ratio — Last 30 Sessions" />
-            <div className="px-4 py-3">
+            <PanelHeader label="History" title={`Rolling ${histMeta.label} — Last 30 Sessions`} />
+            <div className="px-4 pt-2 pb-3">
+              {/* Metric selector */}
+              <div className="flex gap-0.5 mb-3 flex-wrap">
+                {HISTORY_METRICS.map(m => (
+                  <button key={m.key} onClick={() => setHistMetricKey(m.key)} style={{
+                    fontFamily: 'Syne', fontSize: 9, fontWeight: 700,
+                    padding: '3px 8px', borderRadius: 5, border: 'none', cursor: 'pointer',
+                    background: histMetricKey === m.key ? 'var(--accent-muted)' : 'transparent',
+                    color: histMetricKey === m.key ? 'var(--accent)' : 'var(--text-3)',
+                    transition: 'all 0.12s',
+                  }}>
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+
               {chartData.length < 2 ? (
                 <div className="py-8 text-center" style={{ fontSize: '12px', color: 'var(--text-3)' }}>
                   Insufficient history — run nightly metrics to populate
@@ -294,25 +320,29 @@ export default function RiskEngine() {
                     <XAxis
                       dataKey="date"
                       tick={{ fontSize: 9, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
-                      axisLine={false}
-                      tickLine={false}
+                      axisLine={false} tickLine={false}
                       interval="preserveStartEnd"
                     />
                     <YAxis
+                      tickFormatter={v => histMeta.fmt(v)}
                       tick={{ fontSize: 9, fill: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}
-                      axisLine={false}
-                      tickLine={false}
-                      width={28}
+                      axisLine={false} tickLine={false}
+                      width={36}
                     />
                     <RTooltip
-                      contentStyle={{ fontSize: 11, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}
-                      formatter={v => [v?.toFixed(2), 'Sharpe']}
+                      contentStyle={{ fontSize: 11, borderRadius: 8, background: 'var(--chart-tooltip-bg)', border: '1px solid var(--border-2)', color: 'var(--text)', fontFamily: 'JetBrains Mono' }}
+                      formatter={v => [histMeta.fmt(v), histMeta.label]}
                     />
-                    <ReferenceLine y={1} stroke="var(--green)" strokeDasharray="3 3" />
-                    <ReferenceLine y={0} stroke="var(--border)" />
+                    {histMeta.refLines.map((rl, i) => (
+                      <ReferenceLine key={i} y={rl.y} stroke={rl.color} strokeDasharray="3 3" />
+                    ))}
                     <Bar dataKey="value" radius={[3, 3, 0, 0]}>
                       {chartData.map((d, i) => (
-                        <Cell key={i} fill={d.value >= 1 ? 'var(--green)' : d.value >= 0.5 ? 'var(--amber)' : d.value >= 0 ? 'var(--accent)' : 'var(--red)'} />
+                        <Cell key={i} fill={
+                          histMeta.good(d.value) ? 'var(--green)'
+                          : histMeta.warn(d.value) ? 'var(--amber)'
+                          : 'var(--red)'
+                        } fillOpacity={0.85} />
                       ))}
                     </Bar>
                   </BarChart>
