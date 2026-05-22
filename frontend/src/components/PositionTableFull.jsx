@@ -5,7 +5,7 @@ const fmt$ = (v, decimals = 2) => {
 
 const fmtPct = (v) => v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
 
-const HEADERS = ['Ticker', 'Direction', 'Shares', 'Entry', 'Current', 'P&L', 'P&L %', 'Stop', 'Distance', 'Size'];
+const HEADERS = ['Ticker', 'Direction', 'Shares', 'Entry', 'Current', 'P&L', 'P&L %', 'Target', 'Upside', 'Stop', 'Distance', 'Size'];
 
 export default function PositionTableFull({ positions, onTickerClick }) {
   if (!positions || positions.length === 0) {
@@ -48,6 +48,10 @@ export default function PositionTableFull({ positions, onTickerClick }) {
               ? ((p.stop_loss_price - entry) / entry)
               : null;
             const stopClose = stopDist != null && Math.abs(stopDist) < 0.05;
+            const targetDist = current > 0 && p.target_price
+              ? (isLong ? (p.target_price - current) / current : (current - p.target_price) / current)
+              : null;
+            const targetHit = targetDist != null && targetDist <= 0;
             const heatBg = pnl > 50 ? 'rgba(0,217,138,0.03)' : pnl < -50 ? 'rgba(255,51,71,0.03)' : 'transparent';
 
             return (
@@ -86,6 +90,12 @@ export default function PositionTableFull({ positions, onTickerClick }) {
                 </td>
                 <td className="px-4 py-3" style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', color: pnlPos ? 'var(--green)' : 'var(--red)' }}>
                   {fmtPct(pnlPct)}
+                </td>
+                <td className="px-4 py-3" style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', color: targetHit ? 'var(--green)' : 'var(--text-2)' }}>
+                  {fmt$(p.target_price)}
+                </td>
+                <td className="px-4 py-3" style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', color: targetHit ? 'var(--green)' : targetDist != null && targetDist < 0.05 ? 'var(--accent)' : 'var(--text-3)' }}>
+                  {targetDist != null ? `${targetDist >= 0 ? '+' : ''}${(targetDist * 100).toFixed(1)}%` : '—'}
                 </td>
                 <td className="px-4 py-3" style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', color: stopClose ? 'var(--red)' : 'var(--text-2)' }}>
                   {fmt$(p.stop_loss_price)}
