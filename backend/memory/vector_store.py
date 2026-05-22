@@ -10,6 +10,8 @@ import logging
 import os
 from typing import Optional, TYPE_CHECKING
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from dotenv import load_dotenv
 from supabase import create_client, Client
 

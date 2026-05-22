@@ -31,7 +31,7 @@ from backend.fetchers.news_fetcher import fetch_news
 from backend.fetchers.transcript_fetcher import fetch_transcripts
 from backend.fetchers.form4_fetcher import fetch_form4
 from backend.fetchers.fmp_fetcher import fetch_fmp
-from backend.memory.vector_store import search_similar
+from backend.memory.vector_store import search_similar, _release_embed_model
 from backend.models import InvestmentMemo
 
 load_dotenv()
@@ -1812,6 +1812,8 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
                 "run_research(%s): agentic retrieval failed (%s) — proceeding without retrieved chunks",
                 ticker, exc,
             )
+        finally:
+            _release_embed_model()
 
     # ── Phase 4: Synthesis (Claude) ───────────────────────────────────────────
     print(f"\n{'─'*62}")
