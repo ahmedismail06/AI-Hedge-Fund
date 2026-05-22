@@ -34,6 +34,8 @@ from openai import OpenAI
 
 from backend.macro.indicators.fred_fetcher import fetch_fred_block, FredFetchError
 from backend.macro.indicators.market_fetcher import fetch_market_block
+from backend.macro.inflation_engine import score_inflation, InflationScoreResult
+from backend.macro.inflation_engine.ingestion.fred_inflation import build_snapshot_from_raw
 from backend.macro.inflation_engine.ingestion.market_inputs import fetch_commodity_block
 from backend.macro.indicators.fed_scraper import get_fed_text
 from backend.macro.scorer import (
@@ -53,6 +55,15 @@ def _build_openai_client() -> OpenAI:
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "o4-mini")
 
+# Persist per-run InflationScoreResult to the `inflation_diagnostics` table.
+# Enabled by default so the diagnostics history accumulates for dynamic IC
+# weighting; set MACRO_PERSIST_INFLATION_DIAGNOSTICS=false to disable.
+PERSIST_INFLATION_DIAGNOSTICS = os.getenv("MACRO_PERSIST_INFLATION_DIAGNOSTICS", "true").lower() == "true"
+
+# Warn if the LLM's own inflation_score deviates from the authoritative engine
+# value by more than this absolute amount. Helps catch prompt-following regressions.
+_INFLATION_DRIFT_WARN_THRESHOLD = 0.15
+
 
 class MacroAgentError(Exception):
     pass
@@ -65,8 +76,9 @@ class MacroAgentError(Exception):
 MACRO_SYSTEM_PROMPT = """You are a senior macro strategist at a long/short hedge fund running a $50M–$2B US micro/small-cap
 equity book (SaaS, Healthcare, Industrials). You operate at 7AM ET daily. Your sole function is to
 synthesize raw macroeconomic indicator data and Federal Reserve qualitative language into a
-regime verdict and actionable portfolio briefing. You receive raw indicator values — not
-pre-computed scores — and derive everything from first principles.
+regime verdict and actionable portfolio briefing. You receive raw indicator values plus a
+pre-computed inflation_score from an authoritative layered scoring engine; you derive the other
+three dimensional scores yourself but MUST copy inflation_score verbatim from the engine block.
 
 You are NOT a market commentator. You are NOT a news summarizer. You are a regime classifier and
 portfolio-level signal generator. A strategist who writes "markets remain uncertain" or "investors
@@ -165,10 +177,17 @@ THINKING ORDER — complete these steps in sequence before producing any output:
      Weight toward freshest data and strongest signals.
      If all growth indicators are missing, return 0.0.
 
-   inflation_score: CPI YoY, Core CPI YoY, PPI YoY, PCE YoY, 5Y Breakeven.
-     Positive = inflationary pressure above Fed target. Negative = below-target / disinflationary.
-     5Y Breakeven carries significant weight — it captures forward-looking market consensus.
-     If all inflation indicators are missing, return 0.0.
+   inflation_score: AUTHORITATIVE — taken directly from the INFLATION ENGINE OUTPUT block
+     in the user message. Copy the `score` field VERBATIM. Do NOT recompute from raw CPI/PPI/
+     PCE/Breakeven values. The engine combines a structural layer (level), momentum layer
+     (3m-annualised + 6m slope), market-expectations layer (breakeven/forward), and surprise
+     layer (actual vs consensus), with dynamic confidence-weighting. Your raw-value judgment
+     does not override it.
+     ONLY fall back to deriving inflation_score from the raw indicator table if the engine
+     block says "[UNAVAILABLE — engine failed]"; in that case, use CPI YoY, Core CPI YoY,
+     PPI YoY, PCE YoY, 5Y Breakeven with the 5Y Breakeven carrying significant weight.
+     The engine's `confidence` should inform your regime_confidence (Step 4) — low engine
+     confidence on inflation is a reason to discount Constructive/Stagflation calls.
 
    fed_score: Rate Direction, Yield Curve Spread, and your fed_tone from Step 1.
      Positive = accommodative. Negative = restrictive.
@@ -316,6 +335,9 @@ Transitional:
 ---
 
 MISSING DATA HANDLING:
+  If INFLATION ENGINE OUTPUT shows "[UNAVAILABLE — engine failed]": derive inflation_score
+    from the raw inflation indicators using the fallback rule in Step 2, and note
+    "inflation engine unavailable" in qualitative_summary.
   If FOMC text is empty: fed_tone = 0.0; note "FOMC text unavailable" in fed_tone_rationale.
   If fewer than 2 indicators available for a dimension: assign 0.0 and note the gap.
   If all indicators across all dimensions are None: return regime="Transitional",
@@ -508,6 +530,113 @@ def _store_briefing(briefing: MacroBriefing) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Inflation engine bridge — runs the layered scoring engine and renders its
+# authoritative output for the LLM. The LLM must copy `inflation_score`
+# verbatim from this block; see system-prompt Step 2 inflation instructions.
+# ---------------------------------------------------------------------------
+
+
+def _compute_inflation_engine(ind: RawIndicators, run_date: date) -> Optional[InflationScoreResult]:
+    """Run the layered inflation engine.
+
+    Returns the full InflationScoreResult, or None on any failure (the LLM
+    falls back to deriving inflation from raw indicators in that case — the
+    system prompt's degraded path).
+
+    Persistence to `inflation_diagnostics` is gated on
+    MACRO_PERSIST_INFLATION_DIAGNOSTICS so smoke runs are side-effect free.
+    """
+    try:
+        snapshot = build_snapshot_from_raw(ind)
+        result = score_inflation(
+            snapshot,
+            run_date=run_date,
+            persist=PERSIST_INFLATION_DIAGNOSTICS,
+        )
+        logger.info(
+            "inflation_engine: score=%+.3f confidence=%.2f layers={%s} stale_warnings=%d",
+            result.score,
+            result.confidence,
+            ", ".join(
+                f"{name}={lo.score:+.2f}(c={lo.confidence:.2f})"
+                for name, lo in result.layers.items()
+            ),
+            len(result.stale_warnings),
+        )
+        return result
+    except Exception as exc:
+        logger.warning("inflation_engine: failed — %s. LLM will derive from raw values.", exc)
+        return None
+
+
+def _format_inflation_engine_for_llm(result: Optional[InflationScoreResult]) -> str:
+    """Render the engine's output as an authoritative LLM context block.
+
+    When `result` is None (engine failed), returns a section that explicitly
+    tells the LLM the engine is unavailable so it falls back to raw-value
+    derivation.
+    """
+    if result is None:
+        return (
+            "INFLATION ENGINE OUTPUT (AUTHORITATIVE):\n"
+            "  [UNAVAILABLE — engine failed. Derive inflation_score from the raw CPI/PPI/PCE/"
+            "Breakeven values in the INFLATION section above using your judgement.]"
+        )
+
+    layer_lines = []
+    for name, lo in result.layers.items():
+        layer_lines.append(
+            f"    {name:<22} score={lo.score:+.3f}  confidence={lo.confidence:.2f}  "
+            f"contributors={len(lo.contributors)}"
+        )
+
+    top_lines = []
+    for c in result.contributors_top5[:5]:
+        top_lines.append(
+            f"    {c.indicator:<22} raw={c.raw_value:+.3f}  signal={c.signal:+.3f}  "
+            f"w={c.weight:.2f}  conf={c.confidence:.2f}"
+        )
+
+    stale_section = (
+        "  Stale warnings: " + "; ".join(result.stale_warnings)
+        if result.stale_warnings
+        else "  Stale warnings: none"
+    )
+
+    return "\n".join(
+        [
+            "INFLATION ENGINE OUTPUT (AUTHORITATIVE):",
+            f"  score      = {result.score:+.3f}   (use this VERBATIM as inflation_score)",
+            f"  confidence = {result.confidence:.2f}",
+            f"  method     = {result.aggregate_method}",
+            "  Per-layer:",
+            *layer_lines,
+            "  Top contributors:",
+            *top_lines,
+            stale_section,
+        ]
+    )
+
+
+def _recompute_regime_score(
+    growth: float, inflation: float, fed: float, stress: float
+) -> float:
+    """Deterministic regime_score from the four sub-scores.
+
+    Mirrors the formula stated in MACRO_SYSTEM_PROMPT Step 5 so that when we
+    override inflation_score with the engine value, the persisted regime_score
+    stays internally consistent with its inputs.
+    """
+    base = (
+        ((growth + 1) / 2 * 35)
+        + ((1 - inflation) / 2 * 30)
+        + ((fed + 1) / 2 * 20)
+        + ((1 - stress) / 2 * 15)
+    )
+    return max(0.0, min(100.0, base))
+
+
 def _format_raw_indicators_for_llm(ind: RawIndicators) -> str:
     """Format raw indicator values for the LLM user message.
 
@@ -615,12 +744,18 @@ _LLM_REQUIRED_KEYS = {
 }
 
 
-def _call_llm(raw_indicator_block: str, fomc_text: str) -> dict:
+def _call_llm(
+    raw_indicator_block: str,
+    fomc_text: str,
+    inflation_engine_block: str,
+) -> dict:
     """Call the LLM to classify the macro regime and produce a full briefing.
 
-    The LLM receives raw indicator values (no pre-computed scores) and decides
-    everything: dimensional scores, regime, confidence, sector tilts, portfolio
-    guidance, and all qualitative fields.
+    The LLM receives raw indicator values plus the authoritative inflation
+    engine output. It must copy inflation_score verbatim from the engine block
+    and derive growth/fed/stress scores from the raw values. Regime,
+    confidence, sector tilts, portfolio guidance, and qualitative fields are
+    all LLM-produced.
 
     Parameters
     ----------
@@ -628,6 +763,10 @@ def _call_llm(raw_indicator_block: str, fomc_text: str) -> dict:
         Formatted raw indicator table from _format_raw_indicators_for_llm().
     fomc_text:
         Raw FOMC statement text, or "" if unavailable.
+    inflation_engine_block:
+        Authoritative inflation engine output from
+        _format_inflation_engine_for_llm(). Tells the LLM the inflation_score
+        to copy verbatim, plus per-layer attribution and stale warnings.
 
     Returns
     -------
@@ -652,10 +791,13 @@ def _call_llm(raw_indicator_block: str, fomc_text: str) -> dict:
     user_message = (
         f"{raw_indicator_block}\n\n"
         f"---\n\n"
+        f"{inflation_engine_block}\n\n"
+        f"---\n\n"
         f"{fomc_section}\n\n"
         f"---\n\n"
         f"TASK: Analyze the raw macro indicators and FOMC statement above. "
-        f"Follow the THINKING ORDER in your system prompt — score each dimension, "
+        f"Follow the THINKING ORDER in your system prompt — derive growth/fed/stress "
+        f"scores from the raw values, copy inflation_score verbatim from the engine block, "
         f"classify the regime, set confidence and regime_score, determine sector tilts, "
         f"and produce the complete qualitative briefing. "
         f"Respond with a single valid JSON object only."
@@ -956,9 +1098,17 @@ def run_macro_pipeline() -> MacroBriefing:
         raw_indicator_block = _format_raw_indicators_for_llm(raw_ind)
         logger.info("Phase 2 complete: raw indicator block formatted")
 
+        # ── Phase 2b: Inflation engine (authoritative inflation_score) ───────
+        logger.info("Phase 2b: running inflation engine")
+        inflation_result = _compute_inflation_engine(raw_ind, today)
+        inflation_engine_block = _format_inflation_engine_for_llm(inflation_result)
+        logger.info(
+            "Phase 2b complete: engine_available=%s", inflation_result is not None,
+        )
+
         # ── Phase 3: Single LLM call — regime + all outputs ──────────────────
         logger.info("Phase 3: LLM regime classification")
-        llm_resp = _call_llm(raw_indicator_block, fomc_text)
+        llm_resp = _call_llm(raw_indicator_block, fomc_text, inflation_engine_block)
 
         final_regime     = llm_resp["regime"]
         growth_score     = float(llm_resp["growth_score"])
@@ -970,9 +1120,45 @@ def run_macro_pipeline() -> MacroBriefing:
         override_flag    = bool(llm_resp["override_flag"])
         override_reason: Optional[str] = llm_resp.get("override_reason")
 
+        # Engine is authoritative for inflation_score. Force-override the LLM
+        # value and recompute regime_score so the persisted row is internally
+        # consistent. Warn loudly if the LLM ignored its instructions.
+        if inflation_result is not None:
+            llm_inflation = inflation_score
+            engine_inflation = float(inflation_result.score)
+            drift = abs(llm_inflation - engine_inflation)
+            if drift > _INFLATION_DRIFT_WARN_THRESHOLD:
+                logger.warning(
+                    "inflation_score override: LLM=%+.3f engine=%+.3f drift=%.3f "
+                    "(>%.2f threshold). LLM did not copy engine value verbatim.",
+                    llm_inflation, engine_inflation, drift, _INFLATION_DRIFT_WARN_THRESHOLD,
+                )
+            else:
+                logger.info(
+                    "inflation_score override: LLM=%+.3f engine=%+.3f drift=%.3f",
+                    llm_inflation, engine_inflation, drift,
+                )
+            inflation_score = engine_inflation
+            recomputed_regime_score = _recompute_regime_score(
+                growth_score, inflation_score, fed_score, stress_score,
+            )
+            if abs(recomputed_regime_score - regime_score) > 0.5:
+                logger.info(
+                    "regime_score recomputed: LLM=%.2f → %.2f (inflation override)",
+                    regime_score, recomputed_regime_score,
+                )
+            regime_score = recomputed_regime_score
+        else:
+            logger.warning(
+                "inflation_engine unavailable — using LLM-derived inflation_score=%+.3f as-is.",
+                inflation_score,
+            )
+
         logger.info(
-            "Phase 3 complete: regime=%s confidence=%.1f score=%.1f override_flag=%s",
+            "Phase 3 complete: regime=%s confidence=%.1f score=%.1f override_flag=%s "
+            "inflation_score=%+.3f (engine=%s)",
             final_regime, final_confidence, regime_score, override_flag,
+            inflation_score, "yes" if inflation_result is not None else "no",
         )
 
         # ── Phase 4: Read previous regime ────────────────────────────────────
