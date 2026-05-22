@@ -23,6 +23,7 @@ to respect Polygon's limits and FMP's 300 req/min limits.
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import requests
+import yfinance as yf
 from dotenv import load_dotenv
 from backend.fetchers.fmp_fetcher import _FMP_LIMITER
 
@@ -40,6 +42,24 @@ logger = logging.getLogger(__name__)
 
 POLYGON_BASE = "https://api.polygon.io"
 FMP_BASE = "https://financialmodelingprep.com/stable"
+
+# Yahoo Finance rate limiter — 60 calls/min across all threads.
+# Serialised via lock so concurrent workers don't burst past Yahoo's threshold.
+class _YfRateLimiter:
+    def __init__(self, calls_per_minute: int = 60):
+        self._interval = 60.0 / calls_per_minute
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = self._interval - (now - self._last)
+            if wait > 0:
+                time.sleep(wait)
+            self._last = time.monotonic()
+
+_YF_LIMITER = _YfRateLimiter(calls_per_minute=60)
 
 # Universe cache: avoids ~5000 Polygon detail API calls on every run.
 # File lives at repo root; TTL is 24 hours.
@@ -685,27 +705,25 @@ def fetch_ticker_data(ticker: str) -> dict:
         except Exception as exc:
             logger.warning("%s: Polygon price history failed: %s", ticker, exc)
 
-    # ── FMP info (replaces yfinance soft metrics mapping) ────────────────────
-    # forwardEps and pegRatio are already fetched inside fetch_fmp() above via
-    # /analyst-estimates and /key-metrics-ttm — reuse those results to avoid
-    # duplicate FMP calls. Only /earnings-surprises is unique to this block.
-    fmp_key = os.getenv("FMP_API_KEY")
-    if fmp_key:
-        try:
-            # Earnings Surprises (replaces yf.earnings_history)
-            r_earnings = _fmp_get(f"{FMP_BASE}/earnings-surprises?symbol={ticker}&apikey={fmp_key}")
-            if r_earnings is not None:
-                eh_data = r_earnings.json()
-                if eh_data and isinstance(eh_data, list):
-                    eh_list = []
-                    for row in eh_data[:4]:
-                        eh_list.append({
-                            "epsEstimate": row.get("estimatedEarning"),
-                            "epsActual":   row.get("actualEarning"),
-                        })
-                    result["yf_info"]["earningsHistory"] = eh_list
-        except Exception as exc:
-            logger.warning("%s: FMP info fetch failed: %s", ticker, exc)
+    # ── Earnings History (yfinance earnings_history) ─────────────────────────
+    # FMP /stable/earnings-surprises is gone; yfinance returns the same
+    # epsEstimate / epsActual columns. _YF_LIMITER caps throughput at 60/min
+    # across all screener threads so Yahoo Finance doesn't 429 us.
+    try:
+        _YF_LIMITER.acquire()
+        eh_df = yf.Ticker(ticker).earnings_history
+        if eh_df is not None and not eh_df.empty:
+            eh_list = []
+            for _, row in eh_df.head(4).iterrows():
+                try:
+                    est = float(row["epsEstimate"]) if row.get("epsEstimate") is not None else None
+                    act = float(row["epsActual"]) if row.get("epsActual") is not None else None
+                except (TypeError, ValueError):
+                    est, act = None, None
+                eh_list.append({"epsEstimate": est, "epsActual": act})
+            result["yf_info"]["earningsHistory"] = eh_list
+    except Exception as exc:
+        logger.warning("%s: yfinance earnings_history failed: %s", ticker, exc)
 
     # Reuse fields already fetched by fetch_fmp() — no additional HTTP calls.
     fmp = result.get("fmp", {})
