@@ -356,7 +356,7 @@ if __name__ == "__main__":
     print_diagnostics()
 
     # Scoring table for each regime (reuses cached data, no more API calls)
-    for regime in ["Risk-On", "Risk-Off", "Stagflation"]:
+    for regime in ["Risk-On", "Constructive", "Risk-Off", "Stagflation"]:
         print_results(run_pipeline(regime), regime)
 
     # Assertions

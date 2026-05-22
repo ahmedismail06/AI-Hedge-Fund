@@ -349,6 +349,150 @@ def _run_exit_cycle(client, outside_rth: bool = False, skip_position_ids: set | 
     return result
 
 
+# ── Add cycle ────────────────────────────────────────────────────────────────
+
+
+def _run_add_cycle(client, skip_position_ids: set | None = None) -> dict:
+    """
+    Poll OPEN positions with exit_action=ADD and place buy orders to increase size.
+
+    Uses the same guards as _run_exit_cycle: no active BUY order, no recent
+    filled BUY within 30 min. Quantity is derived from exit_trim_pct (same
+    normalization as TRIM: 0.35 or 35.0 both mean 35%). If exit_trim_pct is
+    absent the position's current share_count is used (i.e. double the position).
+
+    exit_action is cleared only after place_order succeeds so the intent
+    survives a failed build or placement and retries next cycle.
+
+    Returns:
+        dict with 'adds_placed', 'adds_error', and 'add_order_ids'.
+    """
+    result: dict = {"adds_placed": 0, "adds_error": 0, "add_order_ids": []}
+
+    try:
+        add_result = (
+            client.table("positions")
+            .select("*")
+            .eq("exit_action", "ADD")
+            .eq("status", "OPEN")
+            .execute()
+        )
+        positions_to_add = add_result.data or []
+    except Exception as exc:
+        logger.error("_run_add_cycle: DB query failed: %s", exc)
+        return result
+
+    placed_this_cycle: set = set()
+    _skip = skip_position_ids or set()
+
+    for pos in positions_to_add:
+        if pos["id"] in _skip:
+            logger.debug(
+                "Position %s just had order cancelled this cycle — deferring ADD retry to next cycle",
+                pos["id"],
+            )
+            continue
+        if pos["id"] in placed_this_cycle:
+            logger.warning(
+                "_run_add_cycle: position %s seen twice in same cycle — skipping duplicate", pos["id"]
+            )
+            continue
+
+        # Guard: skip if an active BUY order already exists for this position, or a BUY
+        # filled within the last 30 minutes (the add already executed this cycle).
+        try:
+            from datetime import datetime, timezone, timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+            existing = (
+                client.table("orders")
+                .select("id,status,filled_at,created_at")
+                .eq("position_id", pos["id"])
+                .eq("order_side", "BUY")
+                .execute()
+            )
+            active = [o for o in (existing.data or []) if o["status"] in ("SUBMITTED", "PARTIAL")]
+            recent_filled = [
+                o for o in (existing.data or [])
+                if o["status"] == "FILLED" and o.get("filled_at") and o["filled_at"] >= cutoff
+            ]
+            if active:
+                logger.debug("Position %s already has an active BUY order — skipping ADD", pos["id"])
+                continue
+            if recent_filled:
+                logger.info(
+                    "Position %s had a BUY filled within 30 min — clearing exit_action=ADD", pos["id"]
+                )
+                client.table("positions").update(
+                    {"exit_action": None, "exit_trim_pct": None}
+                ).eq("id", pos["id"]).execute()
+                continue
+        except Exception as exc:
+            logger.warning("_run_add_cycle: order check failed for %s: %s", pos.get("ticker"), exc)
+            continue
+
+        # Compute add quantity.  exit_trim_pct doubles as the add percentage
+        # (same normalization: 0.35 → 35%, 35.0 → 35%).
+        add_pct = float(pos.get("exit_trim_pct") or 0)
+        total_shares = int(float(pos.get("share_count") or 0))
+        if add_pct > 0 and total_shares > 0:
+            pct_normalized = add_pct * 100.0 if add_pct <= 1.0 else add_pct
+            add_qty = max(1, int(total_shares * pct_normalized / 100))
+        elif total_shares > 0:
+            add_qty = total_shares  # no pct given — default to matching current size
+        else:
+            logger.warning(
+                "_run_add_cycle: position %s (%s) has no share_count — skipping",
+                pos["id"], pos.get("ticker"),
+            )
+            result["adds_error"] += 1
+            continue
+
+        # Build a synthetic row with the add quantity then reuse build_order.
+        add_row = dict(pos)
+        add_row["share_count"] = add_qty
+
+        try:
+            req, contract, ib_order = _order_builder.build_order(add_row)
+            # Tag the order so the timeout handler can restore exit_action=ADD
+            # on a zero-fill timeout rather than reverting to APPROVED.
+            req = req.model_copy(update={"exit_type": "ENTRY_ADD"})
+            order_status = _order_manager.place_order(req, contract, ib_order)
+
+            try:
+                client.table("positions").update(
+                    {"exit_action": None, "exit_trim_pct": None}
+                ).eq("id", pos["id"]).execute()
+            except Exception as exc:
+                logger.warning(
+                    "Could not clear exit_action for %s after ADD placement: %s",
+                    pos.get("ticker"), exc,
+                )
+
+            placed_this_cycle.add(pos["id"])
+            result["add_order_ids"].append(order_status.order_id)
+            result["adds_placed"] += 1
+            logger.info(
+                "Add order placed: %s %s | qty=%d order_id=%s",
+                pos.get("ticker"), pos["id"], add_qty, order_status.order_id,
+            )
+            notify_event("ORDER_PLACED", {
+                "ticker": pos.get("ticker", "—"),
+                "qty": add_qty,
+                "note": "ADD to existing position",
+            })
+
+        except IBKRConnectionError as exc:
+            logger.error("IBKR down during ADD for %s: %s", pos.get("ticker"), exc)
+            result["adds_error"] += 1
+            break
+
+        except Exception as exc:
+            logger.error("Add order failed for %s: %s", pos.get("ticker"), exc)
+            result["adds_error"] += 1
+
+    return result
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
@@ -374,7 +518,7 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
             _get_client()
             .table("positions")
             .select("ticker,exit_action")
-            .in_("exit_action", ["CLOSE", "TRIM"])
+            .in_("exit_action", ["CLOSE", "TRIM", "ADD"])
             .eq("status", "OPEN")
             .execute()
         )
@@ -384,11 +528,11 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 f"{p['ticker']}({p['exit_action']})" for p in _pending_data
             )
             logger.info(
-                "Exit queue: %d position(s) pending — %s",
+                "Action queue: %d position(s) pending — %s",
                 len(_pending_data), _pending_desc,
             )
         else:
-            logger.debug("Exit queue: 0 positions with exit_action set")
+            logger.debug("Action queue: 0 positions with exit_action set")
     except Exception as _exc:
         logger.warning("Could not query exit queue pre-gate: %s", _exc)
 
@@ -460,6 +604,22 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                         "exit_action restored to %s for retry next cycle",
                         pos_id, restore_action,
                     )
+            elif order_row.get("exit_type") == "ENTRY_ADD":
+                # ADD order timed out — restore exit_action so next cycle retries the buy.
+                # Do NOT touch status (position stays OPEN).
+                if order_status == "PARTIAL_FILLED" and total_filled > 0:
+                    logger.info(
+                        "ADD order for position %s timed out with partial fill "
+                        "(%.0f shares bought) — fill handler updated share_count",
+                        pos_id, total_filled,
+                    )
+                else:
+                    client.table("positions").update({"exit_action": "ADD"}).eq("id", pos_id).execute()
+                    logger.warning(
+                        "ADD order for position %s timed out with zero fills — "
+                        "exit_action restored to ADD for retry next cycle",
+                        pos_id,
+                    )
             elif order_status == "PARTIAL_FILLED" and total_filled > 0:
                 # Entry partial fill — open position at actual filled quantity + avg fill price
                 _fill_recorder.record_partial_fill_open(order_row["id"])
@@ -487,6 +647,12 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         summary.exits_placed = exit_result["exits_placed"]
         summary.exits_error = exit_result["exits_error"]
         exit_order_ids = exit_result["exit_order_ids"]
+
+        # ── E2: Add cycle — buy more shares for OPEN positions flagged by PM Agent ──
+        add_result = _run_add_cycle(client, skip_position_ids=timed_out_this_cycle)
+        summary.orders_placed += add_result["adds_placed"]
+        summary.orders_error += add_result["adds_error"]
+        exit_order_ids = exit_order_ids + add_result["add_order_ids"]
 
         # Guard is already enforced at gate A — this is a belt-and-suspenders check
         # for the force=True path to prevent entries outside market hours.

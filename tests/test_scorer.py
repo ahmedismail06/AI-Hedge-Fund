@@ -32,7 +32,7 @@ for t in TICKERS:
 
 universe = [UniverseCandidate(ticker=t, market_cap_m=500, sector="SaaS") for t in TICKERS]
 
-for regime in ["Risk-On", "Risk-Off", "Stagflation"]:
+for regime in ["Risk-On", "Constructive", "Risk-Off", "Stagflation"]:
     print(f"\n=== {regime} (Q/V/M weights: Risk-On=50/30/20, Risk-Off=60/30/10, Stagflation=55/35/10) ===")
     print(f"{'Ticker':<8} {'Composite':>9} {'Quality':>8} {'Value':>8} {'Momentum':>9}  {'Rank':>4}  Beneish")
     print("-" * 65)

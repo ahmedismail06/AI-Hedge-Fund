@@ -31,7 +31,6 @@ from backend.agents.screening_agent import (
     run_screening,
     ScreeningAgentError,
     _TOP_N_FOR_RESEARCH,
-    _RESEARCH_SKIP_DAYS,
 )
 from backend.screener.scorer import ScreenerResult
 from backend.screener.universe import UniverseCandidate
@@ -80,7 +79,7 @@ def test_read_regime_returns_value_from_supabase():
         assert _read_regime() == "Risk-Off"
 
 
-@pytest.mark.parametrize("regime", ["Risk-On", "Risk-Off", "Transitional", "Stagflation"])
+@pytest.mark.parametrize("regime", ["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"])
 def test_read_regime_accepts_all_four_valid_regimes(regime):
     mock = make_supabase_mock(execute_data=[{"regime": regime}])
     with patch(_PATCH_CLIENT, return_value=mock):

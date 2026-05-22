@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--tickers", nargs="+", metavar="TICKER",
                         help="Score specific tickers (skips universe build)")
     parser.add_argument("--regime", default="Risk-On",
-                        choices=["Risk-On", "Risk-Off", "Transitional", "Stagflation"],
+                        choices=["Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"],
                         help="Regime to use for composite scoring (default Risk-On)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for stratified sample (default 42)")

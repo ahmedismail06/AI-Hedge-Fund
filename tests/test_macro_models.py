@@ -96,7 +96,7 @@ def test_macro_briefing_regime_confidence_set_explicitly():
 
 def test_macro_briefing_all_four_regime_values_accepted():
     """All four valid regime strings are accepted."""
-    for regime in ("Risk-On", "Risk-Off", "Transitional", "Stagflation"):
+    for regime in ("Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"):
         briefing = MacroBriefing(**_minimal_briefing(regime=regime))
         assert briefing.regime == regime
 

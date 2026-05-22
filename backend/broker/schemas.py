@@ -41,9 +41,9 @@ class OrderRequest(BaseModel):
         default="BUY",
         description="BUY for new entries, SELL for exit/trim orders.",
     )
-    exit_type: Optional[Literal["EXIT_CLOSE", "EXIT_TRIM"]] = Field(
+    exit_type: Optional[Literal["EXIT_CLOSE", "EXIT_TRIM", "ENTRY_ADD"]] = Field(
         default=None,
-        description="Null for entry orders. EXIT_CLOSE = full position close, EXIT_TRIM = partial sell.",
+        description="Null for regular entry orders. EXIT_CLOSE = full close, EXIT_TRIM = partial sell, ENTRY_ADD = buy more shares into existing position.",
     )
 
 

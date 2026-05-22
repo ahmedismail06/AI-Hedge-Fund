@@ -196,7 +196,7 @@ def test_all_four_regimes_produce_different_composites():
     }
 
     scores_by_regime = {}
-    for regime in ("Risk-On", "Risk-Off", "Transitional", "Stagflation"):
+    for regime in ("Risk-On", "Constructive", "Risk-Off", "Transitional", "Stagflation"):
         results = compute_composite(universe, dict(all_factors), regime)
         a = next(r for r in results if r.ticker == "A")
         scores_by_regime[regime] = a.composite_score
