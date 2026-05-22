@@ -32,6 +32,7 @@ from typing import Optional, List, Dict, Any
 
 import requests
 from dotenv import load_dotenv
+from backend.fetchers.fmp_fetcher import _FMP_LIMITER
 
 load_dotenv()
 
@@ -242,10 +243,13 @@ def _polygon_get(url: str, params: dict, max_retries: int = 3) -> Optional[reque
 
 def _fmp_get(url: str, max_retries: int = 3) -> Optional[requests.Response]:
     """
-    GET wrapper for FMP with exponential backoff to handle the 300 req/min limit.
+    GET wrapper for FMP with rate limiting and exponential backoff.
+    Acquires the global _FMP_LIMITER token before each attempt so all FMP
+    calls — sync and async — share the same 290 calls/min budget.
     """
     for attempt in range(max_retries):
         try:
+            _FMP_LIMITER.acquire()
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
                 return r
@@ -517,7 +521,6 @@ def build_universe(use_cache: bool = True) -> List[UniverseCandidate]:
 
         count = _fetch_analyst_count(cand.ticker, fmp_key)
         cand.analyst_count = count
-        time.sleep(0.5)  # Proactive pacing to protect FMP 300 req/min
 
         if count is not None and count > 10:
             return None
@@ -683,10 +686,13 @@ def fetch_ticker_data(ticker: str) -> dict:
             logger.warning("%s: Polygon price history failed: %s", ticker, exc)
 
     # ── FMP info (replaces yfinance soft metrics mapping) ────────────────────
+    # forwardEps and pegRatio are already fetched inside fetch_fmp() above via
+    # /analyst-estimates and /key-metrics-ttm — reuse those results to avoid
+    # duplicate FMP calls. Only /earnings-surprises is unique to this block.
     fmp_key = os.getenv("FMP_API_KEY")
     if fmp_key:
         try:
-            # 1. Earnings Surprises (replaces yf.earnings_history)
+            # Earnings Surprises (replaces yf.earnings_history)
             r_earnings = _fmp_get(f"{FMP_BASE}/earnings-surprises?symbol={ticker}&apikey={fmp_key}")
             if r_earnings is not None:
                 eh_data = r_earnings.json()
@@ -698,26 +704,12 @@ def fetch_ticker_data(ticker: str) -> dict:
                             "epsActual":   row.get("actualEarning"),
                         })
                     result["yf_info"]["earningsHistory"] = eh_list
-
-            # 2. Forward Estimates (replaces yf.info forwardEps)
-            r_estimates = _fmp_get(f"{FMP_BASE}/analyst-estimates?symbol={ticker}&period=annual&limit=2&apikey={fmp_key}")
-            if r_estimates is not None:
-                est_data = r_estimates.json()
-                if est_data and isinstance(est_data, list) and len(est_data) > 0:
-                    result["yf_info"]["forwardEps"] = est_data[0].get("estimatedEpsAvg")
-                    
-            # 3. Key Metrics TTM (replaces yf.info pegRatio)
-            r_metrics = _fmp_get(f"{FMP_BASE}/key-metrics-ttm?symbol={ticker}&limit=1&apikey={fmp_key}")
-            if r_metrics is not None:
-                metrics_data = r_metrics.json()
-                if metrics_data and isinstance(metrics_data, list) and len(metrics_data) > 0:
-                    result["yf_info"]["pegRatio"] = metrics_data[0].get("pegRatioTTM")
-                    
-            # Critical pacing to ensure the 3 workers hitting 3 endpoints each
-            # do not exceed FMP's 300 req/min global limit
-            time.sleep(1.5) 
-            
         except Exception as exc:
             logger.warning("%s: FMP info fetch failed: %s", ticker, exc)
+
+    # Reuse fields already fetched by fetch_fmp() — no additional HTTP calls.
+    fmp = result.get("fmp", {})
+    result["yf_info"]["forwardEps"] = fmp.get("consensus_eps_current_year")
+    result["yf_info"]["pegRatio"] = fmp.get("peg_ratio_ttm")
 
     return result

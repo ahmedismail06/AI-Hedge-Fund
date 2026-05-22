@@ -44,6 +44,8 @@ Quality data (FMP):
 import asyncio
 import os
 import logging
+import threading
+import time as _time
 from datetime import date
 
 import httpx
@@ -56,6 +58,26 @@ POLYGON_BASE = "https://api.polygon.io"
 FMP_BASE = "https://financialmodelingprep.com/stable"
 FMP_BASE_V3 = "https://financialmodelingprep.com/api/v3"
 logger = logging.getLogger(__name__)
+
+# ── Global FMP rate limiter (290 calls/min, shared across all threads) ────────
+
+class _FmpRateLimiter:
+    """Token bucket: enforces a minimum gap between FMP HTTP calls, thread-safe."""
+
+    def __init__(self, calls_per_minute: int = 290):
+        self._interval = 60.0 / calls_per_minute
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = _time.monotonic()
+            wait = self._interval - (now - self._last)
+            if wait > 0:
+                _time.sleep(wait)
+            self._last = _time.monotonic()
+
+_FMP_LIMITER = _FmpRateLimiter(calls_per_minute=290)
 
 # ── FMP Quality Data Batch Fetch ──────────────────────────────────────────────
 
@@ -110,11 +132,13 @@ async def _fetch_ticker_quality_async(
 
 async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, dict]:
     """
-    Fetch FMP quality data for all tickers in batches of 10 with a 10.0s inter-batch
-    delay to provide extra margin under the 300 req/min FMP Starter rate limit.
+    Fetch FMP quality data for all tickers in batches of 5 with a 4.0s inter-batch
+    delay. 5 tickers × 3 calls = 15 calls / 4s = 225 calls/min — safely under the
+    300 req/min FMP Starter rate limit and eliminates the 30-call burst the previous
+    batch-of-10 caused at the start of each window.
     """
     results: dict[str, dict] = {}
-    batch_size = 10  # Reduced from 50
+    batch_size = 5
 
     async with httpx.AsyncClient() as client:
         for start in range(0, len(tickers), batch_size):
@@ -124,7 +148,7 @@ async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, di
             for ticker, data in zip(batch, batch_results):
                 results[ticker] = data
             if start + batch_size < len(tickers):
-                await asyncio.sleep(10.0)  # Increased from 6.0s to allow headroom
+                await asyncio.sleep(4.0)
 
     return results
 
@@ -167,7 +191,8 @@ def fetch_quality_fmp_batch(tickers: list[str]) -> dict[str, dict]:
 # ── Helpers for fetch_fmp ─────────────────────────────────────────────────────
 
 def _get_json(url: str, params: dict, timeout: int = 15) -> object | None:
-    """GET an endpoint, parse JSON, return None on any failure. Never raises."""
+    """GET an FMP endpoint, parse JSON, return None on any failure. Never raises."""
+    _FMP_LIMITER.acquire()
     try:
         r = requests.get(url, params=params, timeout=timeout)
         if r.status_code == 200:
@@ -368,6 +393,7 @@ def fetch_fmp(ticker: str) -> dict:
         "interest_expense": None,
         "ev_ebitda_fmp": None,
         "price_book_fmp": None,
+        "peg_ratio_ttm": None,
         "ebitda_fmp": None,
         "polygon_financials_raw": None,
         "error": None,
@@ -509,6 +535,12 @@ def fetch_fmp(ticker: str) -> dict:
                 if pb is not None:
                     try:
                         result["price_book_fmp"] = float(pb)
+                    except (TypeError, ValueError):
+                        pass
+                peg = km.get("pegRatioTTM")
+                if peg is not None:
+                    try:
+                        result["peg_ratio_ttm"] = float(peg)
                     except (TypeError, ValueError):
                         pass
         except Exception as exc:
