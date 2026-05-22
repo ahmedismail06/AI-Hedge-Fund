@@ -20,7 +20,10 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
-from fredapi import Fred
+try:
+    from fredapi import Fred
+except ModuleNotFoundError:  # pragma: no cover - depends on local env
+    Fred = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -107,14 +110,21 @@ class FredBlock:
     """
 
     last_release_dates: dict[str, "datetime"] = field(default_factory=dict)
-    """Most recent observation date per series key.
+    """Estimated release timestamp per series key.
 
-    Populated by fetch_fred_block() from the FRED Series index returned by
-    fredapi. Keys match the short keys in FRED_SERIES (e.g. ``"cpi"``,
+    Derived from the FRED observation index plus a per-series publication-lag
+    estimate. Keys match the short keys in FRED_SERIES (e.g. ``"cpi"``,
     ``"breakeven_5y"``). Missing when a series fetch failed.
 
     Added in PR 2 (mixed-frequency handling). Callers that pre-date PR 2
     will receive an empty dict (default_factory), so no existing code breaks.
+    """
+
+    series_history: dict[str, list[float]] = field(default_factory=dict)
+    """Recent numeric history per series key.
+
+    Used by the layered inflation engine to derive momentum transforms from
+    the same fetched FRED data without re-querying the API.
     """
 
 
@@ -124,10 +134,48 @@ class FredBlock:
 
 def _get_fred_client() -> Fred:
     """Instantiate a fredapi.Fred client using FRED_API_KEY from the environment."""
+    if Fred is None:
+        raise RuntimeError(
+            "fredapi is not installed; fetch_fred_block() cannot query FRED in this environment."
+        )
     api_key = os.getenv("FRED_API_KEY")
     if not api_key:
         logger.warning("FRED_API_KEY is not set; FRED requests will likely be rejected.")
     return Fred(api_key=api_key)
+
+
+_RELEASE_OFFSETS: dict[str, tuple[int, int]] = {
+    # (months_forward, days_offset) from the observation period start.
+    "cpi": (1, 12),
+    "core_cpi": (1, 12),
+    "ppi": (1, 13),
+    "pce": (1, 29),
+    "sticky_cpi": (1, 12),
+    "trimmed_mean_pce": (1, 29),
+    "payrolls": (1, 4),
+    "fed_funds": (1, 29),
+    "gdp": (4, 0),
+}
+
+
+def _estimate_release_datetime(key: str, observation_dt: datetime) -> datetime:
+    """Estimate the publication timestamp for a FRED observation.
+
+    FRED series indexes usually represent the period being measured, not the
+    date the value was published. For mixed-frequency confidence weighting we
+    want a release-timestamp proxy that tracks when the market actually learned
+    the value, not when the underlying period started.
+    """
+    months_forward, days_offset = _RELEASE_OFFSETS.get(key, (0, 0))
+    ts = pd.Timestamp(observation_dt)
+    if months_forward:
+        ts = ts + pd.DateOffset(months=months_forward)
+    if days_offset:
+        ts = ts + pd.Timedelta(days=days_offset)
+    dt = ts.to_pydatetime()
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +378,7 @@ def fetch_fred_block() -> FredBlock:
     # ── 1. Fetch every series ────────────────────────────────────────────────
     for key, series_id in FRED_SERIES.items():
         try:
-            s = fetch_series_latest(series_id, lookback=15)
+            s = fetch_series_latest(series_id, lookback=30)
             series_cache[key] = s
             raw_values[key] = float(s.iloc[-1])
         except (FredFetchError, Exception) as exc:
@@ -385,29 +433,25 @@ def fetch_fred_block() -> FredBlock:
     # Services PMI: alias ism_svc_raw → ism_svc for downstream consumers.
     raw_values["ism_svc"] = raw_values.get("ism_svc_raw")
 
-    # ── 7. Last release dates (PR 2 — mixed-frequency handling) ─────────────
-    # For each successfully-fetched series, record the date of the most recent
-    # non-null observation. The FRED API returns a date-indexed pd.Series; the
-    # index type is Timestamp or datetime-like depending on the series.
-    # We normalise to a tz-naive Python datetime for uniform downstream use.
+    # ── 7. Release dates + recent history for downstream inflation layers ────
     last_release_dates: dict[str, datetime] = {}
+    series_history: dict[str, list[float]] = {}
     for key, s in series_cache.items():
         if s is None or s.empty:
             continue
         try:
+            series_history[key] = [float(v) for v in s.dropna().tolist()]
             last_idx = s.index[-1]
-            # pd.Timestamp → datetime; already-datetime objects pass through.
             if hasattr(last_idx, "to_pydatetime"):
                 dt = last_idx.to_pydatetime()
             else:
                 dt = datetime(last_idx.year, last_idx.month, last_idx.day)
-            # Strip timezone info so all dates are tz-naive (FRED returns UTC dates).
             if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
                 dt = dt.replace(tzinfo=None)
-            last_release_dates[key] = dt
+            last_release_dates[key] = _estimate_release_datetime(key, dt)
         except Exception as exc:
             logger.warning(
-                "Could not extract last_release_date for series '%s': %s", key, exc
+                "Could not extract release metadata for series '%s': %s", key, exc
             )
 
     return FredBlock(
@@ -417,4 +461,5 @@ def fetch_fred_block() -> FredBlock:
         yield_curve_spread_bps=spread,
         rate_direction=direction,
         last_release_dates=last_release_dates,
+        series_history=series_history,
     )

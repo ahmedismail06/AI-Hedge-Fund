@@ -107,6 +107,7 @@ def score_inflation(
     consensus_source: Optional[ConsensusSource] = None,
     run_date: Optional[date] = None,
     persist: bool = False,
+    fetch_dynamic_ics: bool = False,
 ) -> InflationScoreResult:
     """Entry point for the layered inflation scoring engine.
 
@@ -128,6 +129,10 @@ def score_inflation(
         The date of the scoring run (defaults to today).
     persist:
         If True, persists the result to the ``inflation_diagnostics`` table.
+    fetch_dynamic_ics:
+        If True, reads persisted diagnostics history and applies dynamic
+        IC-based layer weighting. Defaults to False so the base scoring path
+        stays side-effect free.
 
     Returns
     -------
@@ -140,7 +145,10 @@ def score_inflation(
     # 1. Enrich snapshot with consensus data if available.
     if consensus_source is not None:
         # We look for expectations released in the last 30 days.
-        since = snapshot.release_dates.get("cpi", snapshot.release_dates.get("core_cpi"))
+        since = snapshot.release_dates.get(
+            "cpi_yoy",
+            snapshot.release_dates.get("core_cpi_yoy"),
+        )
         if since is None:
             # Fallback: last 30 days.
             from datetime import datetime, timedelta
@@ -149,7 +157,7 @@ def score_inflation(
         snapshot.expectations = consensus_source.get_expectations(since)
 
     # 2. Retrieve ICs for dynamic weighting.
-    ics = get_latest_ics()
+    ics = get_latest_ics() if fetch_dynamic_ics else None
 
     # 3. Compute layers.
     layers = {
@@ -161,6 +169,16 @@ def score_inflation(
 
     # 4. Aggregate.
     result = aggregate(layers, weights=weights, layer_ics=ics)
+    result.diagnostics["snapshot"] = {
+        "cpi_yoy": snapshot.cpi_yoy,
+        "core_cpi_yoy": snapshot.core_cpi_yoy,
+        "ppi_yoy": snapshot.ppi_yoy,
+        "pce_yoy": snapshot.pce_yoy,
+        "sticky_cpi_yoy": snapshot.sticky_cpi_yoy,
+        "trimmed_mean_pce_yoy": snapshot.trimmed_mean_pce_yoy,
+        "breakeven_5y": snapshot.breakeven_5y,
+        "five_y_five_y_forward": snapshot.five_y_five_y_forward,
+    }
 
     # 5. Persist (optional).
     if persist:

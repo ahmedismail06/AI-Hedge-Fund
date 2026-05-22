@@ -28,12 +28,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
 from backend.macro.indicators.fred_fetcher import FredBlock
 from backend.macro.indicators.market_fetcher import MarketBlock
+from backend.macro.inflation_engine.ingestion.market_inputs import MarketCommoditiesBlock
 from backend.macro.inflation_engine import (
     score_inflation,
     IndicatorMeta,
@@ -46,7 +47,6 @@ from backend.macro.inflation_engine.staleness import (
     staleness_confidence,
 )
 from backend.macro.inflation_engine.ingestion.fred_inflation import build_snapshot_from_raw
-from backend.macro.inflation_engine.ingestion.consensus import ManualConsensusSource
 
 logger = logging.getLogger(__name__)
 
@@ -90,20 +90,50 @@ class RawIndicators:
     pce_yoy: Optional[float] = None
     """PCE deflator YoY % change."""
 
+    sticky_cpi_yoy: Optional[float] = None
+    """Atlanta Fed sticky CPI YoY % change."""
+
+    trimmed_mean_pce_yoy: Optional[float] = None
+    """Dallas Fed trimmed-mean PCE YoY % change."""
+
     breakeven_5y: Optional[float] = None
     """5-year breakeven inflation rate level (e.g. 2.35)."""
 
+    five_y_five_y_forward: Optional[float] = None
+    """5Y5Y forward inflation rate level."""
+
+    treasury_10y: Optional[float] = None
+    """10-year Treasury yield level."""
+
+    wti_oil_price: Optional[float] = None
+    """WTI crude proxy via USO ETF."""
+
+    brent_oil_price: Optional[float] = None
+    """Brent crude proxy via BNO ETF."""
+
+    gasoline_price: Optional[float] = None
+    """Gasoline proxy via UGA ETF."""
+
+    copper_price: Optional[float] = None
+    """Copper proxy via CPER ETF."""
+
+    commodity_composite: Optional[float] = None
+    """Broad commodity proxy via DBC ETF."""
+
     inflation_release_dates: Optional[dict[str, datetime]] = None
-    """Optional per-series last-release dates for the five inflation indicators.
+    """Optional per-series release timestamps keyed by layered-engine field name.
 
-    Keys: ``"cpi"``, ``"core_cpi"``, ``"ppi"``, ``"pce"``, ``"breakeven_5y"``.
-    When provided, ``_score_inflation`` uses confidence-weighted aggregation
-    (PR 2). When None (default), all series are treated as equally fresh and
-    the aggregation falls back to the unweighted mean from PR 1.
+    Examples: ``"cpi_yoy"``, ``"sticky_cpi_yoy"``, ``"breakeven_5y"``,
+    ``"five_y_five_y_forward"``, ``"wti_oil_price"``.
+    Existing callers that construct ``RawIndicators`` manually can omit this;
+    the engine will fall back to conservative staleness assumptions.
+    """
 
-    Populated by ``build_raw_indicators()`` from ``FredBlock.last_release_dates``.
-    Existing callers that construct ``RawIndicators`` manually (tests, etc.)
-    receive ``None`` by default — no code changes needed.
+    inflation_history: dict[str, list[float]] = field(default_factory=dict)
+    """Recent inflation-relevant history keyed by source series name.
+
+    Used by the layered inflation engine to derive momentum transforms and
+    provide historical context without re-fetching FRED.
     """
 
     # Fed / Rates
@@ -158,7 +188,11 @@ class DimensionalScores:
 # ---------------------------------------------------------------------------
 
 
-def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
+def build_raw_indicators(
+    fred: FredBlock,
+    market: MarketBlock,
+    commodity_block: Optional[MarketCommoditiesBlock] = None,
+) -> RawIndicators:
     """Assemble a RawIndicators dataclass from fetcher output blocks.
 
     All fields are Optional — missing data from either block maps to None,
@@ -180,14 +214,18 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
     jobless_raw = fred.raw_values.get("jobless")
     jobless_actual: Optional[float] = float(jobless_raw) if jobless_raw is not None else None
 
-    # Build inflation release dates from FredBlock (PR 2: mixed-frequency handling).
-    # Map from scorer key → FredBlock series cache key so confidence decay works.
+    # Build inflation release dates from FredBlock using the indicator names
+    # consumed by the layered engine.
     _fred_key_map = {
-        "cpi":          "cpi",
-        "core_cpi":     "core_cpi",
-        "ppi":          "ppi",
-        "pce":          "pce",
+        "cpi_yoy": "cpi",
+        "core_cpi_yoy": "core_cpi",
+        "ppi_yoy": "ppi",
+        "pce_yoy": "pce",
+        "sticky_cpi_yoy": "sticky_cpi",
+        "trimmed_mean_pce_yoy": "trimmed_mean_pce",
         "breakeven_5y": "breakeven_5y",
+        "five_y_five_y_forward": "five_y_five_y_fwd",
+        "treasury_10y": "yield_10y",
     }
     inflation_release_dates: Optional[dict[str, datetime]] = None
     if fred.last_release_dates:
@@ -198,6 +236,19 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
                 dates[scorer_key] = dt
         if dates:
             inflation_release_dates = dates
+
+    if commodity_block is not None:
+        commodity_dt = commodity_block.fetched_at.replace(tzinfo=None)
+        if inflation_release_dates is None:
+            inflation_release_dates = {}
+        for key in (
+            "wti_oil_price",
+            "brent_oil_price",
+            "gasoline_price",
+            "copper_price",
+            "commodity_composite",
+        ):
+            inflation_release_dates[key] = commodity_dt
 
     return RawIndicators(
         # Growth
@@ -211,7 +262,17 @@ def build_raw_indicators(fred: FredBlock, market: MarketBlock) -> RawIndicators:
         core_cpi_yoy=fred.yoy_changes.get("core_cpi"),
         ppi_yoy=fred.yoy_changes.get("ppi"),
         pce_yoy=fred.yoy_changes.get("pce"),
+        sticky_cpi_yoy=fred.yoy_changes.get("sticky_cpi"),
+        trimmed_mean_pce_yoy=fred.yoy_changes.get("trimmed_mean_pce"),
         breakeven_5y=fred.raw_values.get("breakeven_5y"),
+        five_y_five_y_forward=fred.raw_values.get("five_y_five_y_fwd"),
+        treasury_10y=fred.raw_values.get("yield_10y"),
+        wti_oil_price=commodity_block.wti_oil_price if commodity_block else None,
+        brent_oil_price=commodity_block.brent_oil_price if commodity_block else None,
+        gasoline_price=commodity_block.gasoline_price if commodity_block else None,
+        copper_price=commodity_block.copper_price if commodity_block else None,
+        commodity_composite=commodity_block.commodity_composite if commodity_block else None,
+        inflation_history=dict(fred.series_history),
         # Fed / Rates
         rate_direction=fred.rate_direction,
         yield_curve_spread=fred.yield_curve_spread_bps,
@@ -349,14 +410,11 @@ def _score_growth(ind: RawIndicators) -> float:
 def _score_inflation(ind: RawIndicators) -> float:
     """Score inflationary pressure on a -1.0 to +1.0 scale.
 
-    **PR 4 — dynamic weighting + surprises:** delegates to the layered
-    scoring engine entry point (``score_inflation``) with the manual
-    consensus source enabled.
+    Delegates to the layered scoring engine entry point (``score_inflation``).
 
     Signature unchanged: ``(ind: RawIndicators) -> float``.
     Returns ``result.score`` from the layered engine.
-    Full ``InflationScoreResult`` is logged at DEBUG for observability and
-    persisted to Supabase for the macro dashboard.
+    Full ``InflationScoreResult`` is logged at DEBUG for observability.
 
     Parameters
     ----------
@@ -371,13 +429,9 @@ def _score_inflation(ind: RawIndicators) -> float:
     # 1. Build InflationSnapshot from RawIndicators.
     snapshot = build_snapshot_from_raw(ind)
 
-    # 2. Run the engine with the manual consensus source and persistence enabled.
-    # We use date.today() for persistence by default.
-    result = score_inflation(
-        snapshot,
-        consensus_source=ManualConsensusSource(),
-        persist=True
-    )
+    # 2. Run the layered engine in pure-scoring mode. Persistence and
+    # consensus lookups are opt-in at the expanded API layer, not here.
+    result = score_inflation(snapshot)
 
     logger.debug(
         "_score_inflation (PR4) → score=%.4f  confidence=%.4f  "
@@ -440,6 +494,8 @@ def legacy_score_inflation(ind: RawIndicators) -> float:
         confidence: float = 1.0
         if ind.inflation_release_dates is not None:
             release_dt = ind.inflation_release_dates.get(key)
+            if release_dt is None:
+                release_dt = ind.inflation_release_dates.get(f"{key}_yoy")
             if release_dt is not None:
                 staleness = max(0, (today - release_dt).days)
                 meta = IndicatorMeta(

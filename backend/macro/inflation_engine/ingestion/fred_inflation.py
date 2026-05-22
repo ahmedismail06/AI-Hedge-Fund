@@ -2,9 +2,10 @@
 
 PR 3 of the inflation engine redesign (docs/inflation_engine_design.md §3).
 
-This module is deliberately thin — it just maps field names from RawIndicators
-(the scorer.py dataclass) into the InflationSnapshot dataclass that the layer
-modules consume.  No computation is performed here.
+This module maps field names from RawIndicators (the scorer.py dataclass) into
+the InflationSnapshot dataclass that the layer modules consume. It also derives
+momentum-ready YoY histories from the recent FRED level history carried on the
+RawIndicators object.
 
 Why a separate module rather than building the snapshot inline in scorer.py:
 - Keeps scorer.py from growing a long field-mapping block.
@@ -22,14 +23,32 @@ if TYPE_CHECKING:
     from backend.macro.scorer import RawIndicators
 
 from backend.macro.inflation_engine.types import InflationSnapshot
+from backend.macro.inflation_engine.transforms.momentum import (
+    annualised_3m,
+    regression_slope,
+)
+
+
+def _compute_yoy_history(level_history: list[float], periods_per_year: int = 12) -> list[float]:
+    """Convert a level-history series into a rolling YoY % history."""
+    yoy_history: list[float] = []
+    if len(level_history) <= periods_per_year:
+        return yoy_history
+
+    for idx in range(periods_per_year, len(level_history)):
+        prior = level_history[idx - periods_per_year]
+        current = level_history[idx]
+        if prior == 0:
+            continue
+        yoy_history.append(((current / prior) - 1.0) * 100.0)
+    return yoy_history
 
 
 def build_snapshot_from_raw(ind: "RawIndicators") -> InflationSnapshot:
     """Build an InflationSnapshot from a RawIndicators instance.
 
-    Fields not present in RawIndicators (e.g. sticky_cpi_yoy, wti_oil_price,
-    momentum series) are left as None.  Layers degrade confidence proportionally
-    when inputs are absent.
+    Fields not present in RawIndicators are left as None. Layers degrade
+    confidence proportionally when inputs are absent.
 
     The ``release_dates`` dict is populated from
     ``ind.inflation_release_dates`` when available.
@@ -45,6 +64,14 @@ def build_snapshot_from_raw(ind: "RawIndicators") -> InflationSnapshot:
         Ready for consumption by layer modules.
     """
     release_dates = dict(ind.inflation_release_dates) if ind.inflation_release_dates else {}
+    raw_history = dict(ind.inflation_history) if getattr(ind, "inflation_history", None) else {}
+
+    cpi_yoy_history = _compute_yoy_history(raw_history.get("cpi", []))
+    core_cpi_yoy_history = _compute_yoy_history(raw_history.get("core_cpi", []))
+    snapshot_history = {
+        "cpi_yoy": cpi_yoy_history,
+        "core_cpi_yoy": core_cpi_yoy_history,
+    }
 
     return InflationSnapshot(
         # Level / YoY series from FRED
@@ -52,30 +79,21 @@ def build_snapshot_from_raw(ind: "RawIndicators") -> InflationSnapshot:
         core_cpi_yoy=ind.core_cpi_yoy,
         ppi_yoy=ind.ppi_yoy,
         pce_yoy=ind.pce_yoy,
-        # sticky_cpi_yoy / trimmed_mean_pce_yoy: not in RawIndicators yet.
-        # Will be threaded through in PR4 when fred_fetcher adds those series.
-        sticky_cpi_yoy=None,
-        trimmed_mean_pce_yoy=None,
+        sticky_cpi_yoy=ind.sticky_cpi_yoy,
+        trimmed_mean_pce_yoy=ind.trimmed_mean_pce_yoy,
         # Market expectations from FRED
         breakeven_5y=ind.breakeven_5y,
-        # five_y_five_y_forward: not in RawIndicators yet (PR4).
-        five_y_five_y_forward=None,
-        # treasury_10y not in RawIndicators directly (yield_curve_spread uses it
-        # but the raw value isn't exposed). PR4 can add it.
-        treasury_10y=None,
-        # Commodity prices: not in RawIndicators — populated via Polygon ingestion
-        # and merged externally before calling the engine.  Left None here.
-        wti_oil_price=None,
-        brent_oil_price=None,
-        gasoline_price=None,
-        copper_price=None,
-        commodity_composite=None,
-        # Momentum series: computed by transforms.momentum before scoring.
-        # Not available from RawIndicators directly.
-        cpi_yoy_3m=None,
-        core_cpi_yoy_3m=None,
-        cpi_slope_6m=None,
+        five_y_five_y_forward=ind.five_y_five_y_forward,
+        treasury_10y=ind.treasury_10y,
+        wti_oil_price=ind.wti_oil_price,
+        brent_oil_price=ind.brent_oil_price,
+        gasoline_price=ind.gasoline_price,
+        copper_price=ind.copper_price,
+        commodity_composite=ind.commodity_composite,
+        cpi_yoy_3m=annualised_3m(cpi_yoy_history),
+        core_cpi_yoy_3m=annualised_3m(core_cpi_yoy_history),
+        cpi_slope_6m=regression_slope(cpi_yoy_history, n=6),
         # History and release dates
-        history={},
+        history=snapshot_history,
         release_dates=release_dates,
     )

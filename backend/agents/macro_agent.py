@@ -34,6 +34,7 @@ from openai import OpenAI
 
 from backend.macro.indicators.fred_fetcher import fetch_fred_block, FredFetchError
 from backend.macro.indicators.market_fetcher import fetch_market_block
+from backend.macro.inflation_engine.ingestion.market_inputs import fetch_commodity_block
 from backend.macro.indicators.fed_scraper import get_fed_text
 from backend.macro.scorer import (
     RawIndicators,
@@ -935,6 +936,7 @@ def run_macro_pipeline() -> MacroBriefing:
         logger.info("Phase 1: fetching indicators")
         fred_block = fetch_fred_block()       # returns FredBlock with Nones on partial failure
         market_block = fetch_market_block()   # returns MarketBlock with Nones on partial failure
+        commodity_block = fetch_commodity_block()
         fomc_text = get_fed_text()            # returns "" on failure — never raises
 
         logger.info(
@@ -945,7 +947,11 @@ def run_macro_pipeline() -> MacroBriefing:
 
         # ── Phase 2: Assemble raw indicators ─────────────────────────────────
         logger.info("Phase 2: assembling raw indicators")
-        raw_ind = build_raw_indicators(fred_block, market_block)
+        raw_ind = build_raw_indicators(
+            fred_block,
+            market_block,
+            commodity_block=commodity_block,
+        )
         _print_data_coverage(raw_ind, fomc_text)
         raw_indicator_block = _format_raw_indicators_for_llm(raw_ind)
         logger.info("Phase 2 complete: raw indicator block formatted")
