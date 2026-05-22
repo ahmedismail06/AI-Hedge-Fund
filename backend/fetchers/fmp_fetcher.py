@@ -36,7 +36,7 @@ Fields returned by fetch_fmp():
 
 Quality data (FMP):
   fetch_quality_fmp_batch() fetches income statements + balance sheets for a
-  list of tickers in async batches of 10 (6.0s inter-batch delay) and is used
+  list of tickers in async batches of 10 (10.0s inter-batch delay) and is used
   by the quality factor scorer to compute gross_margin, debt_to_equity, and
   revenue_growth_yoy with better small-cap coverage than Polygon.
 """
@@ -110,8 +110,8 @@ async def _fetch_ticker_quality_async(
 
 async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, dict]:
     """
-    Fetch FMP quality data for all tickers in batches of 10 with a 6.0s inter-batch
-    delay to perfectly coast under the 300 req/min FMP Starter rate limit.
+    Fetch FMP quality data for all tickers in batches of 10 with a 10.0s inter-batch
+    delay to provide extra margin under the 300 req/min FMP Starter rate limit.
     """
     results: dict[str, dict] = {}
     batch_size = 10  # Reduced from 50
@@ -124,7 +124,7 @@ async def _quality_batch_async(tickers: list[str], fmp_key: str) -> dict[str, di
             for ticker, data in zip(batch, batch_results):
                 results[ticker] = data
             if start + batch_size < len(tickers):
-                await asyncio.sleep(6.0)  # Increased from 0.5s
+                await asyncio.sleep(10.0)  # Increased from 6.0s to allow headroom
 
     return results
 

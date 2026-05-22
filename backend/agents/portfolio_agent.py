@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # ── Module-level fallbacks ────────────────────────────────────────────────────
 
-_VALID_REGIMES = {"Risk-On", "Risk-Off", "Transitional", "Stagflation"}
+_VALID_REGIMES = {"Risk-On", "Risk-Off", "Constructive", "Stagflation", "Transitional"}
 
 
 # ── Error class ───────────────────────────────────────────────────────────────

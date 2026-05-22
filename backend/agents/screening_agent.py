@@ -67,7 +67,7 @@ def _read_regime() -> str:
         )
         if result.data:
             regime = result.data[0].get("regime")
-            if regime in ("Risk-On", "Risk-Off", "Transitional", "Stagflation"):
+            if regime in ("Risk-On", "Risk-Off", "Transitional", "Constructive", "Stagflation"):
                 logger.info("Regime read from Supabase: %s", regime)
                 return regime
     except Exception as exc:

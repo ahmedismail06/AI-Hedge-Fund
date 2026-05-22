@@ -603,7 +603,7 @@ def _format_raw_indicators_for_llm(ind: RawIndicators) -> str:
 # ---------------------------------------------------------------------------
 
 
-_VALID_REGIMES = {"Risk-On", "Risk-Off", "Stagflation", "Transitional"}
+_VALID_REGIMES = {"Risk-On", "Risk-Off", "Constructive", "Stagflation", "Transitional"}
 _VALID_TILTS = {"overweight", "neutral", "underweight"}
 
 _LLM_REQUIRED_KEYS = {
