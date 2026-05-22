@@ -56,6 +56,12 @@ const SIDE_CONFIG = {
   SELL: { color: 'var(--red)',   bg: 'var(--red-bg)',   border: 'var(--red-border)',   dotColor: 'var(--red)'    },
 };
 
+const EXIT_TYPE_CONFIG = {
+  EXIT_CLOSE: { label: 'CLOSE', color: 'var(--red)',   bg: 'var(--red-bg)',   border: 'var(--red-border)'   },
+  EXIT_TRIM:  { label: 'TRIM',  color: 'var(--amber)', bg: 'var(--amber-bg)', border: 'var(--amber-border)' },
+  ENTRY_ADD:  { label: 'ADD',   color: 'var(--blue)',  bg: 'var(--blue-bg)',  border: 'var(--blue-border)'  },
+};
+
 /* ─── Market status helpers ──────────────────────────────────────── */
 function getMarketStatus() {
   const etStr = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
@@ -393,6 +399,19 @@ export default function Execution() {
                       </span>
                       {/* Order type */}
                       <span className="text-xs" style={{ color: 'var(--text-3)' }}>{o.order_type}</span>
+                      {/* Exit/add type badge */}
+                      {o.exit_type && EXIT_TYPE_CONFIG[o.exit_type] && (
+                        <span
+                          className="text-xs font-bold px-2 py-0.5 rounded"
+                          style={{
+                            background: EXIT_TYPE_CONFIG[o.exit_type].bg,
+                            color: EXIT_TYPE_CONFIG[o.exit_type].color,
+                            border: `1px solid ${EXIT_TYPE_CONFIG[o.exit_type].border}`,
+                          }}
+                        >
+                          {EXIT_TYPE_CONFIG[o.exit_type].label}
+                        </span>
+                      )}
                       {/* Status badge */}
                       <div
                         className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full"

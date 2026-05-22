@@ -3,6 +3,19 @@ FastAPI application entry point.
 Registers all agent routers and starts the server.
 """
 
+# Must be first — before any HuggingFace or tokenizers import.
+# Prevents Rust Rayon thread-pool from forking additional threads that
+# conflict with asyncio + ib_insync background threads → SIGSEGV.
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+# Print a Python-level stack trace for every thread on SIGSEGV / SIGFPE.
+# This is the only way to get a crash location without a compiled debug build.
+import faulthandler
+import sys
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
 import logging
 logging.basicConfig(
     level=logging.INFO,

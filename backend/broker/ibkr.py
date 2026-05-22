@@ -152,18 +152,21 @@ def connect() -> IB:
 
 
 def disconnect() -> None:
+    # Hold _lock for the entire disconnect so get_account_summary() can't slip
+    # through the connection check and then see a half-disconnected socket.
     global _ib
-    try:
-        if _ib is not None and _ib_loop is not None and _ib_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                _disconnect_async(), _ib_loop
-            )
-            future.result(timeout=5)
-            logger.info("Disconnected from IBKR")
-    except Exception as exc:
-        logger.warning("Error during IBKR disconnect (ignored): %s", exc)
-    finally:
-        _ib = None
+    with _lock:
+        try:
+            if _ib is not None and _ib_loop is not None and _ib_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    _disconnect_async(), _ib_loop
+                )
+                future.result(timeout=5)
+                logger.info("Disconnected from IBKR")
+        except Exception as exc:
+            logger.warning("Error during IBKR disconnect (ignored): %s", exc)
+        finally:
+            _ib = None
 
 async def _disconnect_async() -> None:
     global _ib
