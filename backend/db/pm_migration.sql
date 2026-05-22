@@ -91,6 +91,15 @@ ALTER TABLE pm_decisions ADD COLUMN IF NOT EXISTS confidence_breakdown JSONB;
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pipeline_is_running   BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pipeline_last_run     TIMESTAMPTZ;
 
+-- ── PM cycle status tracking (added 2026-05-22) ───────────────────────────────
+-- pm_cycle_status: IDLE | RUNNING | FAILED — updated at start and end of every cycle
+-- pm_last_run_at:  when the most recent cycle was acquired/started
+-- pm_last_completed_at: when the most recent cycle released its lock (success or failure)
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_cycle_status       TEXT NOT NULL DEFAULT 'IDLE'
+    CHECK (pm_cycle_status IN ('IDLE', 'RUNNING', 'FAILED'));
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_last_run_at        TIMESTAMPTZ;
+ALTER TABLE pm_config ADD COLUMN IF NOT EXISTS pm_last_completed_at  TIMESTAMPTZ;
+
 -- ── Positions table extensions (added for PM stop-tier + exit routing) ────────
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_action        TEXT CHECK (exit_action IN ('TRIM', 'CLOSE', 'ADD'));
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_trim_pct      NUMERIC(5, 2);

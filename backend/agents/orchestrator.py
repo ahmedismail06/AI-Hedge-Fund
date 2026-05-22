@@ -156,23 +156,39 @@ def _acquire_pm_lock() -> bool:
             else:
                 return False
         
-        # Acquire lock
+        # Acquire lock and stamp RUNNING status so dashboards can observe it immediately
         now_iso = datetime.now(timezone.utc).isoformat()
         client.table("pm_config").update({
             "pm_is_running": True,
-            "pm_lock_timestamp": now_iso
+            "pm_lock_timestamp": now_iso,
+            "pm_cycle_status": "RUNNING",
+            "pm_last_run_at": now_iso,
         }).eq("id", 1).execute()
         return True
     except Exception as exc:
         logger.warning("_acquire_pm_lock: failed to check/set lock — %s", exc)
         return False
 
-def _release_pm_lock() -> None:
-    """Release the global PM lock."""
-    try:
-        _get_client().table("pm_config").update({"pm_is_running": False}).eq("id", 1).execute()
-    except Exception as exc:
-        logger.error("_release_pm_lock: failed to release lock — %s", exc)
+def _release_pm_lock(failed: bool = False) -> None:
+    """Release the global PM lock and stamp final cycle status.
+
+    Retries once on transient Supabase errors so a network hiccup cannot leave
+    pm_is_running=True indefinitely.
+    """
+    payload = {
+        "pm_is_running": False,
+        "pm_cycle_status": "FAILED" if failed else "IDLE",
+        "pm_last_completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    for attempt in range(2):
+        try:
+            _get_client().table("pm_config").update(payload).eq("id", 1).execute()
+            return
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_release_pm_lock: attempt 1 failed, retrying — %s", exc)
+            else:
+                logger.error("_release_pm_lock: both attempts failed — pm_is_running may be stuck — %s", exc)
 
 def _set_halt(triggered: bool, halted_until: Optional[datetime] = None) -> None:
     """Update daily_loss_halt_triggered and optional halted_until in pm_config."""
@@ -1915,6 +1931,7 @@ def run_pm_cycle(
             "decisions_made": [],
         }
 
+    _cycle_failed = False
     try:
         if portfolio_value is None:
             from backend.broker.ibkr import get_portfolio_value as _get_pv
@@ -2349,8 +2366,11 @@ def run_pm_cycle(
             "decisions_made": decisions_made,
             "portfolio_state": _snapshot(base_ctx),
         }
+    except Exception:
+        _cycle_failed = True
+        raise
     finally:
-        _release_pm_lock()
+        _release_pm_lock(failed=_cycle_failed)
 
 
 def _build_prompt(
@@ -2553,6 +2573,7 @@ async def handle_critical_alert(alert_id: str) -> Dict[str, Any]:
         await asyncio.sleep(5)
         waited += 5
 
+    _cycle_failed = False
     try:
         try:
             resp = (
@@ -2607,8 +2628,11 @@ async def handle_critical_alert(alert_id: str) -> Dict[str, Any]:
             decision_data.get("confidence", 0.5),
         )
         return record
+    except Exception:
+        _cycle_failed = True
+        raise
     finally:
-        _release_pm_lock()
+        _release_pm_lock(failed=_cycle_failed)
 
 
 async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
@@ -2627,6 +2651,7 @@ async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
         await asyncio.sleep(5)
         waited += 5
 
+    _cycle_failed = False
     try:
         from backend.agents.pm_prompts.base_context import build_base_context
         from backend.agents.pm_prompts.rebalance import build_rebalance_prompt
@@ -2661,8 +2686,11 @@ async def handle_regime_change(new_regime: str) -> Dict[str, Any]:
         _log_pm_decision(record)
 
         return record
+    except Exception:
+        _cycle_failed = True
+        raise
     finally:
-        _release_pm_lock()
+        _release_pm_lock(failed=_cycle_failed)
 
 
 # ── Legacy compatibility shims ────────────────────────────────────────────────
