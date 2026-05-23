@@ -44,9 +44,9 @@ create table if not exists document_chunks (
     unique (ticker, doc_type, section, chunk_index)
 );
 
--- IVFFlat index for fast approximate cosine similarity search
+-- HNSW index for cosine similarity search (better recall than IVFFlat at this scale; no lists/probes tuning)
 create index if not exists document_chunks_embedding_idx
-    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+    on document_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64);
 
 -- Index for ticker + doc_type filtering (WHERE clause in match_document_chunks)
 create index if not exists document_chunks_ticker_idx
@@ -81,6 +81,10 @@ create table if not exists watchlist (
 
 create index if not exists watchlist_run_date_rank_idx on watchlist (run_date, rank asc);
 create index if not exists watchlist_ticker_idx on watchlist (ticker, run_date desc);
+-- Covers orchestrator 5-min query: run_date + composite_score filter + queued_for_research=false
+create index if not exists watchlist_run_date_score_idx
+    on watchlist (run_date, composite_score desc)
+    where queued_for_research = false;
 
 -- Research efficiency columns (added 2026-04-10)
 -- priority: 1=held+material, 2=watchlist+material, 3=screener-nightly, 4=manual
@@ -205,6 +209,10 @@ create table if not exists risk_alerts (
 
 create index if not exists risk_alerts_resolved_idx on risk_alerts (resolved, created_at desc);
 create index if not exists risk_alerts_severity_idx on risk_alerts (severity, resolved);
+-- Covers base_context query: resolved=false AND severity IN (...) ORDER BY created_at DESC
+create index if not exists risk_alerts_resolved_severity_idx
+    on risk_alerts (resolved, severity, created_at desc)
+    where resolved = false;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Risk Agent: portfolio_metrics table

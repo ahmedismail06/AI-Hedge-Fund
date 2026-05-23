@@ -41,6 +41,10 @@ _ib_loop: Optional[asyncio.AbstractEventLoop] = None
 _ib_thread: Optional[threading.Thread] = None
 _lock = threading.Lock()
 
+# Throttle opportunistic account_snapshots to once per hour (post_order/fill/cancel always write)
+_OPPORTUNISTIC_SNAP_INTERVAL = 3600
+_last_opportunistic_snap_at: Optional[float] = None  # time.monotonic()
+
 
 class IBKRConnectionError(Exception):
     pass
@@ -247,7 +251,11 @@ def get_portfolio_value() -> float:
     nav = summary.get("NetLiquidation")
     if nav and nav > 0:
         logger.debug("portfolio_value from IBKR NetLiquidation: %.2f", nav)
-        save_account_snapshot("opportunistic", summary=summary)
+        global _last_opportunistic_snap_at
+        _now = time.monotonic()
+        if _last_opportunistic_snap_at is None or (_now - _last_opportunistic_snap_at) >= _OPPORTUNISTIC_SNAP_INTERVAL:
+            save_account_snapshot("opportunistic", summary=summary)
+            _last_opportunistic_snap_at = _now
         return float(nav)
 
     logger.warning("IBKR unreachable — falling back to account_snapshots")

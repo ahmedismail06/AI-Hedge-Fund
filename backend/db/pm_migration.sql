@@ -67,8 +67,10 @@ CREATE TABLE IF NOT EXISTS pm_calibration (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS pm_calibration_decision_idx ON pm_calibration (decision_id);
-CREATE INDEX IF NOT EXISTS pm_calibration_ticker_idx   ON pm_calibration (ticker);
+CREATE INDEX IF NOT EXISTS pm_calibration_decision_idx  ON pm_calibration (decision_id);
+CREATE INDEX IF NOT EXISTS pm_calibration_ticker_idx    ON pm_calibration (ticker);
+-- Covers ORDER BY created_at DESC LIMIT 100 in orchestrator calibration reads
+CREATE INDEX IF NOT EXISTS pm_calibration_created_at_idx ON pm_calibration (created_at DESC);
 
 
 -- ── Research Efficiency Columns (added 2026-04-10) ───────────────────────────

@@ -108,6 +108,10 @@ _last_cycle_state: Dict[str, Any] = {
     "timestamp": None,
 }
 
+# ── Capability snapshot throttle — write at most once per hour ───────────────
+_CAPABILITY_SNAP_INTERVAL_SECONDS = 3600
+_last_capability_snap_at: Optional[datetime] = None
+
 # ── DEPLOY_CASH cooldown — prevents re-triggering the pipeline every 30 min ──
 _DEPLOY_CASH_COOLDOWN_SECONDS = 14400  # 4 hours
 _deploy_cash_triggered_at: Optional[datetime] = None
@@ -2002,19 +2006,27 @@ def run_pm_cycle(
         except Exception as exc:
             logger.warning("PM cycle: event trigger scan failed — %s", exc)
 
-        # ── Step 3b2: Capability snapshot (fire-and-forget audit trail) ──────────
-        try:
-            from backend.capabilities import get_capabilities
-            _caps = get_capabilities()
-            _get_client().table("capability_snapshots").insert({
-                "nav_current": _caps.nav,
-                "nav_trailing_30d": _caps.nav_trailing_30d,
-                "capability_tier": _caps.capability_tier,
-                "capabilities": _caps.model_dump(),
-                "triggered_by": "pm_cycle",
-            }).execute()
-        except Exception as exc:
-            logger.debug("PM cycle: capability snapshot write failed — %s", exc)
+        # ── Step 3b2: Capability snapshot (throttled to once/hour) ──────────────
+        global _last_capability_snap_at
+        _now = datetime.now(timezone.utc)
+        _snap_due = (
+            _last_capability_snap_at is None
+            or (_now - _last_capability_snap_at).total_seconds() >= _CAPABILITY_SNAP_INTERVAL_SECONDS
+        )
+        if _snap_due:
+            try:
+                from backend.capabilities import get_capabilities
+                _caps = get_capabilities()
+                _get_client().table("capability_snapshots").insert({
+                    "nav_current": _caps.nav,
+                    "nav_trailing_30d": _caps.nav_trailing_30d,
+                    "capability_tier": _caps.capability_tier,
+                    "capabilities": _caps.model_dump(),
+                    "triggered_by": "pm_cycle",
+                }).execute()
+                _last_capability_snap_at = _now
+            except Exception as exc:
+                logger.debug("PM cycle: capability snapshot write failed — %s", exc)
 
         # ── Step 3c: Pre-Claude gates (Changes 2 and 3) ───────────────────────────
         pending_memo_count = _count_pending_memos()
