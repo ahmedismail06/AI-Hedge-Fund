@@ -112,7 +112,7 @@ def build_crisis_prompt(
 ### Portfolio Exposure
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
-- Cash: {base_ctx['cash_pct']:.1%}
+- Cash: {base_ctx['cash_pct']:.1%}{(' ($' + f"{base_ctx['cash_usd']:,.0f}" + ' live)') if base_ctx.get('cash_usd') is not None else ''}
 - Open positions: {base_ctx['position_count']}
 - Portfolio unrealized P&L (weighted, vs entry): {base_ctx['portfolio_unrealized_pnl_pct']:+.2%}
   (daily drawdown halt triggers at −10%; autonomous mode suspends at −5%)

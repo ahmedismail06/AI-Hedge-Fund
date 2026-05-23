@@ -151,7 +151,7 @@ def build_pre_earnings_prompt(
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
-- Cash available: {base_ctx['cash_pct']:.1%}
+- Cash available: {base_ctx['cash_pct']:.1%}{(' ($' + f"{base_ctx['cash_usd']:,.0f}" + ' live)') if base_ctx.get('cash_usd') is not None else ''}
 - Macro regime: {base_ctx['macro_regime']}
 
 ### Macro Briefing

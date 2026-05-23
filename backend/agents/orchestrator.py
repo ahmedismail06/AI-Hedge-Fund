@@ -1979,7 +1979,11 @@ def run_pm_cycle(
         # ── Step 3: Build base context ────────────────────────────────────────────
         from backend.agents.pm_prompts.base_context import build_base_context
         base_ctx = build_base_context(_get_client())
-        base_ctx["portfolio_value_usd"] = _compute_portfolio_value()
+        # Use the same IBKR portfolio_value that build_base_context used for cash_pct/exposure
+        # ratios so the PM sees a consistent picture. _compute_portfolio_value() reads from
+        # Supabase and can diverge from the IBKR NAV, causing cash_pct and portfolio_value_usd
+        # to be computed against two different denominators.
+        base_ctx["portfolio_value_usd"] = portfolio_value
         base_ctx["market_hours_open"] = _is_market_hours()
 
         if base_ctx["portfolio_value_usd"] <= 0:

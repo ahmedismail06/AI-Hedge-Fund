@@ -151,6 +151,8 @@ def build_new_entry_prompt(
 
     nav_usd = float(base_ctx.get("portfolio_value_usd") or 0)
     nav_display = f"${nav_usd:,.0f}" if nav_usd > 0 else "unknown"
+    _cash_usd = base_ctx.get("cash_usd")
+    _cash_display = f"${_cash_usd:,.0f} live" if _cash_usd is not None else f"≈ ${nav_usd * base_ctx['cash_pct']:,.0f} est."
 
     user_message = f"""## Decision Required: New Position Entry
 
@@ -164,7 +166,7 @@ def build_new_entry_prompt(
 - Portfolio NAV: {nav_display}
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
-- Cash available: {base_ctx['cash_pct']:.1%} (≈ ${nav_usd * base_ctx['cash_pct']:,.0f})
+- Cash available: {base_ctx['cash_pct']:.1%} ({_cash_display})
 - Open positions: {base_ctx['position_count']}
 - Macro regime: {base_ctx['macro_regime']}
 - Regime gross cap: {base_ctx['regime_caps']['gross']:.0%} | Net cap: {base_ctx['regime_caps']['net']:.0%}

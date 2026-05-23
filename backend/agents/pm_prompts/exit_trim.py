@@ -260,7 +260,7 @@ def build_exit_trim_prompt(
 ### Current Portfolio State
 - Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
 - Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
-- Cash available: {base_ctx['cash_pct']:.1%}
+- Cash available: {base_ctx['cash_pct']:.1%}{(' ($' + f"{base_ctx['cash_usd']:,.0f}" + ' live)') if base_ctx.get('cash_usd') is not None else ''}
 - Open positions: {base_ctx['position_count']}
 - Macro regime: {base_ctx['macro_regime']}
 - Regime gross cap: {base_ctx['regime_caps']['gross']:.0%} | Net cap: {base_ctx['regime_caps']['net']:.0%}

@@ -35,6 +35,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
           "portfolio_gross_exposure": float,
           "portfolio_net_exposure": float,
           "cash_pct": float,
+          "cash_usd": float | None,          # IBKR TotalCashValue (same as status bar)
           "position_count": int,
           "macro_regime": str,
           "macro_briefing_summary": dict,
@@ -74,16 +75,31 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["positions"] = positions
         ctx["position_count"] = len(positions)
 
-        # Compute live exposure using dollar_size against current portfolio value
-        # (avoids stale pct_of_portfolio which was baked in at sizing time)
-        from backend.broker.ibkr import get_portfolio_value
+        # Compute live exposure using current market value (share_count * current_price).
+        # dollar_size is set at fill time and only updated on partial exits — it drifts
+        # as prices move, causing cash_pct to be wrong. current_price is refreshed every
+        # risk monitor cycle so it's the correct denominator input.
+        from backend.broker.ibkr import get_portfolio_value, get_account_summary
         portfolio_value = get_portfolio_value()  # raises RuntimeError if IBKR + snapshot both unavailable
+
+        # Wire in the exact IBKR cash balance (TotalCashValue) so the PM sees the
+        # same figure as the dashboard status bar, rather than a derived estimate.
+        try:
+            summary = get_account_summary()
+            cash_usd = summary.get("TotalCashValue")
+            ctx["cash_usd"] = float(cash_usd) if cash_usd is not None else None
+        except Exception as _cash_exc:
+            logger.warning("build_base_context: could not fetch IBKR cash balance — %s", _cash_exc)
+            ctx["cash_usd"] = None
 
         gross = 0.0
         net = 0.0
         for p in positions:
-            dollar_size = float(p.get("dollar_size") or 0.0)
-            w = dollar_size / portfolio_value if portfolio_value > 0 else 0.0
+            shares = float(p.get("share_count") or 0.0)
+            cur_price = float(p.get("current_price") or 0.0)
+            # Fall back to dollar_size if current market value can't be computed
+            market_value = (shares * cur_price) if shares > 0 and cur_price > 0 else float(p.get("dollar_size") or 0.0)
+            w = market_value / portfolio_value if portfolio_value > 0 else 0.0
             direction = p.get("direction", "LONG")
             gross += abs(w)
             net += w if direction == "LONG" else -w
@@ -97,8 +113,9 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         for p in positions:
             entry = float(p.get("entry_price") or 0)
             current = float(p.get("current_price") or 0)
-            dollar_size = float(p.get("dollar_size") or 0.0)
-            w = dollar_size / portfolio_value if portfolio_value > 0 else 0.0
+            shares = float(p.get("share_count") or 0.0)
+            market_value = (shares * current) if shares > 0 and current > 0 else float(p.get("dollar_size") or 0.0)
+            w = market_value / portfolio_value if portfolio_value > 0 else 0.0
             if entry > 0 and current > 0 and w != 0:
                 pos_pnl = (current - entry) / entry
                 portfolio_pnl += w * pos_pnl

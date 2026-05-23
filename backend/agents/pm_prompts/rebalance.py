@@ -142,6 +142,7 @@ def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
         "gross_exposure": gross,
         "net_exposure": net,
         "cash_pct": base_ctx["cash_pct"],
+        "cash_usd": base_ctx.get("cash_usd"),
         "position_count": base_ctx["position_count"],
     }
 
