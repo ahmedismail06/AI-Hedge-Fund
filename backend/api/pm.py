@@ -70,33 +70,56 @@ def _get_pm_config_row() -> Dict[str, Any]:
 def _get_portfolio_summary() -> Dict[str, Any]:
     """Quick portfolio summary for the status endpoint.
 
-    Uses dollar_size / live portfolio_value so the fractions stay consistent
-    with GET /portfolio/exposure (which also uses the exposure tracker).
+    Uses share_count * current_price (live market value) instead of the stale
+    dollar_size column (which is set at fill time and never updated as prices move).
+    Falls back to dollar_size when share_count / current_price are unavailable.
     Returns fractions (0–1 scale); the Orchestrator frontend multiplies by 100.
     """
     try:
-        from backend.broker.ibkr import get_portfolio_value
-        from backend.portfolio.exposure_tracker import get_current_exposure
+        from backend.broker.ibkr import get_portfolio_value, get_account_summary
 
         resp = (
             _get_client()
             .table("positions")
-            .select("ticker,direction,dollar_size")
+            .select("ticker,direction,share_count,current_price,dollar_size")
             .eq("status", "OPEN")
             .execute()
         )
         positions = resp.data or []
-        portfolio_value = get_portfolio_value()
-        exposure = get_current_exposure(positions, portfolio_value)
 
-        gross = exposure["gross_exposure_pct"]
-        net   = exposure["net_exposure_pct"]
+        summary = get_account_summary()
+        portfolio_value = float(summary.get("NetLiquidation") or 0)
+        if not portfolio_value:
+            portfolio_value = get_portfolio_value()
+
+        safe_value = portfolio_value if portfolio_value > 0 else 1.0
+        gross_notional = 0.0
+        net_notional = 0.0
+
+        for pos in positions:
+            shares = float(pos.get("share_count") or 0.0)
+            cur_price = float(pos.get("current_price") or 0.0)
+            market_value = (
+                shares * cur_price if shares > 0 and cur_price > 0
+                else float(pos.get("dollar_size") or 0.0)
+            )
+            direction = str(pos.get("direction", "LONG")).upper()
+            gross_notional += abs(market_value)
+            net_notional += abs(market_value) if direction == "LONG" else -abs(market_value)
+
+        # Use IBKR TotalCashValue directly when available — avoids 1-gross approximation
+        # which drifts as position market values change.
+        raw_cash = summary.get("TotalCashValue")
+        if raw_cash is not None and float(raw_cash) >= 0:
+            cash_pct = float(raw_cash) / safe_value
+        else:
+            cash_pct = max(0.0, 1.0 - gross_notional / safe_value)
 
         return {
             "position_count": len(positions),
-            "gross_exposure": round(gross, 4),
-            "net_exposure": round(net, 4),
-            "cash_pct": round(max(0.0, 1.0 - gross), 4),
+            "gross_exposure": round(gross_notional / safe_value, 4),
+            "net_exposure": round(net_notional / safe_value, 4),
+            "cash_pct": round(cash_pct, 4),
         }
     except Exception as exc:
         logger.warning("pm API: portfolio summary failed — %s", exc)
