@@ -296,8 +296,10 @@ def trigger_screening(regime: str | None = None):
     Useful for testing or ad-hoc re-runs outside the scheduled 4PM ET window.
     """
     from backend.agents.screening_agent import run_screening, ScreeningAgentError
+    from backend.agents.short_screening_agent import run_short_screening
     try:
         results = run_screening(regime=regime)
+        run_short_screening()
     except ScreeningAgentError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:

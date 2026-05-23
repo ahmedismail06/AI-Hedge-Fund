@@ -3427,9 +3427,11 @@ def _trigger_macro_agent() -> None:
 
 def _trigger_screener() -> None:
     from backend.agents.screening_agent import run_screening
+    from backend.agents.short_screening_agent import run_short_screening
     _update_pipeline_status(True)
     try:
         run_screening()
+        run_short_screening()
     except Exception as exc:
         logger.error("PM scheduler: screener trigger failed — %s", exc)
     finally:
