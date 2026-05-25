@@ -153,6 +153,10 @@ def build_new_entry_prompt(
     nav_display = f"${nav_usd:,.0f}" if nav_usd > 0 else "unknown"
     _cash_usd = base_ctx.get("cash_usd")
     _cash_display = f"${_cash_usd:,.0f} live" if _cash_usd is not None else f"≈ ${nav_usd * base_ctx['cash_pct']:,.0f} est."
+    _pending_slim = [
+        {k: p[k] for k in ("ticker", "direction", "dollar_size", "sector", "status") if k in p}
+        for p in base_ctx.get("pending_positions", [])
+    ]
 
     user_message = f"""## Decision Required: New Position Entry
 
@@ -173,7 +177,7 @@ def build_new_entry_prompt(
 - Market status: {"OPEN — orders execute immediately" if base_ctx.get('market_hours_open') else "CLOSED — your decision will be queued and executed at next market open"}
 
 ### Queued Positions (Approved, Awaiting Fill)
-{json.dumps([{{k: p[k] for k in ('ticker', 'direction', 'dollar_size', 'sector', 'status') if k in p}} for p in base_ctx.get('pending_positions', [])], indent=2, default=str) if base_ctx.get('pending_positions') else "None"}
+{json.dumps(_pending_slim, indent=2, default=str) if _pending_slim else "None"}
 
 ### Sector Overlap
 Existing positions in same sector ({memo_sector}): {sector_overlap if sector_overlap else "None"}
