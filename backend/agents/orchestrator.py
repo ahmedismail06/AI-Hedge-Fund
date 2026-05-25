@@ -2432,6 +2432,7 @@ def run_pm_cycle(
                     category,
                     ticker or "unknown",
                     exc,
+                    exc_info=True,
                 )
 
         # Update fingerprint after a full cycle so Change 2 can deduplicate
