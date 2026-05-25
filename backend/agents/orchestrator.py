@@ -809,6 +809,17 @@ _PM_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "get_pending_actions",
+        "description": (
+            "Get a complete picture of all queued position changes not yet executed: "
+            "(1) queued entries — APPROVED/PENDING_APPROVAL positions awaiting fill at market open, "
+            "(2) armed exit actions — OPEN positions with TRIM/ADD/CLOSE already set by a prior PM decision. "
+            "Also returns the projected net exposure change once all pending actions execute. "
+            "Use this before any sizing or exposure decision to avoid double-allocating capacity."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 
@@ -858,16 +869,24 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
             )
             regime_resp = client.table("macro_briefings").select("regime").order("date", desc=True).limit(1).execute()
             regime = (regime_resp.data or [{}])[0].get("regime", "Transitional")
-            caps = _REGIME_CAPS.get(regime, _REGIME_CAPS["Transitional"])
+            caps = dict(_REGIME_CAPS.get(regime, _REGIME_CAPS["Transitional"]))
+            # Apply capability-tier override — same logic as exposure_tracker and base_context
+            try:
+                from backend.capabilities import get_capabilities
+                _caps_obj = get_capabilities()
+                if _caps_obj.max_net_exposure_pct is not None:
+                    caps["net"] = min(caps["net"], _caps_obj.max_net_exposure_pct)
+            except Exception:
+                pass
             return {
                 "gross_exposure": round(gross, 4),
                 "net_exposure": round(net, 4),
                 "cash_pct": round(max(0.0, 1.0 - gross), 4),
                 "regime": regime,
-                "regime_gross_cap": caps["gross"],
-                "regime_net_cap": caps["net"],
-                "gross_drift_from_cap": round(gross - caps["gross"], 4),
-                "net_drift_from_cap": round(net - caps["net"], 4),
+                "effective_gross_cap": caps["gross"],
+                "effective_net_cap": caps["net"],
+                "gross_headroom": round(caps["gross"] - gross, 4),
+                "net_headroom": round(caps["net"] - net, 4),
                 "portfolio_nav": round(nav, 2),
             }
 
@@ -993,6 +1012,51 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
             return _get_client().table("pm_calibration").select(
                 "confidence_at_entry,return_pct,was_correct"
             ).order("created_at", desc=True).limit(100).execute().data or []
+
+        elif tool_name == "get_pending_actions":
+            # Queued entries (committed but unfilled)
+            entries_resp = client.table("positions").select(
+                "ticker,direction,dollar_size,sector,status,conviction_score"
+            ).in_("status", ["APPROVED", "PENDING_APPROVAL"]).execute()
+            entries = entries_resp.data or []
+
+            # Armed exit/add actions on OPEN positions
+            exits_resp = client.table("positions").select(
+                "ticker,direction,dollar_size,sector,exit_action,exit_trim_pct"
+            ).eq("status", "OPEN").not_.is_("exit_action", "null").execute()
+            exits = exits_resp.data or []
+
+            try:
+                from backend.broker.ibkr import get_portfolio_value
+                nav = get_portfolio_value()
+            except Exception:
+                nav = _compute_portfolio_value()
+
+            entry_notional = sum(abs(float(p.get("dollar_size") or 0)) for p in entries)
+            release_notional = 0.0
+            for p in exits:
+                action = p.get("exit_action")
+                size = abs(float(p.get("dollar_size") or 0))
+                trim_pct = float(p.get("exit_trim_pct") or 0)
+                if action == "CLOSE":
+                    release_notional += size
+                elif action == "TRIM":
+                    release_notional += size * trim_pct
+                elif action == "ADD":
+                    release_notional -= size * trim_pct  # increases exposure
+
+            safe_nav = nav if nav > 0 else 1.0
+            return {
+                "queued_entries": entries,
+                "queued_entries_count": len(entries),
+                "queued_entries_notional_usd": round(entry_notional, 2),
+                "queued_entries_pct_nav": round(entry_notional / safe_nav, 4),
+                "armed_exit_actions": exits,
+                "armed_exits_count": len(exits),
+                "projected_capacity_release_pct_nav": round(release_notional / safe_nav, 4),
+                "net_projected_exposure_change_pct_nav": round((entry_notional - release_notional) / safe_nav, 4),
+                "portfolio_nav": round(nav, 2),
+            }
 
         else:
             return {"error": f"Unknown tool: {tool_name}"}

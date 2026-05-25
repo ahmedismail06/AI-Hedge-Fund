@@ -8,7 +8,7 @@ recommendation and decides: EXECUTE | MODIFY_SIZE | DEFER | REJECT | WATCHLIST.
 import json
 from typing import Any, Dict, Optional, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context, format_pending_actions_context
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund ($50M–$2B market cap, ≤5 sell-side analysts covering). Your edge is identifying variant perception opportunities — situations where you have a differentiated view from consensus — before institutional capital arrives.
 
@@ -164,13 +164,16 @@ def build_new_entry_prompt(
 
 ### Current Portfolio State
 - Portfolio NAV: {nav_display}
-- Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%}
-- Net exposure: {base_ctx['portfolio_net_exposure']:.1%}
+- Gross exposure: {base_ctx['portfolio_gross_exposure']:.1%} (includes queued)
+- Net exposure: {base_ctx['portfolio_net_exposure']:.1%} (includes queued)
 - Cash available: {base_ctx['cash_pct']:.1%} ({_cash_display})
-- Open positions: {base_ctx['position_count']}
+- Filled positions: {base_ctx['position_count']} | Queued (approved, awaiting fill): {base_ctx.get('pending_position_count', 0)}
 - Macro regime: {base_ctx['macro_regime']}
-- Regime gross cap: {base_ctx['regime_caps']['gross']:.0%} | Net cap: {base_ctx['regime_caps']['net']:.0%}
+- Effective gross cap: {base_ctx['regime_caps']['gross']:.0%} | Effective net cap: {base_ctx['regime_caps']['net']:.0%} (regime cap tightened by NAV-tier if lower)
 - Market status: {"OPEN — orders execute immediately" if base_ctx.get('market_hours_open') else "CLOSED — your decision will be queued and executed at next market open"}
+
+### Queued Positions (Approved, Awaiting Fill)
+{json.dumps([{{k: p[k] for k in ('ticker', 'direction', 'dollar_size', 'sector', 'status') if k in p}} for p in base_ctx.get('pending_positions', [])], indent=2, default=str) if base_ctx.get('pending_positions') else "None"}
 
 ### Sector Overlap
 Existing positions in same sector ({memo_sector}): {sector_overlap if sector_overlap else "None"}
@@ -187,7 +190,7 @@ Existing positions in same sector ({memo_sector}): {sector_overlap if sector_ove
 ### Recent PM Decisions (last 10)
 {json.dumps([{k: v for k, v in d.items() if k not in ('outcome', 'confidence_breakdown')} for d in base_ctx['recent_decisions']], indent=2, default=str)}
 
-{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
+{format_pending_actions_context(base_ctx)}{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Evaluate this memo against the current portfolio state and make your entry decision. Consider: thesis quality, variant perception clarity, portfolio fit, sector concentration, regime alignment, and sizing relative to available capacity. Use your historical calibration stats to inform how much weight to put on your conviction score.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

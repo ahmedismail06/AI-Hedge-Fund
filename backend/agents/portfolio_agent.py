@@ -138,7 +138,11 @@ def _read_regime() -> str:
 
 def _load_open_positions() -> list:
     """
-    Phase 3a: Fetch all rows from the positions table where status = 'OPEN'.
+    Phase 3a: Fetch OPEN + APPROVED + PENDING_APPROVAL position rows.
+
+    APPROVED and PENDING_APPROVAL are committed capital (queued for next market
+    open) — they must be included in Phase 4c exposure checks so sizing doesn't
+    double-allocate against capacity that is already spoken for.
 
     Returns an empty list on any Supabase failure (non-blocking).
     """
@@ -147,11 +151,11 @@ def _load_open_positions() -> list:
         result = (
             client.table("positions")
             .select("*")
-            .eq("status", "OPEN")
+            .in_("status", ["OPEN", "APPROVED", "PENDING_APPROVAL"])
             .execute()
         )
         positions = result.data or []
-        logger.info("Phase 3: loaded %d open positions", len(positions))
+        logger.info("Phase 3: loaded %d positions (OPEN + APPROVED + PENDING_APPROVAL)", len(positions))
         return positions
     except Exception as exc:
         logger.warning("Phase 3: could not load open positions (%s) — treating as empty", exc)

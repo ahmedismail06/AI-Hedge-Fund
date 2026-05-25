@@ -51,7 +51,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
         reasons += [
             "Shorts enabled — $50M+ market cap universe (full L/S)",
             "Short interest factor active in screener",
-            "Net exposure cap: 20% (overridden by regime caps)",
+            "Net exposure cap: governed by macro regime",
             "Alt data integration permitted (budget gate separate)",
         ]
         return Capabilities(
@@ -60,7 +60,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
             shorts_enabled=True,
             short_universe_min_cap=50.0,
             short_factor_active=True,
-            max_net_exposure_pct=0.20,
+            max_net_exposure_pct=None,
             alt_data_permitted=True,
             capability_tier=tier,
             unlocked_reasons=reasons,
@@ -71,7 +71,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
         reasons += [
             "Shorts enabled — $50M+ market cap universe (full L/S)",
             "Short interest factor active in screener",
-            "Net exposure cap: 20% (overridden by regime caps)",
+            "Net exposure cap: governed by macro regime",
         ]
         return Capabilities(
             nav=current,
@@ -79,7 +79,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
             shorts_enabled=True,
             short_universe_min_cap=50.0,
             short_factor_active=True,
-            max_net_exposure_pct=0.20,
+            max_net_exposure_pct=None,
             alt_data_permitted=False,
             capability_tier=tier,
             unlocked_reasons=reasons,
@@ -90,7 +90,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
         reasons += [
             "Shorts enabled — $200M+ market cap only",
             "Short interest factor active in screener",
-            "Net exposure cap: 20%",
+            "Net exposure cap: governed by macro regime",
         ]
         return Capabilities(
             nav=current,
@@ -98,7 +98,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
             shorts_enabled=True,
             short_universe_min_cap=200.0,
             short_factor_active=True,
-            max_net_exposure_pct=0.20,
+            max_net_exposure_pct=None,
             alt_data_permitted=False,
             capability_tier=tier,
             unlocked_reasons=reasons,
@@ -109,7 +109,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
         reasons += [
             "Shorts enabled — $200M+ market cap only",
             "Short interest factor inactive (activates at $50K NAV)",
-            "Net exposure cap: 20%",
+            "Net exposure cap: governed by macro regime",
         ]
         return Capabilities(
             nav=current,
@@ -117,7 +117,7 @@ def get_capabilities(nav: Optional[float] = None) -> Capabilities:
             shorts_enabled=True,
             short_universe_min_cap=200.0,
             short_factor_active=False,
-            max_net_exposure_pct=0.20,
+            max_net_exposure_pct=None,
             alt_data_permitted=False,
             capability_tier=tier,
             unlocked_reasons=reasons,

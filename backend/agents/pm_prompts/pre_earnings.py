@@ -8,7 +8,7 @@ Triggered when a position or watchlist name has an earnings release within
 import json
 from typing import Any, Dict, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context, format_pending_actions_context
 
 from backend.fetchers.earnings_reactions import get_earnings_reactions
 
@@ -157,7 +157,7 @@ def build_pre_earnings_prompt(
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
-{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
+{format_pending_actions_context(base_ctx)}{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Decide how to position this name into earnings. The EarningsAlpha signal above reflects a quantitative model comparing internal EPS extrapolation against consensus — treat it as one data point, not a directive. Be honest about whether you have a differentiated view on the earnings outcome itself — if you don't, HOLD or TRIM, not SIZE_UP.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

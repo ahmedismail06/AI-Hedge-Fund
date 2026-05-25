@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
-from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context
+from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context, format_pending_actions_context
 
 _SYSTEM_PROMPT = """You are the portfolio manager of a US micro/small-cap equity fund. You are reviewing an existing position to determine whether to hold, trim, add to, or close it.
 
@@ -268,7 +268,7 @@ def build_exit_trim_prompt(
 ### Macro Briefing
 {json.dumps(base_ctx['macro_briefing_summary'], indent=2, default=str)}
 
-{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
+{format_pending_actions_context(base_ctx)}{format_calibration_context(base_ctx)}{format_capabilities_context(base_ctx)}---
 Evaluate this position and decide whether to hold, trim, close, or add. Focus on: thesis integrity, stop proximity, current P&L, adversarial risks, and portfolio-level fit.
 
 Respond with ONLY a valid JSON object — no markdown fences, no preamble."""

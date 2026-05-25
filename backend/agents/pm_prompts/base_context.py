@@ -46,6 +46,9 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
     """
     ctx: Dict[str, Any] = {
         "positions": [],
+        "pending_positions": [],
+        "pending_position_count": 0,
+        "pending_exit_actions": [],
         "portfolio_gross_exposure": 0.0,
         "portfolio_net_exposure": 0.0,
         "portfolio_unrealized_pnl_pct": 0.0,
@@ -103,6 +106,41 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             direction = p.get("direction", "LONG")
             gross += abs(w)
             net += w if direction == "LONG" else -w
+
+        # APPROVED / PENDING_APPROVAL positions are committed capital — include in
+        # exposure so Claude sees what's already queued for next market open.
+        try:
+            pend_resp = (
+                supabase_client.table("positions")
+                .select("id,ticker,direction,dollar_size,sector,status,conviction_score")
+                .in_("status", ["APPROVED", "PENDING_APPROVAL"])
+                .execute()
+            )
+            pending = pend_resp.data or []
+            ctx["pending_positions"] = pending
+            ctx["pending_position_count"] = len(pending)
+            # Derive pending exit actions from already-fetched OPEN positions (no extra query)
+            ctx["pending_exit_actions"] = [
+                {
+                    "ticker": p.get("ticker"),
+                    "direction": p.get("direction"),
+                    "exit_action": p.get("exit_action"),
+                    "exit_trim_pct": p.get("exit_trim_pct"),
+                    "dollar_size": p.get("dollar_size"),
+                    "sector": p.get("sector"),
+                }
+                for p in positions
+                if p.get("exit_action") is not None
+            ]
+            for p in pending:
+                w = abs(float(p.get("dollar_size") or 0.0)) / portfolio_value if portfolio_value > 0 else 0.0
+                direction = p.get("direction", "LONG")
+                gross += abs(w)
+                net += w if direction == "LONG" else -w
+        except Exception as _pend_exc:
+            logger.warning("build_base_context: pending positions read failed — %s", _pend_exc)
+            ctx.setdefault("pending_positions", [])
+            ctx.setdefault("pending_position_count", 0)
 
         ctx["portfolio_gross_exposure"] = round(gross, 4)
         ctx["portfolio_net_exposure"] = round(net, 4)
@@ -226,6 +264,14 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         ctx["capabilities"] = caps.model_dump()
         ctx["capability_tier"] = caps.capability_tier
         ctx["shorts_enabled"] = caps.shorts_enabled
+        # Capability tier may impose a tighter net cap than the raw regime value
+        # (e.g. Constructive regime = 35% but current NAV tier caps at 20%).
+        # Apply the effective minimum so the PM sees the real constraint.
+        if caps.max_net_exposure_pct is not None:
+            ctx["regime_caps"] = {
+                **ctx["regime_caps"],
+                "net": min(ctx["regime_caps"]["net"], caps.max_net_exposure_pct),
+            }
     except Exception as exc:
         logger.warning("build_base_context: capabilities read failed — %s", exc)
         ctx["capabilities"] = None
@@ -304,6 +350,61 @@ def format_capabilities_context(base_ctx: dict) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def format_pending_actions_context(base_ctx: dict) -> str:
+    """
+    Return a formatted block showing all queued position changes not yet executed:
+      - Queued entries: APPROVED / PENDING_APPROVAL positions awaiting fill
+      - Armed exit actions: OPEN positions with TRIM / ADD / CLOSE already set
+
+    Included in every PM decision user_message so Claude has a full picture of
+    committed-but-unexecuted capital before making any decision.
+    Returns an empty string if nothing is pending.
+    """
+    entries = base_ctx.get("pending_positions", [])
+    exits = base_ctx.get("pending_exit_actions", [])
+
+    if not entries and not exits:
+        return ""
+
+    parts = ["### Pending Position Changes (Queued, Not Yet Executed)"]
+
+    if entries:
+        parts.append(f"**Queued entries — {len(entries)} position(s) approved, awaiting fill at market open:**")
+        for p in entries:
+            size = float(p.get("dollar_size") or 0)
+            parts.append(
+                f"  • {p.get('ticker')} {p.get('direction', 'LONG')} ${size:,.0f}"
+                f"  [{p.get('sector', '?')}]  status={p.get('status')}"
+            )
+
+    if exits:
+        parts.append(f"**Armed exit actions — {len(exits)} OPEN position(s) with a pending order:**")
+        for p in exits:
+            action = p.get("exit_action")
+            trim_pct = p.get("exit_trim_pct")
+            size = float(p.get("dollar_size") or 0)
+            if action == "CLOSE":
+                parts.append(f"  • {p.get('ticker')}: CLOSE full position (${size:,.0f})")
+            elif action == "TRIM" and trim_pct:
+                parts.append(
+                    f"  • {p.get('ticker')}: TRIM {float(trim_pct):.0%}"
+                    f"  (≈${size * float(trim_pct):,.0f} released)"
+                )
+            elif action == "ADD" and trim_pct:
+                parts.append(
+                    f"  • {p.get('ticker')}: ADD {float(trim_pct):.0%}"
+                    f"  (≈${size * float(trim_pct):,.0f} additional)"
+                )
+            else:
+                parts.append(f"  • {p.get('ticker')}: {action}")
+
+    parts.append(
+        "Exposure figures above already include queued entries. "
+        "Armed exits will *release* capacity once filled — do not double-count them.\n"
+    )
+    return "\n".join(parts) + "\n"
 
 
 _CALIBRATION_MIN_ROWS = 3
