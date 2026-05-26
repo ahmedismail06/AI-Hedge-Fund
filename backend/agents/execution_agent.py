@@ -689,19 +689,38 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                 )
                 continue
 
-            # E: Skip if an active order already exists (avoids duplicate orders)
+            # E: Skip if an active order already exists (avoids duplicate orders).
+            # Also check FILLED entry orders: if a fill was recorded but
+            # _close_position_loop failed silently, the position stays stuck in
+            # APPROVED while the order is already FILLED. Repair it here so a
+            # second order is never placed for the same position.
             existing = (
                 client.table("orders")
-                .select("id")
+                .select("id,status,avg_fill_price,exit_type")
                 .eq("position_id", pos["id"])
-                .in_("status", ["SUBMITTED", "PARTIAL"])
+                .in_("status", ["SUBMITTED", "PARTIAL", "FILLED"])
                 .execute()
             )
             if existing.data:
-                logger.debug(
-                    "Position %s (%s) already has an active order — skipping",
-                    pos["id"], pos.get("ticker"),
+                filled_entry = next(
+                    (o for o in existing.data
+                     if o["status"] == "FILLED" and o.get("exit_type") is None),
+                    None,
                 )
+                if filled_entry and filled_entry.get("avg_fill_price"):
+                    fill_price = float(filled_entry["avg_fill_price"])
+                    logger.warning(
+                        "Position %s (%s) has FILLED entry order but status=APPROVED — "
+                        "_close_position_loop failed previously; repairing at $%.4f",
+                        pos["id"], pos.get("ticker"), fill_price,
+                    )
+                    _fill_recorder._close_position_loop(pos["id"], fill_price)
+                else:
+                    logger.debug(
+                        "Position %s (%s) already has an active order (%s) — skipping",
+                        pos["id"], pos.get("ticker"),
+                        ", ".join(o["status"] for o in existing.data),
+                    )
                 continue
 
             # Retry cap: abandon positions that have timed out too many times.
