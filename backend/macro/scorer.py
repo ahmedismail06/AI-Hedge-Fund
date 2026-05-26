@@ -102,8 +102,26 @@ class RawIndicators:
     five_y_five_y_forward: Optional[float] = None
     """5Y5Y forward inflation rate level."""
 
+    treasury_3m: Optional[float] = None
+    """3-month Treasury yield level."""
+
+    treasury_6m: Optional[float] = None
+    """6-month Treasury yield level."""
+
+    treasury_1y: Optional[float] = None
+    """1-year Treasury yield level."""
+
+    treasury_2y: Optional[float] = None
+    """2-year Treasury yield level."""
+
+    treasury_5y: Optional[float] = None
+    """5-year Treasury yield level."""
+
     treasury_10y: Optional[float] = None
     """10-year Treasury yield level."""
+
+    treasury_30y: Optional[float] = None
+    """30-year Treasury yield level."""
 
     wti_oil_price: Optional[float] = None
     """WTI crude proxy via USO ETF."""
@@ -266,7 +284,13 @@ def build_raw_indicators(
         trimmed_mean_pce_yoy=fred.yoy_changes.get("trimmed_mean_pce"),
         breakeven_5y=fred.raw_values.get("breakeven_5y"),
         five_y_five_y_forward=fred.raw_values.get("five_y_five_y_fwd"),
+        treasury_3m=fred.raw_values.get("yield_3m"),
+        treasury_6m=fred.raw_values.get("yield_6m"),
+        treasury_1y=fred.raw_values.get("yield_1y"),
+        treasury_2y=fred.raw_values.get("yield_2y"),
+        treasury_5y=fred.raw_values.get("yield_5y"),
         treasury_10y=fred.raw_values.get("yield_10y"),
+        treasury_30y=fred.raw_values.get("yield_30y"),
         wti_oil_price=commodity_block.wti_oil_price if commodity_block else None,
         brent_oil_price=commodity_block.brent_oil_price if commodity_block else None,
         gasoline_price=commodity_block.gasoline_price if commodity_block else None,
@@ -1172,6 +1196,43 @@ def build_indicator_scores(ind: RawIndicators) -> list[dict]:
             "value": v,
             "signal": _signal(s),
             "note": f"{v:+.0f} bps (10Y-2Y){'  — INVERTED' if v < 0 else ''}",
+        })
+
+    # Treasury yields (individual maturities — used for yield curve chart)
+    for field_name, label in [
+        ("treasury_3m",  "3M Treasury"),
+        ("treasury_6m",  "6M Treasury"),
+        ("treasury_1y",  "1Y Treasury"),
+        ("treasury_2y",  "2Y Treasury"),
+        ("treasury_5y",  "5Y Treasury"),
+        ("treasury_10y", "10Y Treasury"),
+        ("treasury_30y", "30Y Treasury"),
+    ]:
+        v = getattr(ind, field_name, None)
+        if v is not None:
+            result.append({
+                "name": label,
+                "value": v,
+                "signal": "neutral",
+                "note": f"{v:.3f}%",
+            })
+
+    # SPX vs 200-day SMA
+    if ind.spx_pct_above_sma is not None:
+        v = ind.spx_pct_above_sma
+        if v > 10:
+            s = 1.0
+        elif v >= 0:
+            s = 0.5
+        elif v >= -5:
+            s = -0.5
+        else:
+            s = -1.0
+        result.append({
+            "name": "SPX 200DMA",
+            "value": v,
+            "signal": _signal(s),
+            "note": f"SPX is {abs(v):.1f}% {'above' if v >= 0 else 'below'} 200-day MA",
         })
 
     return result

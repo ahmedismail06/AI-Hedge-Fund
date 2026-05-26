@@ -105,12 +105,39 @@ async def get_macro_history(limit: int = Query(30, ge=1, le=90)):
     return await asyncio.to_thread(_run)
 
 
+# Maps human-readable indicator names (stored in indicator_scores) to the
+# snake_case keys the frontend INDICATOR_LABELS dict expects.
+_INDICATOR_NAME_TO_KEY: dict[str, str] = {
+    "GDP YoY":            "gdp_growth",
+    "ISM Svc PMI":        "ism_pmi",
+    "Jobless Claims":     "jobless_claims",
+    "Payrolls MoM":       "nonfarm_payrolls",
+    "CPI YoY":            "cpi_yoy",
+    "Core CPI YoY":       "core_cpi_yoy",
+    "PPI YoY":            "ppi_yoy",
+    "PCE YoY":            "pce_yoy",
+    "5Y Breakeven":       "breakeven_5y",
+    "VIX":                "vix",
+    "HY Spread":          "hy_spread",
+    "DXY":                "dxy",
+    "Yield Curve Spread": "yield_curve",
+    "SPX 200DMA":         "spx_200dma_pct",
+    "3M Treasury":        "treasury_3m",
+    "6M Treasury":        "treasury_6m",
+    "1Y Treasury":        "treasury_1y",
+    "2Y Treasury":        "treasury_2y",
+    "5Y Treasury":        "treasury_5y",
+    "10Y Treasury":       "treasury_10y",
+    "30Y Treasury":       "treasury_30y",
+}
+
+
 # ── GET /macro/indicators ─────────────────────────────────────────────────────
 
 
 @router.get("/indicators")
 async def get_macro_indicators():
-    """Return the indicator_scores list from the most recent briefing."""
+    """Return macro indicators as a flat dict keyed by snake_case indicator names."""
     def _run():
         try:
             client = _get_client()
@@ -128,7 +155,16 @@ async def get_macro_indicators():
             raise HTTPException(status_code=404, detail="No macro briefing found")
 
         row = result.data[0]
-        return {"date": row["date"], "indicators": row["indicator_scores"]}
+        scores: list = row["indicator_scores"] or []
+
+        flat: dict = {"date": row["date"]}
+        for entry in scores:
+            name = entry.get("name", "")
+            key = _INDICATOR_NAME_TO_KEY.get(name)
+            if key and entry.get("value") is not None:
+                flat[key] = entry["value"]
+
+        return flat
 
     return await asyncio.to_thread(_run)
 

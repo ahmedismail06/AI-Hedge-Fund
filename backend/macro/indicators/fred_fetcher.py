@@ -50,8 +50,13 @@ FRED_SERIES: dict[str, str] = {
     "jobless":      "ICSA",          # Initial jobless claims (weekly, actual headcount — NOT thousands)
     "payrolls":     "PAYEMS",        # Nonfarm payrolls (monthly, thousands)
     "fed_funds":    "FEDFUNDS",      # Federal funds rate (monthly avg)
+    "yield_3m":     "DGS3MO",        # 3M Treasury yield (daily)
+    "yield_6m":     "DGS6MO",        # 6M Treasury yield (daily)
+    "yield_1y":     "DGS1",          # 1Y Treasury yield (daily)
     "yield_2y":     "DGS2",          # 2Y Treasury yield (daily)
+    "yield_5y":     "DGS5",          # 5Y Treasury yield (daily)
     "yield_10y":    "DGS10",         # 10Y Treasury yield (daily)
+    "yield_30y":    "DGS30",         # 30Y Treasury yield (daily)
     "hy_spread":    "BAMLH0A0HYM2",  # ICE BofA HY OAS spread (daily, bps)
 }
 
