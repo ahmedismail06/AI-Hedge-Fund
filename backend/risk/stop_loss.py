@@ -87,6 +87,7 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
     # ── Tier 1: per-position stop (breached) + approaching-stop WARN ─────────
     for pos in positions:
         ticker = pos.get("ticker", "?")
+        direction = str(pos.get("direction", "LONG")).upper()
         pnl_pct = _safe_float(pos.get("pnl_pct"), 0.0)
         current_price = _safe_float(pos.get("current_price"))
         stop_price = _safe_float(pos.get("stop_loss_price"))
@@ -98,9 +99,10 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
         t1_thresh = _tier1_threshold(regime, drift_hold_active=drift_held)
 
         logger.debug(
-            "stop_check %s: pnl_pct=%.2f%% current=$%.4f entry=$%.4f stop=$%.4f "
+            "stop_check %s (%s): pnl_pct=%.2f%% current=$%.4f entry=$%.4f stop=$%.4f "
             "tier1_thresh=%.1f%% drift_hold=%s",
             ticker,
+            direction,
             (pnl_pct or 0) * 100,
             current_price or 0,
             entry_price or 0,
@@ -111,8 +113,8 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
 
         if pnl_pct <= t1_thresh:
             logger.warning(
-                "STOP BREACHED — %s pnl_pct=%.2f%% <= threshold=%.1f%% (regime=%s)",
-                ticker, pnl_pct * 100, t1_thresh * 100, regime,
+                "STOP BREACHED — %s (%s) pnl_pct=%.2f%% <= threshold=%.1f%% (regime=%s)",
+                ticker, direction, pnl_pct * 100, t1_thresh * 100, regime,
             )
             events.append(StopEvent(
                 ticker=ticker,
@@ -124,26 +126,50 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
                 regime=regime,
                 sector=sector,
                 approaching=False,
+                direction=direction,
             ))
-        elif stop_price and current_price and current_price > stop_price:
-            # Position above stop — check proximity
-            distance_pct = (current_price - stop_price) / stop_price
-            if distance_pct <= _APPROACHING_PCT:
-                logger.warning(
-                    "APPROACHING STOP — %s current=$%.4f stop=$%.4f distance=%.1f%% (WARN threshold=%.0f%%)",
-                    ticker, current_price, stop_price, distance_pct * 100, _APPROACHING_PCT * 100,
-                )
-                events.append(StopEvent(
-                    ticker=ticker,
-                    tier=1,
-                    entry_price=entry_price,
-                    current_price=current_price,
-                    stop_price=stop_price,
-                    pct_move=pnl_pct,
-                    regime=regime,
-                    sector=sector,
-                    approaching=True,
-                ))
+        elif stop_price and current_price:
+            # Direction-aware approaching stop check.
+            # LONG: stop is a floor — warn when price is within 10% above the stop.
+            # SHORT: stop is a ceiling — warn when price is within 10% below the stop.
+            if direction == "SHORT" and current_price < stop_price:
+                distance_pct = (stop_price - current_price) / stop_price
+                if distance_pct <= _APPROACHING_PCT:
+                    logger.warning(
+                        "APPROACHING STOP (SHORT) — %s current=$%.4f stop=$%.4f distance=%.1f%%",
+                        ticker, current_price, stop_price, distance_pct * 100,
+                    )
+                    events.append(StopEvent(
+                        ticker=ticker,
+                        tier=1,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        stop_price=stop_price,
+                        pct_move=pnl_pct,
+                        regime=regime,
+                        sector=sector,
+                        approaching=True,
+                        direction=direction,
+                    ))
+            elif direction != "SHORT" and current_price > stop_price:
+                distance_pct = (current_price - stop_price) / stop_price
+                if distance_pct <= _APPROACHING_PCT:
+                    logger.warning(
+                        "APPROACHING STOP — %s current=$%.4f stop=$%.4f distance=%.1f%% (WARN threshold=%.0f%%)",
+                        ticker, current_price, stop_price, distance_pct * 100, _APPROACHING_PCT * 100,
+                    )
+                    events.append(StopEvent(
+                        ticker=ticker,
+                        tier=1,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        stop_price=stop_price,
+                        pct_move=pnl_pct,
+                        regime=regime,
+                        sector=sector,
+                        approaching=True,
+                        direction=direction,
+                    ))
 
     # ── Tier 2: sector aggregate stop ────────────────────────────────────────
     # Aggregate weighted pnl_pct by sector (weight = pct_of_portfolio)

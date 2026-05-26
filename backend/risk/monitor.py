@@ -306,11 +306,15 @@ def _refresh_prices(
         if entry_price:
             try:
                 ep = float(entry_price)
-                pnl = (live_price - ep) / ep if ep else 0.0
+                direction = str(pos.get("direction", "LONG")).upper()
+                if direction == "SHORT":
+                    pnl = (ep - live_price) / ep if ep else 0.0
+                else:
+                    pnl = (live_price - ep) / ep if ep else 0.0
                 pos["pnl_pct"] = pnl
                 logger.debug(
-                    "pnl: %s entry=$%.4f live=$%.4f pnl_pct=%.2f%%",
-                    ticker, ep, live_price, pnl * 100,
+                    "pnl: %s %s entry=$%.4f live=$%.4f pnl_pct=%.2f%%",
+                    ticker, direction, ep, live_price, pnl * 100,
                 )
             except (TypeError, ValueError) as exc:
                 logger.warning("pnl_pct computation failed for %s: %s", ticker, exc)

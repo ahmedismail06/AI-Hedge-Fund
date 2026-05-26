@@ -24,6 +24,7 @@ class StopEvent(BaseModel):
     regime: str                           # macro regime at time of check
     sector: Optional[str] = None          # populated for Tier 2 events
     approaching: bool = False             # True when approaching stop (WARN) vs breached
+    direction: str = "LONG"              # LONG or SHORT — needed for correct alert text
 
 
 class ExposureBreach(BaseModel):
@@ -34,6 +35,7 @@ class ExposureBreach(BaseModel):
     cap_net: float                        # regime-gated net cap
     severity: Literal["WARN", "BREACH"]  # WARN if within 10% of cap, BREACH if exceeded
     regime: str
+    breach_type: Literal["gross", "gross_short", "net_long", "net_short"] = "gross"
 
 
 class RiskStatus(BaseModel):

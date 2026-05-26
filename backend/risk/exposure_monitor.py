@@ -32,8 +32,11 @@ def check_exposure_drift(
     exposure = get_current_exposure(positions, portfolio_value=portfolio_value, regime=regime)
     current_gross: float = exposure.get("gross_exposure_pct", 0.0)
     current_net: float = exposure.get("net_exposure_pct", 0.0)
+    current_gross_short: float = exposure.get("gross_short_pct", 0.0)
     max_gross: float = exposure.get("max_gross_pct", 1.5)
-    max_net: float = exposure.get("max_net_long_pct", 0.5)
+    max_net_long: float = exposure.get("max_net_long_pct", 0.5)
+    max_net_short: float = exposure.get("max_net_short_pct", 0.0)   # negative floor or 0
+    max_gross_short: float = exposure.get("max_gross_short_pct", 0.6)
 
     breaches: list[ExposureBreach] = []
 
@@ -43,40 +46,91 @@ def check_exposure_drift(
             current_gross=current_gross,
             cap_gross=max_gross,
             current_net=current_net,
-            cap_net=max_net,
+            cap_net=max_net_long,
             severity="BREACH",
             regime=regime,
+            breach_type="gross",
         ))
     elif current_gross > max_gross * (1.0 - _WARN_BUFFER):
         breaches.append(ExposureBreach(
             current_gross=current_gross,
             cap_gross=max_gross,
             current_net=current_net,
-            cap_net=max_net,
+            cap_net=max_net_long,
             severity="WARN",
             regime=regime,
+            breach_type="gross",
         ))
 
-    # ── Net exposure check (only if gross wasn't already breached) ────────────
-    # Avoid double-firing when both gross and net are breached in the same cycle.
-    if not breaches or breaches[0].severity == "WARN":
-        if current_net > max_net:
+    # ── Gross short exposure check ────────────────────────────────────────────
+    # Separate cap on total short notional; tighter than gross because shorts
+    # carry asymmetric loss (loss on a short is theoretically unbounded).
+    if not breaches or breaches[-1].severity == "WARN":
+        if current_gross_short > max_gross_short:
             breaches.append(ExposureBreach(
-                current_gross=current_gross,
-                cap_gross=max_gross,
+                current_gross=current_gross_short,
+                cap_gross=max_gross_short,
                 current_net=current_net,
-                cap_net=max_net,
+                cap_net=max_net_short,
                 severity="BREACH",
                 regime=regime,
+                breach_type="gross_short",
             ))
-        elif current_net > max_net * (1.0 - _WARN_BUFFER) and not breaches:
+        elif current_gross_short > max_gross_short * (1.0 - _WARN_BUFFER) and not breaches:
+            breaches.append(ExposureBreach(
+                current_gross=current_gross_short,
+                cap_gross=max_gross_short,
+                current_net=current_net,
+                cap_net=max_net_short,
+                severity="WARN",
+                regime=regime,
+                breach_type="gross_short",
+            ))
+
+    # ── Net long cap and net short floor check ────────────────────────────────
+    # Avoid double-firing when gross was already breached.
+    if not breaches or breaches[-1].severity == "WARN":
+        if current_net > max_net_long:
             breaches.append(ExposureBreach(
                 current_gross=current_gross,
                 cap_gross=max_gross,
                 current_net=current_net,
-                cap_net=max_net,
+                cap_net=max_net_long,
+                severity="BREACH",
+                regime=regime,
+                breach_type="net_long",
+            ))
+        elif current_net > max_net_long * (1.0 - _WARN_BUFFER) and not breaches:
+            breaches.append(ExposureBreach(
+                current_gross=current_gross,
+                cap_gross=max_gross,
+                current_net=current_net,
+                cap_net=max_net_long,
                 severity="WARN",
                 regime=regime,
+                breach_type="net_long",
+            ))
+        elif current_net < max_net_short - 1e-6:
+            # Net short floor breached (net is more negative than the regime floor)
+            breaches.append(ExposureBreach(
+                current_gross=current_gross,
+                cap_gross=max_gross,
+                current_net=current_net,
+                cap_net=max_net_short,
+                severity="BREACH",
+                regime=regime,
+                breach_type="net_short",
+            ))
+        elif max_net_short < 0 and current_net < max_net_short * (1.0 - _WARN_BUFFER) and not breaches:
+            # Approaching net-short floor; skip WARN when floor is 0 (no buffer exists)
+            breaches.append(ExposureBreach(
+                current_gross=current_gross,
+                cap_gross=max_gross,
+                current_net=current_net,
+                cap_net=max_net_short,
+                severity="WARN",
+                regime=regime,
+                breach_type="net_short",
             ))
 
     return breaches

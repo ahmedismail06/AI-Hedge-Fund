@@ -111,6 +111,13 @@ def _stop_trigger_text(event: StopEvent) -> str:
         if getattr(event, "approaching", False):
             stop_str = f"${event.stop_price:.2f}" if event.stop_price else "stop"
             curr_str = f"${event.current_price:.2f}" if event.current_price else "current"
+            direction = getattr(event, "direction", "LONG")
+            if direction == "SHORT" and event.stop_price and event.current_price:
+                dist_pct = f"{(event.stop_price - event.current_price) / event.stop_price * 100:.1f}%"
+                return (
+                    f"Approaching stop (SHORT) — {event.ticker}: price {curr_str} is {dist_pct} below "
+                    f"stop {stop_str} (P&L {pct})"
+                )
             dist_pct = (
                 f"{(event.current_price - event.stop_price) / event.stop_price * 100:.1f}%"
                 if event.stop_price and event.current_price else "?"
@@ -126,6 +133,22 @@ def _stop_trigger_text(event: StopEvent) -> str:
 
 
 def _exposure_trigger_text(breach: ExposureBreach) -> str:
+    breach_type = getattr(breach, "breach_type", "gross")
+    if breach_type == "gross_short":
+        return (
+            f"Exposure {breach.severity}: gross short {breach.current_gross * 100:.1f}% "
+            f"vs cap {breach.cap_gross * 100:.1f}% in {breach.regime} regime"
+        )
+    if breach_type == "net_short":
+        return (
+            f"Exposure {breach.severity}: net exposure {breach.current_net * 100:.1f}% "
+            f"vs net-short floor {breach.cap_net * 100:.1f}% in {breach.regime} regime"
+        )
+    if breach_type == "net_long":
+        return (
+            f"Exposure {breach.severity}: net exposure {breach.current_net * 100:.1f}% "
+            f"vs net-long cap {breach.cap_net * 100:.1f}% in {breach.regime} regime"
+        )
     gross_pct = f"{breach.current_gross * 100:.1f}%"
     cap_pct = f"{breach.cap_gross * 100:.1f}%"
     return (
