@@ -88,14 +88,18 @@ def build_crisis_prompt(
     affected_positions = []
     for p in base_ctx["positions"]:
         is_affected = p.get("ticker") == alert_ticker if alert_ticker else False
+        _ep = float(p.get("entry_price") or 0)
+        _cp = float(p.get("current_price") or 0)
+        _dir = str(p.get("direction") or "LONG").upper()
+        if _ep > 0:
+            _pnl = round((_ep - _cp) / _ep, 4) if _dir == "SHORT" else round((_cp - _ep) / _ep, 4)
+        else:
+            _pnl = None
         affected_positions.append({
             "ticker": p.get("ticker"),
             "direction": p.get("direction"),
             "pct_of_portfolio": p.get("pct_of_portfolio"),
-            "pnl_pct": round(
-                ((float(p.get("current_price") or 0) - float(p.get("entry_price") or 1))
-                 / float(p.get("entry_price") or 1)), 4
-            ) if p.get("entry_price") else None,
+            "pnl_pct": _pnl,
             "stop_tier1": p.get("stop_tier1"),
             "conviction_score": p.get("conviction_score"),
             "is_directly_affected": is_affected,

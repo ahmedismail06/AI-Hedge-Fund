@@ -107,8 +107,13 @@ def build_exit_trim_prompt(
     entry = float(position.get("entry_price") or 0)
     current = float(position.get("current_price") or 0)
     shares = float(position.get("share_count") or 0)
-    pnl_pct = ((current - entry) / entry) if entry > 0 else 0.0
-    pnl_dollar = (current - entry) * shares
+    direction = position.get("direction", "LONG")
+    if direction == "SHORT":
+        pnl_pct = ((entry - current) / entry) if entry > 0 else 0.0
+        pnl_dollar = (entry - current) * shares
+    else:
+        pnl_pct = ((current - entry) / entry) if entry > 0 else 0.0
+        pnl_dollar = (current - entry) * shares
 
     # Extract key thesis fields from original memo (memo_json is a nested JSONB blob)
     memo_json_blob = {}
@@ -142,11 +147,16 @@ def build_exit_trim_prompt(
         "macro_sensitivity":   memo_json_blob.get("macro_sensitivity"),
     }
 
-    # Stop proximity
+    # Stop proximity — direction-aware
     stop1 = position.get("stop_tier1")
     stop_proximity = None
     if stop1 and current:
-        stop_proximity = (current - float(stop1)) / float(stop1)
+        # LONG: stop is a floor; positive proximity = price is above stop (safe)
+        # SHORT: stop is a ceiling; positive proximity = price is below stop (safe)
+        if direction == "SHORT":
+            stop_proximity = (float(stop1) - current) / float(stop1)
+        else:
+            stop_proximity = (current - float(stop1)) / float(stop1)
 
     position_summary = {
         "ticker": ticker,

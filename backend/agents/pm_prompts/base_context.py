@@ -155,7 +155,11 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             market_value = (shares * current) if shares > 0 and current > 0 else float(p.get("dollar_size") or 0.0)
             w = market_value / portfolio_value if portfolio_value > 0 else 0.0
             if entry > 0 and current > 0 and w != 0:
-                pos_pnl = (current - entry) / entry
+                pos_dir = p.get("direction", "LONG")
+                if pos_dir == "SHORT":
+                    pos_pnl = (entry - current) / entry
+                else:
+                    pos_pnl = (current - entry) / entry
                 portfolio_pnl += w * pos_pnl
         ctx["portfolio_unrealized_pnl_pct"] = round(portfolio_pnl, 4)
 

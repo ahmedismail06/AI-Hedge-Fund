@@ -323,9 +323,12 @@ def _update_order_aggregate(
             update_data["status"],
         )
 
-        # Route fill to entry opener or exit handler based on order_side.
+        # Route fill to entry opener or exit handler based on exit_type.
+        # order_side is the IBKR action (BUY/SELL) which inverts for SHORT positions
+        # (SHORT entry = SELL to open; SHORT exit = BUY to cover). Using exit_type
+        # as the routing key is direction-agnostic and always correct.
         if is_filled and avg_price is not None:
-            if order_row.get("order_side") == "SELL":
+            if order_row.get("exit_type") in ("EXIT_CLOSE", "EXIT_TRIM"):
                 _handle_exit_fill(order_row["position_id"], avg_price, total_qty, order_row, client)
             else:
                 _close_position_loop(order_row["position_id"], avg_price)

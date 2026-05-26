@@ -93,7 +93,11 @@ def build_pre_earnings_prompt(
     entry = float(position.get("entry_price") or 0)
     current = float(position.get("current_price") or 0)
     shares = float(position.get("share_count") or 0)
-    pnl_pct = ((current - entry) / entry) if entry > 0 else 0.0
+    _direction = position.get("direction", "LONG")
+    if _direction == "SHORT":
+        pnl_pct = ((entry - current) / entry) if entry > 0 else 0.0
+    else:
+        pnl_pct = ((current - entry) / entry) if entry > 0 else 0.0
 
     position_summary = {
         "ticker": ticker,
