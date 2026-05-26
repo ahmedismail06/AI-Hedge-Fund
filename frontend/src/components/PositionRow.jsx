@@ -5,10 +5,15 @@ const fmtPct = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%
 
 export default function PositionRow({ position: p, onClick }) {
   const pnlPos = (p.pnl ?? 0) >= 0;
-  const stopDist = p.entry_price && p.stop_loss_price
-    ? ((p.stop_loss_price - p.entry_price) / p.entry_price) * 100
+  const isLong = p.direction === 'LONG';
+  const current = p.current_price ?? p.entry_price ?? 0;
+  // Positive = price has buffer remaining before stop; negative = stop already breached
+  const stopDist = current > 0 && p.stop_loss_price
+    ? (isLong
+        ? (current - p.stop_loss_price) / current * 100
+        : (p.stop_loss_price - current) / current * 100)
     : null;
-  const stopClose = stopDist != null && Math.abs(stopDist) < 3;
+  const stopClose = stopDist != null && stopDist < 3;
 
   return (
     <tr
@@ -21,7 +26,7 @@ export default function PositionRow({ position: p, onClick }) {
           <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
             p.direction === 'LONG' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'
           }`}>
-            {p.direction === 'LONG' ? 'BUY' : 'SELL'}
+            {p.direction === 'LONG' ? 'LONG' : 'SHORT'}
           </span>
         </div>
       </td>

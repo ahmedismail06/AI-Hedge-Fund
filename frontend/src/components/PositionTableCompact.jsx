@@ -9,11 +9,15 @@ const fmt$ = (v) => {
   return `${prefix}$${abs.toFixed(2)}`;
 };
 
-function StopBar({ entry, stop }) {
-  if (!entry || !stop) return null;
-  const dist = Math.abs((stop - entry) / entry);
-  const pct  = Math.min(dist * 300, 100);
-  const color = dist < 0.03 ? 'var(--red)' : dist < 0.06 ? 'var(--amber)' : 'var(--green)';
+function StopBar({ current, stop, direction }) {
+  if (!current || !stop) return null;
+  const isLong = direction === 'LONG';
+  // Positive = buffer remaining to stop; negative = stop breached
+  const dist = isLong
+    ? (current - stop) / current
+    : (stop - current) / current;
+  const pct  = Math.min(Math.abs(dist) * 300, 100);
+  const color = dist < 0.02 ? 'var(--red)' : dist < 0.05 ? 'var(--amber)' : 'var(--green)';
   return (
     <div className="flex items-center gap-1.5 mt-0.5">
       <div className="rounded-full overflow-hidden" style={{ width: '40px', height: '3px', background: 'var(--border)' }}>
@@ -74,7 +78,7 @@ export default function PositionTableCompact({ positions, onTickerClick, memos =
               <div style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', fontWeight: 700, color: pnlPos ? 'var(--green)' : 'var(--red)' }}>
                 {pnlPos ? '+' : ''}{fmt$(pnl)}
               </div>
-              <StopBar entry={entry} stop={p.stop_loss_price} />
+              <StopBar current={current} stop={p.stop_loss_price} direction={p.direction} />
             </div>
 
             {/* Size label + conviction */}

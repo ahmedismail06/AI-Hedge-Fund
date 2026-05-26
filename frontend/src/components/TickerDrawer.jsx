@@ -55,8 +55,11 @@ export default function TickerDrawer({ position, memo, onClose }) {
   const pnl = isLong ? (current - entry) * shares : (entry - current) * shares;
   const pnlPct = entry > 0 ? (isLong ? (current - entry) / entry : (entry - current) / entry) : 0;
   const pnlPos = pnl >= 0;
-  const stopDist = entry > 0 && p.stop_loss_price
-    ? ((p.stop_loss_price - entry) / entry)
+  // Positive = buffer remaining to stop; negative = stop already breached
+  const stopDist = current > 0 && p.stop_loss_price
+    ? (isLong
+        ? (current - p.stop_loss_price) / current
+        : (p.stop_loss_price - current) / current)
     : null;
 
   const verdictStyle = VERDICT_COLORS[memo?.verdict] ?? VERDICT_COLORS.AVOID;
@@ -165,12 +168,12 @@ export default function TickerDrawer({ position, memo, onClose }) {
           <Stat
             label="Stop Price"
             value={fmt$(p.stop_loss_price)}
-            color={stopDist != null && Math.abs(stopDist) < 0.05 ? 'var(--red)' : 'var(--text)'}
+            color={stopDist != null && stopDist < 0.05 ? 'var(--red)' : 'var(--text)'}
           />
           <Stat
             label="Distance to Stop"
             value={stopDist != null ? `${(stopDist * 100).toFixed(1)}%` : '—'}
-            color={stopDist != null && Math.abs(stopDist) < 0.05 ? 'var(--red)' : 'var(--text-2)'}
+            color={stopDist != null && stopDist < 0.05 ? 'var(--red)' : 'var(--text-2)'}
           />
         </div>
 
@@ -181,16 +184,16 @@ export default function TickerDrawer({ position, memo, onClose }) {
             <div className="mt-2 rounded-full overflow-hidden" style={{ height: '6px', background: 'var(--border)' }}>
               <div
                 style={{
-                  width: `${Math.min(Math.abs(stopDist) * 400, 100)}%`,
+                  width: `${Math.min(Math.max(stopDist, 0) * 400, 100)}%`,
                   height: '100%',
-                  background: Math.abs(stopDist) < 0.03 ? 'var(--red)' : Math.abs(stopDist) < 0.06 ? 'var(--amber)' : 'var(--green)',
+                  background: stopDist < 0.02 ? 'var(--red)' : stopDist < 0.05 ? 'var(--amber)' : 'var(--green)',
                   transition: 'width 0.4s ease',
                 }}
               />
             </div>
             <div className="flex justify-between mt-1">
               <span style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>Stop</span>
-              <span style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>Entry</span>
+              <span style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>Current</span>
             </div>
           </div>
         )}

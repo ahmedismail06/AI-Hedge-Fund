@@ -44,10 +44,13 @@ export default function PositionTableFull({ positions, onTickerClick }) {
             const pnl     = isLong ? (current - entry) * shares : (entry - current) * shares;
             const pnlPct  = entry > 0 ? (isLong ? (current - entry) / entry : (entry - current) / entry) : 0;
             const pnlPos  = pnl >= 0;
-            const stopDist = entry > 0 && p.stop_loss_price
-              ? ((p.stop_loss_price - entry) / entry)
+            // Positive = buffer remaining to stop; negative = stop breached
+            const stopDist = current > 0 && p.stop_loss_price
+              ? (isLong
+                  ? (current - p.stop_loss_price) / current
+                  : (p.stop_loss_price - current) / current)
               : null;
-            const stopClose = stopDist != null && Math.abs(stopDist) < 0.05;
+            const stopClose = stopDist != null && stopDist < 0.05;
             const targetDist = current > 0 && p.target_price
               ? (isLong ? (p.target_price - current) / current : (current - p.target_price) / current)
               : null;
