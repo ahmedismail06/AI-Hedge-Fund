@@ -1757,8 +1757,27 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                         # HOLD decisions on EXIT_TRIM get a 4-hour cooldown — valuation triggers
                         # (e.g. price >15% above DCF bull) are persistent conditions, so re-evaluating
                         # every hour after a HOLD just produces the same answer repeatedly.
+                        # Exception: if the position has blown through its stop_tier3 price, bypass
+                        # the cooldown entirely so the PM is forced to re-evaluate immediately.
                         if cat == "EXIT_TRIM" and decision == "HOLD":
-                            cooldown_secs = 14400
+                            # Check if this position has breached stop_tier3 — if so, no cooldown.
+                            pos_data = next(
+                                (p for p in base_ctx.get("positions", []) if p.get("ticker") == ticker),
+                                {},
+                            )
+                            stop_t3 = pos_data.get("stop_tier3")
+                            current_p = pos_data.get("current_price")
+                            direction_p = str(pos_data.get("direction") or "LONG").upper()
+                            tier3_breached = False
+                            if stop_t3 and current_p:
+                                try:
+                                    if direction_p == "SHORT":
+                                        tier3_breached = float(current_p) >= float(stop_t3)
+                                    else:
+                                        tier3_breached = float(current_p) <= float(stop_t3)
+                                except (TypeError, ValueError):
+                                    pass
+                            cooldown_secs = 0 if tier3_breached else 14400
                         else:
                             cooldown_secs = 3600
                         if (now - ts).total_seconds() < cooldown_secs:

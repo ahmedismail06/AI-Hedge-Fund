@@ -86,7 +86,7 @@ def run_monitor_cycle(supabase_client, regime: str, force: bool = False) -> dict
         .table("positions")
         .select(
             "id,ticker,direction,entry_price,current_price,pnl_pct,"
-            "pct_of_portfolio,stop_loss_price,sector"
+            "pct_of_portfolio,stop_loss_price,stop_tier2,stop_tier3,sector"
         )
         .eq("status", "OPEN")
         .execute()

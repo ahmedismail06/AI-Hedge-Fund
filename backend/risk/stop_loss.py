@@ -171,6 +171,68 @@ def check_stops(positions: list[dict], regime: str) -> list[StopEvent]:
                         direction=direction,
                     ))
 
+    # ── Tier 2/3: per-position price stops (BREACH / CRITICAL) ──────────────
+    # stop_tier2 and stop_tier3 are absolute price levels stored per position.
+    # A position that has blown through these levels fires BREACH/CRITICAL
+    # immediately, regardless of portfolio/sector aggregate state.
+    # This prevents a single position loss being diluted by a healthy portfolio.
+    for pos in positions:
+        ticker = pos.get("ticker", "?")
+        direction = str(pos.get("direction", "LONG")).upper()
+        current_price = _safe_float(pos.get("current_price"))
+        entry_price = _safe_float(pos.get("entry_price"))
+        pnl_pct = _safe_float(pos.get("pnl_pct"), 0.0)
+        sector = pos.get("sector")
+        stop_t2 = _safe_float(pos.get("stop_tier2"))
+        stop_t3 = _safe_float(pos.get("stop_tier3"))
+
+        if current_price is None:
+            continue
+
+        # For SHORT: stops are ceilings (price rising is bad)
+        # For LONG:  stops are floors  (price falling is bad)
+        if direction == "SHORT":
+            t2_breached = stop_t2 is not None and current_price >= stop_t2
+            t3_breached = stop_t3 is not None and current_price >= stop_t3
+        else:
+            t2_breached = stop_t2 is not None and current_price <= stop_t2
+            t3_breached = stop_t3 is not None and current_price <= stop_t3
+
+        if t3_breached:
+            logger.critical(
+                "TIER 3 PRICE STOP BREACHED — %s (%s) current=$%.4f >= stop_tier3=$%.4f (pnl=%.1f%%)",
+                ticker, direction, current_price, stop_t3, (pnl_pct or 0) * 100,
+            )
+            events.append(StopEvent(
+                ticker=ticker,
+                tier=3,
+                entry_price=entry_price,
+                current_price=current_price,
+                stop_price=stop_t3,
+                pct_move=pnl_pct,
+                regime=regime,
+                sector=sector,
+                approaching=False,
+                direction=direction,
+            ))
+        elif t2_breached:
+            logger.warning(
+                "TIER 2 PRICE STOP BREACHED — %s (%s) current=$%.4f >= stop_tier2=$%.4f (pnl=%.1f%%)",
+                ticker, direction, current_price, stop_t2, (pnl_pct or 0) * 100,
+            )
+            events.append(StopEvent(
+                ticker=ticker,
+                tier=2,
+                entry_price=entry_price,
+                current_price=current_price,
+                stop_price=stop_t2,
+                pct_move=pnl_pct,
+                regime=regime,
+                sector=sector,
+                approaching=False,
+                direction=direction,
+            ))
+
     # ── Tier 2: sector aggregate stop ────────────────────────────────────────
     # Aggregate weighted pnl_pct by sector (weight = pct_of_portfolio)
     sector_pnl: dict[str, list[float]] = defaultdict(list)
