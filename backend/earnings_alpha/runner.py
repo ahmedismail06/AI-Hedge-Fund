@@ -7,7 +7,6 @@ Never raises — returns EarningsAlphaOutput with unavailable=True on failure.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date
 from typing import Optional
 
@@ -41,12 +40,9 @@ _RECENT_EVENT_DAYS = 45
 
 
 def _get_client():
-    import supabase as _sb
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
-    return _sb.create_client(url, key)
+    from backend.db.utils import get_supabase_client
+
+    return get_supabase_client()
 
 
 def _compute_historical_stats(reactions: list[dict]) -> tuple[Optional[float], Optional[float]]:

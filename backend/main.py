@@ -50,6 +50,7 @@ from backend.api.capabilities import router as capabilities_router
 from backend.api.market import router as market_router
 from backend.agents.risk_agent import run_risk_monitor, run_nightly_metrics, startup_heartbeat
 from backend.agents.execution_agent import run_execution_cycle
+from backend.db.utils import warm_supabase_client
 
 _screener_scheduler = None
 _macro_scheduler = None
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
 
     # Confirm risk_alerts table is reachable before scheduling
     startup_heartbeat()
+    warm_supabase_client()
 
     # Risk monitor: every 60 seconds (market-hours guard is inside run_risk_monitor)
     _risk_monitor_scheduler = BackgroundScheduler()

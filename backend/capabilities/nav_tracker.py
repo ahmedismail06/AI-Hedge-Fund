@@ -8,7 +8,6 @@ Result is cached for 1 hour to avoid re-querying on every PM cycle.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -26,12 +25,9 @@ _cache_time: float = 0.0
 
 
 def _get_client():
-    from supabase import create_client
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
-    if not url or not key:
-        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set")
-    return create_client(url, key)
+    from backend.db.utils import get_supabase_client
+
+    return get_supabase_client()
 
 
 def get_trailing_nav(supabase_client=None) -> float:

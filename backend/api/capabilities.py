@@ -3,7 +3,6 @@ Capabilities API — exposes current NAV-gated system capabilities.
 """
 
 import logging
-import os
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
@@ -44,12 +43,9 @@ def get_nav():
 def get_capabilities_history(limit: int = 30):
     """Return recent capability snapshots (audit trail of tier changes)."""
     try:
-        from supabase import create_client
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-        if not url or not key:
-            raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set")
-        client = create_client(url, key)
+        from backend.db.utils import get_supabase_client
+
+        client = get_supabase_client()
         resp = (
             client.table("capability_snapshots")
             .select("*")
