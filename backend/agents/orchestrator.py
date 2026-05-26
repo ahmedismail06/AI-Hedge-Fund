@@ -654,7 +654,7 @@ def _check_intraday_drawdown(portfolio_value: float) -> float:
         resp = (
             _get_client()
             .table("positions")
-            .select("entry_price,current_price,share_count")
+            .select("entry_price,current_price,share_count,direction")
             .eq("status", "OPEN")
             .execute()
         )
@@ -669,8 +669,14 @@ def _check_intraday_drawdown(portfolio_value: float) -> float:
             entry = float(p["entry_price"] or 0)
             current = float(p["current_price"] or 0)
             shares = float(p["share_count"] or 0)
+            direction = str(p.get("direction") or "LONG").upper()
             if entry > 0 and current > 0 and shares > 0:
-                loss += (entry - current) * shares
+                if direction == "SHORT":
+                    # Short loses when price rises above entry
+                    loss += (current - entry) * shares
+                else:
+                    # Long loses when price falls below entry
+                    loss += (entry - current) * shares
         except (TypeError, ValueError):
             continue
 
@@ -842,13 +848,22 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
                 q = q.eq("ticker", ticker_filter)
             resp = q.execute()
             positions = resp.data or []
-            # Enrich with P&L
+            # Enrich with P&L (direction-aware)
             for p in positions:
                 entry = float(p.get("entry_price") or 0)
                 current = float(p.get("current_price") or 0)
                 shares = float(p.get("share_count") or 0)
-                p["pnl_pct"] = round((current - entry) / entry, 4) if entry > 0 else 0.0
-                p["pnl_dollar"] = round((current - entry) * shares, 2)
+                pos_dir = str(p.get("direction") or "LONG").upper()
+                if entry > 0:
+                    if pos_dir == "SHORT":
+                        p["pnl_pct"] = round((entry - current) / entry, 4)
+                        p["pnl_dollar"] = round((entry - current) * shares, 2)
+                    else:
+                        p["pnl_pct"] = round((current - entry) / entry, 4)
+                        p["pnl_dollar"] = round((current - entry) * shares, 2)
+                else:
+                    p["pnl_pct"] = 0.0
+                    p["pnl_dollar"] = 0.0
             return {"positions": positions, "count": len(positions)}
 
         elif tool_name == "get_exposure":

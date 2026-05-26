@@ -153,7 +153,8 @@ def build_order(position_row: dict) -> tuple:
         Tuple of (OrderRequest, ib_insync.Stock, ib_insync.LimitOrder).
 
     Raises:
-        OrderBuildError: if required fields are missing, None, or direction != LONG.
+        OrderBuildError: if required fields are missing, None, or SHORT is requested
+            when shorts are not enabled at the current capability tier.
     """
     # 1. Validate required fields
     required = ("id", "ticker", "direction", "share_count", "entry_price")
@@ -166,7 +167,8 @@ def build_order(position_row: dict) -> tuple:
     share_count: int = int(position_row["share_count"])
     entry_price: float = float(position_row["entry_price"])
 
-    if direction != "LONG":
+    is_short = direction.upper() == "SHORT"
+    if is_short:
         from backend.capabilities import get_capabilities
         caps = get_capabilities()
         if not caps.shorts_enabled:
@@ -187,8 +189,9 @@ def build_order(position_row: dict) -> tuple:
     live_price = _fetch_live_price(ticker, entry_price)
 
     logger.info(
-        "Order for %s: %s (%d shares, ADV=%.0f, live_price=%.4f, entry_price=%.4f)",
+        "Order for %s: %s %s (%d shares, ADV=%.0f, live_price=%.4f, entry_price=%.4f)",
         ticker,
+        "SHORT SELL" if is_short else "LONG BUY",
         order_type,
         share_count,
         adv,
@@ -197,13 +200,21 @@ def build_order(position_row: dict) -> tuple:
     )
 
     # 5. Build OrderRequest
-    limit_price_value = (
-        _round_up_to_tick(live_price * 1.001) if order_type == "LIMIT" else None
-    )
+    if is_short:
+        # Short entry: SELL to open — limit slightly below market so the short
+        # is placed at or better than the current bid.
+        limit_price_value = (
+            _round_down_to_tick(live_price * 0.999) if order_type == "LIMIT" else None
+        )
+    else:
+        limit_price_value = (
+            _round_up_to_tick(live_price * 1.001) if order_type == "LIMIT" else None
+        )
+
     req = OrderRequest(
         position_id=str(position_row["id"]),
         ticker=ticker,
-        direction="LONG",
+        direction=direction.upper(),
         order_type=order_type,
         requested_qty=share_count,
         limit_price=limit_price_value,
@@ -215,13 +226,21 @@ def build_order(position_row: dict) -> tuple:
     contract = Stock(ticker, "SMART", "USD")
 
     # 7. Build ib_insync Order
-    if order_type == "LIMIT":
-        order = LimitOrder("BUY", share_count, _round_up_to_tick(live_price * 1.001))
+    # SHORT entry = SELL to open; LONG entry = BUY.
+    if is_short:
+        ibkr_action = "SELL"
+        ibkr_limit = (
+            _round_down_to_tick(live_price * 0.999) if order_type == "LIMIT"
+            else _round_down_to_tick(live_price * 0.995)
+        )
     else:
-        # VWAP algo requires live IBKR algo permissions; using limit approximation
-        order = LimitOrder("BUY", share_count, _round_up_to_tick(live_price * 1.005))
+        ibkr_action = "BUY"
+        ibkr_limit = (
+            _round_up_to_tick(live_price * 1.001) if order_type == "LIMIT"
+            else _round_up_to_tick(live_price * 1.005)
+        )
 
-    # Ensure TIF matches the gateway preset to avoid IBKR canceling the order.
+    order = LimitOrder(ibkr_action, share_count, ibkr_limit)
     order.tif = "DAY"
 
     # 8. Return triple
@@ -289,30 +308,39 @@ def build_exit_order(
     adv = _fetch_adv(ticker)
     order_type, timeout_minutes = _select_order_type(sell_shares, adv)
 
+    is_short = direction.upper() == "SHORT"
+    # SHORT exit = BUY to cover; LONG exit = SELL to close.
+    ibkr_exit_action = "BUY" if is_short else "SELL"
+
     logger.info(
-        "Exit order for %s: %s (%d shares, ADV=%.0f, exit_type=%s)",
-        ticker, order_type, sell_shares, adv, exit_type,
+        "Exit order for %s: %s %s (%d shares, ADV=%.0f, exit_type=%s)",
+        ticker, ibkr_exit_action, order_type, sell_shares, adv, exit_type,
     )
 
-    sell_limit = _round_down_to_tick(ref_price * 0.999) if order_type == "LIMIT" else None
-    vwap_limit = _round_down_to_tick(ref_price * 0.995)
+    if is_short:
+        # Buy-to-cover: limit slightly above market so the fill is aggressive.
+        exit_limit = _round_up_to_tick(ref_price * 1.001) if order_type == "LIMIT" else None
+        vwap_limit = _round_up_to_tick(ref_price * 1.005)
+    else:
+        exit_limit = _round_down_to_tick(ref_price * 0.999) if order_type == "LIMIT" else None
+        vwap_limit = _round_down_to_tick(ref_price * 0.995)
 
     req = OrderRequest(
         position_id=str(position_row["id"]),
         ticker=ticker,
-        direction=direction,
-        order_side="SELL",
+        direction=direction.upper(),
+        order_side=ibkr_exit_action,
         order_type=order_type,
         requested_qty=sell_shares,
-        limit_price=sell_limit,
+        limit_price=exit_limit,
         intended_price=ref_price,
         timeout_minutes=timeout_minutes,
         exit_type=exit_type,
     )
 
     contract = Stock(ticker, "SMART", "USD")
-    limit_price_for_order = sell_limit if order_type == "LIMIT" else vwap_limit
-    order = LimitOrder("SELL", sell_shares, limit_price_for_order)
+    limit_price_for_order = exit_limit if order_type == "LIMIT" else vwap_limit
+    order = LimitOrder(ibkr_exit_action, sell_shares, limit_price_for_order)
     order.tif = "DAY"
     if outside_rth:
         order.outsideRth = True
