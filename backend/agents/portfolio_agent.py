@@ -394,6 +394,7 @@ async def run_portfolio_sizing(
         candidate_sector=sector,
         open_positions=open_positions,
         portfolio_value=portfolio_value,
+        candidate_direction=direction,
     )
 
     rule2_fired = (

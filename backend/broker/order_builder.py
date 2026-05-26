@@ -211,10 +211,15 @@ def build_order(position_row: dict) -> tuple:
             _round_up_to_tick(live_price * 1.001) if order_type == "LIMIT" else None
         )
 
+    # SHORT entry = SELL to open; LONG entry = BUY. Persist the IBKR action on the
+    # OrderRequest so the orders.order_side column matches the actual ticket.
+    entry_order_side = "SELL" if is_short else "BUY"
+
     req = OrderRequest(
         position_id=str(position_row["id"]),
         ticker=ticker,
         direction=direction.upper(),
+        order_side=entry_order_side,
         order_type=order_type,
         requested_qty=share_count,
         limit_price=limit_price_value,

@@ -337,7 +337,7 @@ def _update_order_aggregate(
                 "ticker": order_row.get("ticker", "—"),
                 "fill_qty": total_qty,
                 "fill_price": round(avg_price, 4),
-                "fill_type": "FULL" if order_row.get("order_side") != "SELL" else order_row.get("exit_type", "EXIT"),
+                "fill_type": order_row.get("exit_type") if order_row.get("exit_type") in ("EXIT_CLOSE", "EXIT_TRIM", "ENTRY_ADD") else "FULL",
                 "slippage_bps": round(
                     (avg_price - float(order_row.get("limit_price") or avg_price))
                     / float(order_row.get("limit_price") or avg_price) * 10000, 2
@@ -412,7 +412,7 @@ def _handle_exit_fill(
 
         pos = pos_result.data[0]
         entry_price = float(pos.get("entry_price") or 0)
-        direction = pos.get("direction", "LONG")
+        direction = str(pos.get("direction") or "LONG").upper()
         direction_mult = 1.0 if direction == "LONG" else -1.0
         exit_type = order_row.get("exit_type", "EXIT_CLOSE")
 

@@ -103,7 +103,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             # Fall back to dollar_size if current market value can't be computed
             market_value = (shares * cur_price) if shares > 0 and cur_price > 0 else float(p.get("dollar_size") or 0.0)
             w = market_value / portfolio_value if portfolio_value > 0 else 0.0
-            direction = p.get("direction", "LONG")
+            direction = str(p.get("direction") or "LONG").upper()
             gross += abs(w)
             net += w if direction == "LONG" else -w
 
@@ -134,7 +134,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             ]
             for p in pending:
                 w = abs(float(p.get("dollar_size") or 0.0)) / portfolio_value if portfolio_value > 0 else 0.0
-                direction = p.get("direction", "LONG")
+                direction = str(p.get("direction") or "LONG").upper()
                 gross += abs(w)
                 net += w if direction == "LONG" else -w
         except Exception as _pend_exc:
@@ -155,7 +155,7 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
             market_value = (shares * current) if shares > 0 and current > 0 else float(p.get("dollar_size") or 0.0)
             w = market_value / portfolio_value if portfolio_value > 0 else 0.0
             if entry > 0 and current > 0 and w != 0:
-                pos_dir = p.get("direction", "LONG")
+                pos_dir = str(p.get("direction") or "LONG").upper()
                 if pos_dir == "SHORT":
                     pos_pnl = (entry - current) / entry
                 else:

@@ -398,8 +398,10 @@ def _run_add_cycle(client, skip_position_ids: set | None = None) -> dict:
             )
             continue
 
-        # Guard: skip if an active BUY order already exists for this position, or a BUY
+        # Guard: skip if an active ADD order already exists for this position, or one
         # filled within the last 30 minutes (the add already executed this cycle).
+        # Filter by exit_type=ENTRY_ADD so the check is direction-agnostic — SHORT adds
+        # use order_side=SELL, LONG adds use BUY.
         try:
             from datetime import datetime, timezone, timedelta
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
@@ -407,7 +409,7 @@ def _run_add_cycle(client, skip_position_ids: set | None = None) -> dict:
                 client.table("orders")
                 .select("id,status,filled_at,created_at")
                 .eq("position_id", pos["id"])
-                .eq("order_side", "BUY")
+                .eq("exit_type", "ENTRY_ADD")
                 .execute()
             )
             active = [o for o in (existing.data or []) if o["status"] in ("SUBMITTED", "PARTIAL")]
@@ -416,11 +418,11 @@ def _run_add_cycle(client, skip_position_ids: set | None = None) -> dict:
                 if o["status"] == "FILLED" and o.get("filled_at") and o["filled_at"] >= cutoff
             ]
             if active:
-                logger.debug("Position %s already has an active BUY order — skipping ADD", pos["id"])
+                logger.debug("Position %s already has an active ADD order — skipping", pos["id"])
                 continue
             if recent_filled:
                 logger.info(
-                    "Position %s had a BUY filled within 30 min — clearing exit_action=ADD", pos["id"]
+                    "Position %s had an ADD filled within 30 min — clearing exit_action=ADD", pos["id"]
                 )
                 client.table("positions").update(
                     {"exit_action": None, "exit_trim_pct": None}

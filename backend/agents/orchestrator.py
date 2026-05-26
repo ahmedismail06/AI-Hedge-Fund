@@ -879,7 +879,8 @@ def _execute_pm_tool(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, An
                 nav = _compute_portfolio_value()
             gross = sum(abs(float(p.get("dollar_size") or 0)) / nav for p in positions if nav > 0)
             net = sum(
-                (float(p.get("dollar_size") or 0) / nav) * (1 if p.get("direction") == "LONG" else -1)
+                (float(p.get("dollar_size") or 0) / nav)
+                * (1 if str(p.get("direction") or "LONG").upper() == "LONG" else -1)
                 for p in positions if nav > 0
             )
             regime_resp = client.table("macro_briefings").select("regime").order("date", desc=True).limit(1).execute()
@@ -1839,7 +1840,13 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         current = float(p.get("current_price") or 0)
         stop1 = float(p.get("stop_tier1") or 0)
         if current > 0 and stop1 > 0:
-            proximity = (current - stop1) / current
+            # LONG: stop sits BELOW entry → danger as price falls toward it (current > stop, shrinking gap).
+            # SHORT: stop sits ABOVE entry → danger as price rises toward it (current < stop, shrinking gap).
+            direction_p = str(p.get("direction") or "LONG").upper()
+            if direction_p == "SHORT":
+                proximity = (stop1 - current) / current
+            else:
+                proximity = (current - stop1) / current
             if 0 <= proximity < _STOP_PROXIMITY_TRIGGER:
                 items.append({
                     "category": "EXIT_TRIM",
@@ -2987,7 +2994,7 @@ def _update_decision_outcomes() -> None:
 
                 entry = float(pos.get("entry_price") or 0)
                 status = pos.get("status", "")
-                direction = pos.get("direction", "LONG")
+                direction = str(pos.get("direction") or "LONG").upper()
 
                 if entry <= 0:
                     continue

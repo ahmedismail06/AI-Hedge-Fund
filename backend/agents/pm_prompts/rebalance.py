@@ -7,7 +7,7 @@ NO_ACTION | REBALANCE | RAISE_CASH | DEPLOY_CASH.
 """
 
 import json
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from backend.agents.pm_prompts.base_context import format_calibration_context, format_capabilities_context, format_pending_actions_context
 
@@ -80,6 +80,16 @@ For DEPLOY_CASH: deploy_criteria describes what opportunities would trigger new 
 """
 
 
+def _signed_pnl_pct(p: Dict[str, Any]) -> Optional[float]:
+    """Direction-aware unrealized pnl fraction; positive = winning, regardless of LONG/SHORT."""
+    entry = float(p.get("entry_price") or 0)
+    current = float(p.get("current_price") or 0)
+    if entry <= 0 or current <= 0:
+        return None
+    raw = (current - entry) / entry
+    return round(-raw if str(p.get("direction") or "LONG").upper() == "SHORT" else raw, 4)
+
+
 def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
     """
     Build (system_prompt, user_message) for a portfolio rebalancing decision.
@@ -96,7 +106,7 @@ def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
     for p in base_ctx["positions"]:
         sector = p.get("sector", "Unknown")
         w = float(p.get("pct_of_portfolio") or 0.0)
-        direction = p.get("direction", "LONG")
+        direction = str(p.get("direction") or "LONG").upper()
         signed_w = w if direction == "LONG" else -abs(w)
         sector_gross[sector] = sector_gross.get(sector, 0.0) + abs(w)
         sector_net[sector] = sector_net.get(sector, 0.0) + signed_w
@@ -132,10 +142,7 @@ def build_rebalance_prompt(base_ctx: Dict[str, Any]) -> Tuple[str, str]:
                 "pct_of_portfolio": p.get("pct_of_portfolio"),
                 "sector": p.get("sector"),
                 "conviction_score": p.get("conviction_score"),
-                "pnl_pct": round(
-                    ((float(p.get("current_price") or 0) - float(p.get("entry_price") or 1))
-                     / float(p.get("entry_price") or 1)), 4
-                ) if p.get("entry_price") else None,
+                "pnl_pct": _signed_pnl_pct(p),
             }
             for p in base_ctx["positions"]
         ],

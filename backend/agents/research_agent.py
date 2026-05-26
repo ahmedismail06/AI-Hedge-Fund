@@ -1783,7 +1783,7 @@ def run_research(ticker: str, use_cache: bool = False, update_mode: bool = False
         except Exception:
             pass
 
-        ea_output = run_earnings_alpha(ticker, reactions, fmp_data, conviction_for_ea)
+        ea_output = run_earnings_alpha(ticker, reactions, fmp_data, conviction_for_ea, direction=direction)
         earnings_alpha_context = ea_output.summary
         logger.info(
             "run_research(%s): earnings alpha complete — signal=%s drift_hold=%s",

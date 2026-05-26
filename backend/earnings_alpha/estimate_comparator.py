@@ -73,9 +73,17 @@ def compute_signal(
     internal_est: Optional[float],
     consensus_eps: Optional[float],
     conviction_score: float,
+    direction: str = "LONG",
 ) -> PreEarningsSizing:
     """
     Compare internal estimate against consensus and return a sizing signal.
+
+    For LONG positions: a positive spread (internal beats consensus) → SIZE_UP candidate;
+    a negative spread (internal trails consensus) → REDUCE.
+
+    For SHORT positions the meaning inverts: an expected miss (negative spread) is the
+    SIZE_UP trigger, and an expected beat (positive spread) is a REDUCE trigger because
+    a beat hurts the short.
 
     Unavailable estimates always yield HOLD (insufficient data to act).
     Consensus of 0 is treated as unavailable to avoid division-by-zero.
@@ -90,39 +98,58 @@ def compute_signal(
             rationale="Insufficient data to compute spread — defaulting to HOLD.",
         )
 
-    spread_pct = (internal_est - consensus_eps) / abs(consensus_eps)
+    raw_spread_pct = (internal_est - consensus_eps) / abs(consensus_eps)
+    is_short = str(direction).upper() == "SHORT"
+    # Effective spread is from the position's perspective: positive = thesis-confirming
+    # (beat for a long, miss for a short).
+    effective_spread = -raw_spread_pct if is_short else raw_spread_pct
     conviction_gate = conviction_score >= _CONVICTION_GATE
+    side_label = "SHORT" if is_short else "LONG"
 
-    if spread_pct >= _SPREAD_SIZE_UP and conviction_gate:
+    if effective_spread >= _SPREAD_SIZE_UP and conviction_gate:
         signal: str = "SIZE_UP"
-        rationale = (
-            f"Internal est ${internal_est:.2f} exceeds consensus ${consensus_eps:.2f} "
-            f"by {spread_pct:+.1%} — conviction {conviction_score:.1f} >= {_CONVICTION_GATE}. "
-            "Pre-earnings size-up authorised."
-        )
-    elif spread_pct >= _SPREAD_SIZE_UP and not conviction_gate:
+        if is_short:
+            rationale = (
+                f"Internal est ${internal_est:.2f} trails consensus ${consensus_eps:.2f} "
+                f"by {raw_spread_pct:+.1%} (miss expected) — conviction {conviction_score:.1f} "
+                f">= {_CONVICTION_GATE}. Pre-earnings SHORT size-up authorised."
+            )
+        else:
+            rationale = (
+                f"Internal est ${internal_est:.2f} exceeds consensus ${consensus_eps:.2f} "
+                f"by {raw_spread_pct:+.1%} — conviction {conviction_score:.1f} >= {_CONVICTION_GATE}. "
+                "Pre-earnings size-up authorised."
+            )
+    elif effective_spread >= _SPREAD_SIZE_UP and not conviction_gate:
         signal = "HOLD"
         rationale = (
-            f"Spread {spread_pct:+.1%} meets size-up threshold but conviction "
-            f"{conviction_score:.1f} < {_CONVICTION_GATE} — holding current size."
+            f"{side_label} spread {effective_spread:+.1%} meets size-up threshold but "
+            f"conviction {conviction_score:.1f} < {_CONVICTION_GATE} — holding current size."
         )
-    elif spread_pct <= _SPREAD_REDUCE:
+    elif effective_spread <= _SPREAD_REDUCE:
         signal = "REDUCE"
-        rationale = (
-            f"Internal est ${internal_est:.2f} trails consensus ${consensus_eps:.2f} "
-            f"by {spread_pct:+.1%} — risk of negative surprise; recommend trim."
-        )
+        if is_short:
+            rationale = (
+                f"Internal est ${internal_est:.2f} exceeds consensus ${consensus_eps:.2f} "
+                f"by {raw_spread_pct:+.1%} (beat expected) — risk of positive surprise "
+                "hurting the short; recommend cover/trim."
+            )
+        else:
+            rationale = (
+                f"Internal est ${internal_est:.2f} trails consensus ${consensus_eps:.2f} "
+                f"by {raw_spread_pct:+.1%} — risk of negative surprise; recommend trim."
+            )
     else:
         signal = "HOLD"
         rationale = (
-            f"Spread {spread_pct:+.1%} within ±10% band — no pre-earnings adjustment."
+            f"{side_label} spread {effective_spread:+.1%} within ±10% band — no pre-earnings adjustment."
         )
 
     return PreEarningsSizing(
         signal=signal,  # type: ignore[arg-type]
         internal_eps_estimate=internal_est,
         consensus_eps=consensus_eps,
-        spread_pct=spread_pct,
+        spread_pct=raw_spread_pct,
         conviction_gate_passed=conviction_gate,
         rationale=rationale,
     )

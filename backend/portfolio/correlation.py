@@ -148,25 +148,30 @@ def check_correlation(
     candidate_sector: Optional[str],
     open_positions: list[dict],
     portfolio_value: float,
+    candidate_direction: str = "LONG",
 ) -> tuple[bool, Optional[str]]:
     """
     Check whether adding the candidate stock violates correlation or sector
     concentration rules against the current open positions.
 
     Args:
-        candidate_ticker: Ticker symbol of the stock being evaluated.
-        candidate_sector: GICS sector of the candidate (e.g. 'Healthcare').
-                          Pass None if unknown — Rule 2 will be skipped.
-        open_positions:   List of open position dicts.  Each dict must contain:
-                            'ticker'          (str)   — ticker symbol
-                            'sector'          (str | None) — GICS sector
-                            'pct_of_portfolio' (float) — weight as a fraction
-                                              of portfolio NAV (0–1)
-                            'direction'       (str)   — 'LONG' or 'SHORT'
-                          Unknown or missing keys are handled gracefully.
-        portfolio_value:  Current portfolio NAV in dollars.  Not used in
-                          calculations directly but available for future
-                          extensions (e.g. dollar-weighted concentration).
+        candidate_ticker:    Ticker symbol of the stock being evaluated.
+        candidate_sector:    GICS sector of the candidate (e.g. 'Healthcare').
+                             Pass None if unknown — Rule 2 will be skipped.
+        open_positions:      List of open position dicts.  Each dict must contain:
+                               'ticker'          (str)   — ticker symbol
+                               'sector'          (str | None) — GICS sector
+                               'pct_of_portfolio' (float) — weight as a fraction
+                                                 of portfolio NAV (0–1)
+                               'direction'       (str)   — 'LONG' or 'SHORT'
+                             Unknown or missing keys are handled gracefully.
+        portfolio_value:     Current portfolio NAV in dollars.  Not used in
+                             calculations directly but available for future
+                             extensions (e.g. dollar-weighted concentration).
+        candidate_direction: 'LONG' or 'SHORT' — used by Rule 2 so an opposite-
+                             direction candidate (e.g. SHORT into a LONG-heavy
+                             sector) is not penalised as concentration when it
+                             actually hedges the existing exposure.
 
     Returns:
         (correlation_flag, correlation_note)
@@ -174,7 +179,8 @@ def check_correlation(
         correlation_note  — Descriptive string when flag is True; None otherwise.
 
     Rule 1: ANY pair (candidate vs open position) has 60-day correlation > 0.75.
-    Rule 2: 3+ open positions in the SAME sector exceed 25% combined gross exposure.
+    Rule 2: 3+ open positions in the SAME sector AND SAME direction as the
+            candidate already exceed 25% combined exposure (signed by direction).
 
     If open_positions is empty the function returns (False, None) immediately.
     """
@@ -183,32 +189,37 @@ def check_correlation(
 
     notes: list[str] = []
     flag = False
+    candidate_dir = str(candidate_direction or "LONG").upper()
 
     # ── Rule 2: Sector concentration check (no price data needed) ─────────────
+    # Only count positions in the same direction as the candidate — a SHORT
+    # added into a LONG-heavy sector reduces net sector exposure, it does not
+    # concentrate it.
     if candidate_sector is not None:
-        same_sector_positions = [
+        same_sector_same_dir = [
             p for p in open_positions
             if p.get("sector") == candidate_sector
+            and str(p.get("direction") or "LONG").upper() == candidate_dir
         ]
-        if len(same_sector_positions) >= _SECTOR_POSITION_COUNT_THRESHOLD:
+        if len(same_sector_same_dir) >= _SECTOR_POSITION_COUNT_THRESHOLD:
             combined_exposure = sum(
-                abs(p.get("pct_of_portfolio", 0.0)) for p in same_sector_positions
+                abs(p.get("pct_of_portfolio", 0.0)) for p in same_sector_same_dir
             )
             if combined_exposure > _SECTOR_GROSS_EXPOSURE_THRESHOLD:
                 flag = True
-                tickers_in_sector = [p.get("ticker", "?") for p in same_sector_positions]
+                tickers_in_sector = [p.get("ticker", "?") for p in same_sector_same_dir]
                 notes.append(
-                    f"Sector concentration: {len(same_sector_positions)} open "
-                    f"{candidate_sector} positions "
+                    f"Sector concentration: {len(same_sector_same_dir)} open "
+                    f"{candidate_dir} {candidate_sector} positions "
                     f"({', '.join(tickers_in_sector)}) already represent "
-                    f"{combined_exposure * 100:.1f}% gross exposure "
+                    f"{combined_exposure * 100:.1f}% same-direction exposure "
                     f"(threshold: {_SECTOR_GROSS_EXPOSURE_THRESHOLD * 100:.0f}%); "
                     f"candidate capped at micro (1%)."
                 )
                 logger.info(
-                    "Rule 2 triggered for %s: %d %s positions at %.1f%% gross",
-                    candidate_ticker, len(same_sector_positions), candidate_sector,
-                    combined_exposure * 100,
+                    "Rule 2 triggered for %s (%s): %d %s %s positions at %.1f%%",
+                    candidate_ticker, candidate_dir, len(same_sector_same_dir),
+                    candidate_dir, candidate_sector, combined_exposure * 100,
                 )
 
     # ── Rule 1: Pair correlation check (requires price data) ──────────────────

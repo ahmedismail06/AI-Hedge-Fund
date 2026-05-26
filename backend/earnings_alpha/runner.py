@@ -137,6 +137,7 @@ def run_earnings_alpha(
     reactions: list[dict],
     fmp_data: dict,
     conviction_score: float,
+    direction: str = "LONG",
 ) -> EarningsAlphaOutput:
     """
     Orchestrate pre-earnings sizing and drift-hold lifecycle for a ticker.
@@ -146,6 +147,8 @@ def run_earnings_alpha(
         reactions: Output of get_earnings_reactions() — list of dicts, newest first.
         fmp_data: Output of get_fmp_data() — provides consensus_eps_current_year.
         conviction_score: InvestmentMemo conviction_score (0-10); gates SIZE_UP signal.
+        direction: "LONG" or "SHORT" — inverts the SIZE_UP/REDUCE meaning so a SHORT
+            sizes up on an expected miss rather than an expected beat.
 
     Returns:
         EarningsAlphaOutput with pre_earnings signal, drift_hold state, and summary.
@@ -168,7 +171,7 @@ def run_earnings_alpha(
             consensus_eps = fmp_data["consensus_eps_current_year"] / 4.0
 
         # Step 4: Pre-earnings signal
-        pre = compute_signal(internal_est, consensus_eps, conviction_score)
+        pre = compute_signal(internal_est, consensus_eps, conviction_score, direction=direction)
 
         # Step 5: Detect fresh earnings print (event_date within _RECENT_EVENT_DAYS)
         drift = get_active_drift_hold(ticker)

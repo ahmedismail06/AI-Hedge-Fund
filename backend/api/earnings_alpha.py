@@ -84,17 +84,22 @@ async def trigger_earnings_alpha_run(ticker: str) -> dict:
         reactions = get_earnings_reactions(ticker.upper())
         fmp_data = fetch_fmp(ticker.upper())
 
-        # Use stored memo conviction if available; default to 5.0
+        # Use stored memo conviction + verdict if available; default to 5.0/LONG
         conviction: float = 5.0
+        direction: str = "LONG"
         try:
             from backend.memory.vector_store import get_memo
             existing = get_memo(ticker.upper())
-            if existing and existing.get("conviction_score") is not None:
-                conviction = float(existing["conviction_score"])
+            if existing:
+                if existing.get("conviction_score") is not None:
+                    conviction = float(existing["conviction_score"])
+                verdict = str(existing.get("verdict") or "").upper()
+                if verdict == "SHORT":
+                    direction = "SHORT"
         except Exception:
             pass
 
-        output = run_earnings_alpha(ticker.upper(), reactions, fmp_data, conviction)
+        output = run_earnings_alpha(ticker.upper(), reactions, fmp_data, conviction, direction=direction)
         return output.model_dump()
     except Exception as exc:
         logger.error("trigger_earnings_alpha_run(%s): %s", ticker.upper(), exc)
