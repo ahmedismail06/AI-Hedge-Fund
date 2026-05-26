@@ -43,7 +43,7 @@ The position has a `direction` field of either LONG or SHORT. Every framing belo
 - HOLD: Maintain current size — thesis intact, no action needed
 - TRIM: Reduce position by a specified percentage — specify trim_pct and reason. For SHORT, this means buying back a portion to reduce notional.
 - CLOSE: Full exit — specify reason (thesis broken, stop hit, rebalance, better opportunities). For SHORT, this is a full buy-to-cover.
-- ADD: Increase position — thesis strengthening or price improved; specify add_dollar_amount. For SHORT, this means selling more shares to expand the short (subject to borrow availability and the 7.5% cap).
+- ADD: Increase position — thesis strengthening or price improved; specify add_pct (fraction of current shares to add, e.g. 0.25 = add 25% more). For SHORT, this means selling more shares to expand the short (subject to borrow availability and the 7.5% cap).
 
 ## Response Format
 Respond with ONLY a valid JSON object — no markdown fences, no preamble, no trailing text.
@@ -53,7 +53,7 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
   "reasoning": "2-3 sentences — what specific evidence from the position state and portfolio context drives this decision",
   "action_details": {
     "trim_pct": null,
-    "add_dollar_amount": null,
+    "add_pct": null,
     "close_reason": null
   },
   "risk_assessment": "Primary risk of this decision — what could go wrong",

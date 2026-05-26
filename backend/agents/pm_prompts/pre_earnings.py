@@ -47,7 +47,7 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
   "decision": "SIZE_UP | HOLD | TRIM | EXIT",
   "reasoning": "2-3 sentences — what specific aspect of the earnings setup drives this decision, what is your edge (or lack of edge) on the outcome",
   "action_details": {
-    "size_up_dollar": null,
+    "add_pct": null,
     "trim_pct": null,
     "event_catalyst": null,
     "re_entry_plan": null
@@ -68,7 +68,7 @@ confidence_breakdown dimensions (each 0.0–1.0):
 - timing: how well-timed is the pre-earnings positioning relative to days-to-event
 - portfolio_fit: how appropriate is taking binary event risk given current portfolio exposure
 
-For SIZE_UP: specify size_up_dollar and event_catalyst (the specific metric/guidance you expect to surprise — beat-direction for LONG, miss-direction for SHORT)
+For SIZE_UP: specify add_pct (fraction of current shares to add, e.g. 0.25 = add 25% more) and event_catalyst (the specific metric/guidance you expect to surprise — beat-direction for LONG, miss-direction for SHORT)
 For TRIM: specify trim_pct
 For EXIT: specify re_entry_plan (conditions under which you'd re-enter post-earnings)
 """

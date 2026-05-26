@@ -645,7 +645,9 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
 
         # ── E: Exit cycle — sell OPEN positions flagged by PM Agent ──────────
         # Run before new-entry processing so capital is freed before new orders are sized.
-        exit_result = _run_exit_cycle(client, outside_rth=False, skip_position_ids=timed_out_this_cycle)
+        # Pass outside_rth=True during pre-market so crisis/pre-earnings CLOSE orders
+        # reach the exchange before the 9:30 AM open when forced via API.
+        exit_result = _run_exit_cycle(client, outside_rth=_is_pre_market(), skip_position_ids=timed_out_this_cycle)
         summary.exits_placed = exit_result["exits_placed"]
         summary.exits_error = exit_result["exits_error"]
         exit_order_ids = exit_result["exit_order_ids"]
@@ -661,6 +663,34 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
         if not _is_market_open():
             logger.info("Outside market hours: skipping new entries (%d exit(s) placed)", len(exit_order_ids))
             return summary
+
+        # ── F0: PM halt gate — blocks new entries only; exits/adds already done ──
+        # daily_loss_halt_triggered is set by HALT_NEW_ENTRIES crisis decision or
+        # intraday drawdown monitor. Check pm_config before processing APPROVED queue.
+        try:
+            from datetime import timezone as _tz
+            _cfg_resp = client.table("pm_config").select(
+                "daily_loss_halt_triggered,halted_until"
+            ).eq("id", 1).limit(1).execute()
+            _cfg = (_cfg_resp.data or [{}])[0]
+            if _cfg.get("daily_loss_halt_triggered"):
+                _halted_until = _cfg.get("halted_until")
+                _still_halted = True
+                if _halted_until:
+                    try:
+                        _halt_dt = datetime.fromisoformat(_halted_until.replace("Z", "+00:00"))
+                        _still_halted = _halt_dt > datetime.now(_tz.utc)
+                    except Exception:
+                        pass
+                if _still_halted:
+                    logger.warning(
+                        "New entries halted (daily_loss_halt_triggered) until %s — "
+                        "skipping entry cycle; exits and adds already processed",
+                        _halted_until or "indefinite",
+                    )
+                    return summary
+        except Exception as _halt_exc:
+            logger.warning("Could not read pm_config halt flag — proceeding with entries: %s", _halt_exc)
 
         # ── F: Fetch APPROVED positions ───────────────────────────────────────
         approved_result = (
@@ -756,6 +786,16 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                     "ticker": pos.get("ticker", "—"),
                     "error": f"Abandoned after {timeout_count} timeout(s) — marked EXPIRED, memo re-queued for PM",
                 })
+                continue
+
+            # Guard: null entry_price causes OrderBuildError every cycle, burning
+            # error count forever. Catch it here before the retry cap can trigger.
+            if pos.get("entry_price") is None:
+                logger.warning(
+                    "Position %s (%s) has null entry_price — skipping entry this cycle "
+                    "(portfolio agent price fetch likely failed at sizing time)",
+                    pos["id"], pos.get("ticker"),
+                )
                 continue
 
             # F: Build and place

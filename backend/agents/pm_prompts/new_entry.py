@@ -92,7 +92,6 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
     "direction": "BUY | SELL_SHORT",
     "shares": 0,
     "dollar_amount": 0,
-    "limit_price": null,
     "sizing_rationale": "why this size given portfolio context",
     "defer_until": null,
     "defer_condition": null,
@@ -130,7 +129,7 @@ Round to 2 decimal places.
 For DEFER: populate defer_until (ISO date YYYY-MM-DD or integer days) and defer_condition (what you're waiting for).
 For REJECT: populate reject_reason with the specific thesis failure.
 For WATCHLIST: set defer_until (ISO date or integer days) to when you'd revisit, and use reject_reason to describe what would change your view.
-For EXECUTE/MODIFY_SIZE: populate direction, shares, dollar_amount, limit_price (optional), sizing_rationale.
+For EXECUTE/MODIFY_SIZE: populate direction, shares, dollar_amount, sizing_rationale.
 """
 
 

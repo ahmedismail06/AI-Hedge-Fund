@@ -65,6 +65,7 @@ confidence_breakdown dimensions (each 0.0–1.0):
 For REDUCE_EXPOSURE: positions_to_reduce is [{"ticker": str, "reduce_pct": float, "reason": str}]
 For LIQUIDATE_TO_TARGET: specify target_gross_exposure (fraction) and positions_to_reduce in priority order
 For HALT_NEW_ENTRIES: specify halt_resumption_trigger (e.g., "CRITICAL alert resolved", "VIX < 25")
+For HEDGE: hedge_details is {"instruments": [{"ticker": str, "target_notional_pct": float, "reason": str}]} where target_notional_pct is a fraction of portfolio (e.g. 0.10 = 10%) and ticker is the hedge instrument (e.g. "SPY", "QQQ", "IWM")
 For MONITOR: specify monitor_escalation_threshold (what would trigger a harder response)
 """
 

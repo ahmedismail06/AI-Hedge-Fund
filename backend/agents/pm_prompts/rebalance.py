@@ -46,7 +46,6 @@ Respond with ONLY a valid JSON object — no markdown fences, no preamble, no tr
   "action_details": {
     "adjustments": [],
     "target_gross_exposure": null,
-    "target_net_exposure": null,
     "deploy_criteria": null
   },
   "risk_assessment": "Primary risk of this rebalancing decision",

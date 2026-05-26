@@ -1450,6 +1450,8 @@ def _route_decision(
 
         elif category == "CRISIS" and decision == "HALT_NEW_ENTRIES":
             # Set pm_config to halt new entries (similar to supervised mode temporarily)
+            action = decision_data.get("action_details", {})
+            halt_trigger = action.get("halt_resumption_trigger") or "Not specified"
             client.table("pm_config").update({
                 "daily_loss_halt_triggered": True,
                 "halted_until": (
@@ -1457,10 +1459,13 @@ def _route_decision(
                 ).isoformat(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", 1).execute()
-            logger.warning("PM: CRISIS — halting new entries for 4 hours")
+            logger.warning(
+                "PM: CRISIS — halting new entries for 4 hours; resumption trigger: %s", halt_trigger
+            )
             notify_event("CRISIS_MODE", {
-                "daily_loss_pct": decision_data.get("action_details", {}).get("daily_loss_pct", "—"),
+                "daily_loss_pct": action.get("daily_loss_pct", "—"),
                 "duration": "4 hours",
+                "resumption_trigger": halt_trigger,
             })
             return "SENT_TO_EXECUTION"
 
@@ -1532,35 +1537,67 @@ def _route_decision(
             return "SENT_TO_EXECUTION"
 
         elif category == "CRISIS" and decision == "REDUCE_EXPOSURE":
-            # Trim all open positions to reduce portfolio gross exposure.
             action = decision_data.get("action_details", {})
-            trim_pct = _clean_float(action.get("trim_pct"), 0.50)
-            client.table("positions").update({
-                "exit_action": "TRIM",
-                "exit_trim_pct": trim_pct,
-            }).eq("status", "OPEN").execute()
-            logger.warning(
-                "PM: CRISIS REDUCE_EXPOSURE — trim %.0f%% written to all OPEN positions", trim_pct * 100
-            )
+            positions_to_reduce = action.get("positions_to_reduce") or []
+            if positions_to_reduce:
+                # Per-position trim: honor the model's prioritized list
+                for entry in positions_to_reduce:
+                    pos_ticker = entry.get("ticker")
+                    reduce_pct = _clean_float(entry.get("reduce_pct"), 0.50)
+                    if pos_ticker:
+                        client.table("positions").update({
+                            "exit_action": "TRIM",
+                            "exit_trim_pct": reduce_pct,
+                        }).eq("status", "OPEN").eq("ticker", pos_ticker).execute()
+                logger.warning(
+                    "PM: CRISIS REDUCE_EXPOSURE — per-position trim written for %d positions",
+                    len(positions_to_reduce),
+                )
+            else:
+                # Fallback: no per-position list — apply uniform trim
+                trim_pct = _clean_float(action.get("trim_pct"), 0.50)
+                client.table("positions").update({
+                    "exit_action": "TRIM",
+                    "exit_trim_pct": trim_pct,
+                }).eq("status", "OPEN").execute()
+                logger.warning(
+                    "PM: CRISIS REDUCE_EXPOSURE — uniform %.0f%% trim on all OPEN positions (no per-position list)",
+                    trim_pct * 100,
+                )
             notify_event("CRISIS_MODE", {
                 "action": "REDUCE_EXPOSURE",
-                "trim_pct": trim_pct,
+                "positions_count": len(positions_to_reduce),
             })
             return "SENT_TO_EXECUTION"
 
         elif category == "CRISIS" and decision == "LIQUIDATE_TO_TARGET":
-            # Close all open positions immediately.
             action = decision_data.get("action_details", {})
-            client.table("positions").update({"exit_action": "CLOSE"}).eq(
-                "status", "OPEN"
-            ).execute()
-            logger.critical(
-                "PM: CRISIS LIQUIDATE_TO_TARGET — exit_action=CLOSE written to all OPEN positions (target_exposure=%s)",
-                action.get("target_exposure", "0%"),
-            )
+            target_gross = _clean_float(action.get("target_gross_exposure"), 0.0)
+            positions_to_reduce = action.get("positions_to_reduce") or []
+            if positions_to_reduce:
+                # Close only the model's prioritized tickers (weakest conviction / highest correlation)
+                tickers = [p.get("ticker") for p in positions_to_reduce if p.get("ticker")]
+                client.table("positions").update({"exit_action": "CLOSE"}).eq(
+                    "status", "OPEN"
+                ).in_("ticker", tickers).execute()
+                logger.critical(
+                    "PM: CRISIS LIQUIDATE_TO_TARGET — CLOSE written to %d prioritized positions "
+                    "(target_gross=%.0f%%)",
+                    len(tickers), target_gross * 100,
+                )
+            else:
+                # No priority list → target is effectively 0%; close everything
+                client.table("positions").update({"exit_action": "CLOSE"}).eq(
+                    "status", "OPEN"
+                ).execute()
+                logger.critical(
+                    "PM: CRISIS LIQUIDATE_TO_TARGET — CLOSE written to ALL OPEN positions "
+                    "(no priority list; target_gross=%.0f%%)", target_gross * 100,
+                )
             notify_event("CRISIS_MODE", {
                 "action": "LIQUIDATE_TO_TARGET",
-                "target_exposure": action.get("target_exposure"),
+                "target_exposure": f"{target_gross:.0%}",
+                "positions_count": len(positions_to_reduce),
             })
             return "SENT_TO_EXECUTION"
 
@@ -1577,10 +1614,68 @@ def _route_decision(
                     "note": f"Hedging unavailable at {caps.capability_tier} — manual intervention required",
                 })
                 return "NO_ACTION"
-            # Shorts enabled: hedging instruments available — execute hedge
-            logger.info("PM: CRISIS HEDGE — shorts enabled at %s, sending to execution", caps.capability_tier)
-            notify_event("CRISIS_MODE", {"action": "HEDGE", "capability_tier": caps.capability_tier})
-            return "SENT_TO_EXECUTION"
+            action = decision_data.get("action_details", {})
+            hedge_details = action.get("hedge_details") or {}
+            instruments = hedge_details.get("instruments", [])
+            if not instruments:
+                logger.warning(
+                    "PM: CRISIS HEDGE — shorts enabled but hedge_details.instruments is empty; no orders queued"
+                )
+                notify_event("CRISIS_MODE", {"action": "HEDGE", "note": "No instruments specified"})
+                return "NO_ACTION"
+            import yfinance as yf
+            ctx = decision_record.get("context_snapshot") or {}
+            pv = float(portfolio_value or 0)
+            regime = str(ctx.get("macro_regime") or "UNKNOWN")
+            placed = []
+            for inst in instruments:
+                inst_ticker = inst.get("ticker")
+                notional_pct = _clean_float(inst.get("target_notional_pct"), 0.05)
+                reason = inst.get("reason", "Crisis hedge")
+                if not inst_ticker:
+                    continue
+                try:
+                    last_price = yf.Ticker(inst_ticker).fast_info.last_price
+                except Exception:
+                    last_price = None
+                if not last_price:
+                    logger.warning("PM: CRISIS HEDGE — could not fetch price for %s; skipping", inst_ticker)
+                    continue
+                dollar_size = pv * notional_pct if pv else 0.0
+                share_count = round(dollar_size / last_price, 2) if dollar_size else 1.0
+                size_label = (
+                    "large" if notional_pct >= 0.08
+                    else "medium" if notional_pct >= 0.05
+                    else "small" if notional_pct >= 0.02
+                    else "micro"
+                )
+                client.table("positions").insert({
+                    "ticker": inst_ticker,
+                    "direction": "SHORT",
+                    "status": "APPROVED",
+                    "conviction_score": 9.0,
+                    "kelly_fraction": round(notional_pct, 4),
+                    "dollar_size": round(dollar_size, 2),
+                    "share_count": share_count,
+                    "size_label": size_label,
+                    "pct_of_portfolio": round(notional_pct, 4),
+                    "sizing_rationale": f"CRISIS HEDGE: {reason}",
+                    "regime_at_sizing": regime,
+                    "correlation_flag": False,
+                }).execute()
+                placed.append(inst_ticker)
+                logger.info(
+                    "PM: CRISIS HEDGE — queued SHORT %s (%.0f%% notional)", inst_ticker, notional_pct * 100
+                )
+            logger.info(
+                "PM: CRISIS HEDGE — %d hedge position(s) queued for execution: %s", len(placed), placed
+            )
+            notify_event("CRISIS_MODE", {
+                "action": "HEDGE",
+                "instruments": placed,
+                "capability_tier": caps.capability_tier,
+            })
+            return "SENT_TO_EXECUTION" if placed else "NO_ACTION"
 
         elif category == "PRE_EARNINGS" and decision == "SIZE_UP":
             # Add to position ahead of earnings.  Uses exit_action=ADD (same as EXIT_TRIM+ADD).
@@ -1628,6 +1723,9 @@ def _route_decision(
             # execution agent will sell positions the PM just decided to grow.
             # TRIM/CLOSE entries arm exits for positions the PM wants to shed while deploying.
             action = decision_data.get("action_details", {})
+            deploy_criteria = action.get("deploy_criteria")
+            if deploy_criteria:
+                logger.info("PM: DEPLOY_CASH — criteria: %s", deploy_criteria)
             adjustments = action.get("adjustments", [])
             for adj in adjustments:
                 adj_ticker = adj.get("ticker")
@@ -1673,6 +1771,12 @@ def _route_decision(
     if decision == "NO_ACTION":
         return "NO_ACTION"
     if decision in ("HOLD", "MONITOR"):
+        if category == "CRISIS" and decision == "MONITOR":
+            action = decision_data.get("action_details", {})
+            threshold = action.get("monitor_escalation_threshold") or "Not specified"
+            logger.warning(
+                "PM: CRISIS MONITOR — no immediate action; escalation threshold logged: %s", threshold
+            )
         return "NO_ACTION"
 
     if decision == "DEPLOY_CASH":
@@ -1687,6 +1791,10 @@ def _route_decision(
             return "TRIGGERED_PIPELINE"
         return "NO_ACTION"
 
+    logger.warning(
+        "PM: _route_decision — unhandled combination category=%s decision=%s; defaulting to DEFERRED",
+        category, decision,
+    )
     return "DEFERRED"
 
 
