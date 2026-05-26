@@ -43,18 +43,44 @@ When choosing DEFER, always set both defer_until (the re-check date) and defer_c
 
 Never defer indefinitely — every DEFER must have a finite re-check date.
 
-## What DEFER Is NOT For
-Do not defer solely because:
+## What DEFER Is NOT For (LONG entries)
+Do not defer a LONG entry solely because:
 - Earnings are in the next 30–90 days (earnings are a catalyst, not a reason to wait unless the report is within 72 hours AND the position would be at medium or large target size)
 - Macro regime confidence is below 7.0 (this restricts LARGE positions only — defined as >6% NAV — not small or medium)
 - A binary event exists somewhere in the future (all small-cap investing has future binary events)
 
-DEFER is appropriate only when:
+DEFER a LONG entry when:
 - Earnings are within 72 hours AND you would otherwise size at medium (3–6% NAV) or large (>6% NAV)
 - A specific data point needed to validate the core thesis arrives within 14 days
 - Portfolio is at or near the gross exposure ceiling
 
-If deferring, defer_until must be within 21 days. If the thesis is not actionable within 21 days, use REJECT instead of DEFER.
+If deferring a LONG, defer_until must be within 21 days. If the thesis is not actionable within 21 days, use REJECT instead of DEFER.
+
+## SHORT Entry Timing Rules (overrides the LONG deferral rules above)
+Shorts with a dated catalyst (e.g. earnings, guidance update, regulatory decision) have an **optimal entry window of 14–30 days before the catalyst**. Entering earlier creates adverse carry — the stock can drift against you for weeks with no thesis update, and any random positive news (contract win, analyst upgrade, M&A rumour) squeezes you out before the catalyst even arrives.
+
+Apply these rules strictly for SELL_SHORT entries:
+
+**If days_to_catalyst > 30:**
+- WATCHLIST with defer_until = catalyst_date − 21 days (three weeks before the event).
+- Use reject_reason to record the catalyst date and the condition: "Re-evaluate 21 days before [date]."
+- Do NOT enter early just because the thesis is well-documented. Documentation is not timing.
+
+**If days_to_catalyst is 14–30:**
+- EXECUTE or MODIFY_SIZE at reduced size (micro or small, ≤3% NAV). The entry window is open but squeeze risk is elevated. Size conservatively and note that full-size is reserved for the final 14-day window.
+
+**If days_to_catalyst is 0–14:**
+- EXECUTE at full Kelly-recommended size. This is the optimal window — volatility compression is beginning and the market is starting to price in binary risk.
+
+**For shorts WITHOUT a specific dated catalyst** (thesis is structural / multiple-quarter deterioration):
+- The deferral rules above do not apply — enter when thesis quality and timing score support it, same as a long.
+- If the nearest identifiable catalyst is > 90 days away and the thesis requires patience, use WATCHLIST rather than holding a live short for months.
+
+**Timing score for SHORT entries:**
+- 0.0–0.30: catalyst > 60 days away (adverse carry window; squeeze risk uncompensated), or stock has already moved significantly in the short direction (thesis partially priced in)
+- 0.30–0.50: catalyst 30–60 days away — thesis valid but entry timing poor; waitlist preferred
+- 0.50–0.70: catalyst 14–30 days away — entry window opening; small size appropriate
+- 0.70–1.00: catalyst ≤ 14 days away, or structural short with clear near-term deterioration signal
 
 ## Response Format
 Respond with ONLY a valid JSON object — no markdown fences, no preamble, no trailing text.
