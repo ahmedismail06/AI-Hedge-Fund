@@ -22,7 +22,7 @@ function deriveActiveStage(counts) {
   return null;
 }
 
-export default function SignalPipeline({ counts = {}, screenerRunAt, onStageClick }) {
+export default function SignalPipeline({ counts = {}, screenerRunning = false, screenerRunAt, onStageClick }) {
   const activeStage = deriveActiveStage(counts);
 
   return (
@@ -34,11 +34,16 @@ export default function SignalPipeline({ counts = {}, screenerRunAt, onStageClic
         <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
           Signal Pipeline
         </div>
-        {screenerRunAt && (
+        {screenerRunning ? (
+          <span style={{ marginLeft: '8px', fontSize: '9px', color: 'var(--amber)', fontFamily: 'JetBrains Mono', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', background: 'var(--amber)', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
+            Screener running
+          </span>
+        ) : screenerRunAt ? (
           <span style={{ marginLeft: '8px', fontSize: '9px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>
             Last run: {new Date(screenerRunAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
           </span>
-        )}
+        ) : null}
         {activeStage && (
           <span style={{ marginLeft: 'auto', fontSize: '9px', fontWeight: 700, fontFamily: 'Syne', color: 'var(--text-3)' }}>
             Active:{' '}
@@ -54,7 +59,9 @@ export default function SignalPipeline({ counts = {}, screenerRunAt, onStageClic
           const count = counts[stage.key];
           const color = STAGE_COLORS[i];
           const isLast = i === STAGES.length - 1;
-          const isActive = stage.key === activeStage;
+          // When screener is running, treat the 'universe' stage as actively pulsing
+          const isScreenerStage = screenerRunning && stage.key === 'universe';
+          const isActive = stage.key === activeStage || isScreenerStage;
           // stages left of the active one are "done"
           const activeIdx = STAGES.findIndex(s => s.key === activeStage);
           const isDone = activeIdx >= 0 && i < activeIdx;

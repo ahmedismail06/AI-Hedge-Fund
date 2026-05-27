@@ -3655,10 +3655,25 @@ def _trigger_macro_agent() -> None:
         _update_pipeline_status(False)
 
 
+def _set_screener_status(is_running: bool) -> None:
+    """Stamp pm_config.screener_is_running; on completion also record screener_last_run."""
+    try:
+        update: dict = {
+            "screener_is_running": is_running,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not is_running:
+            update["screener_last_run"] = datetime.now(timezone.utc).isoformat()
+        _get_client().table("pm_config").update(update).eq("id", 1).execute()
+    except Exception as exc:
+        logger.warning("_set_screener_status: failed — %s", exc)
+
+
 def _trigger_screener() -> None:
     from backend.agents.screening_agent import run_screening
     from backend.agents.short_screening_agent import run_short_screening
     _update_pipeline_status(True)
+    _set_screener_status(True)
     try:
         run_screening()
         run_short_screening()
@@ -3666,6 +3681,7 @@ def _trigger_screener() -> None:
         logger.error("PM scheduler: screener trigger failed — %s", exc)
     finally:
         _update_pipeline_status(False)
+        _set_screener_status(False)
 
 
 def _trigger_research_queue() -> None:

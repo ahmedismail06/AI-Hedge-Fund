@@ -7,7 +7,7 @@ const TTL = {
   status:      45_000,   // PM cycles every 5 min — no need to hit every 30s
   decisions:   45_000,
   calibration: 300_000,
-  config:      300_000,
+  config:      10_000,    // short TTL so screener_is_running stays fresh
 };
 
 export const getPMStatus    = () => cached('pm/status',      TTL.status,      () => axios.get(`${BASE}/pm/status`).then(r => r.data));

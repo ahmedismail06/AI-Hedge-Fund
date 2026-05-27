@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getWatchlist, runScreener } from '../api/screener';
 import { getHistory as getMemoHistory, triggerResearch, getLatestMemo } from '../api/research';
-import { getPMDecisions } from '../api/pm';
+import { getPMDecisions, getPMConfig } from '../api/pm';
 import SignalPipeline from '../components/SignalPipeline';
 import MemoCardCompact from '../components/MemoCardCompact';
 import MemoDetailDrawer from '../components/MemoDetailDrawer';
@@ -76,17 +76,20 @@ export default function Signals() {
   const [drawerMemo, setDrawerMemo] = useState(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [pmConfig, setPmConfig] = useState(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [wl, mh, dec] = await Promise.all([
+      const [wl, mh, dec, cfg] = await Promise.all([
         getWatchlist(true),
         getMemoHistory(),
         getPMDecisions({ limit: 20 }),
+        getPMConfig(),
       ]);
       setWatchlist(Array.isArray(wl) ? wl : []);
       setMemos(Array.isArray(mh) ? mh : []);
       setPmDecisions(Array.isArray(dec) ? dec : []);
+      setPmConfig(cfg ?? null);
     } catch {} finally {
       setLoading(false);
     }
@@ -151,6 +154,8 @@ export default function Signals() {
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const screenerRanToday = watchlist.some(w => w.scored_at?.startsWith(todayStr));
+  const screenerIsRunning = pmConfig?.screener_is_running ?? running;
+  const screenerLastRun = pmConfig?.screener_last_run ?? null;
 
   const COL_HEADERS = [
     { key: 'composite_score', label: 'Score' },
@@ -184,24 +189,26 @@ export default function Signals() {
             <div>
               <SL>Signal Pipeline</SL>
               <div style={{ fontSize: '12px', color: 'var(--text-2)', marginTop: '2px' }}>
-                {screenerRanToday
-                  ? <span style={{ color: 'var(--green)' }}>● Screener ran today</span>
-                  : <span style={{ color: 'var(--text-3)' }}>○ Awaiting today's run</span>}
+                {screenerIsRunning
+                  ? <span style={{ color: 'var(--amber)' }}>◎ Screener running…</span>
+                  : screenerRanToday
+                    ? <span style={{ color: 'var(--green)' }}>● Screener ran today</span>
+                    : <span style={{ color: 'var(--text-3)' }}>○ Awaiting today's run</span>}
               </div>
             </div>
             {isAdmin && (
               <button
                 onClick={handleRunScreener}
-                disabled={running}
+                disabled={screenerIsRunning}
                 style={{
                   fontSize: '10px', fontWeight: 700, fontFamily: 'Syne',
                   padding: '5px 12px', borderRadius: '6px',
                   background: 'var(--accent)', color: '#000',
-                  border: 'none', cursor: running ? 'not-allowed' : 'pointer',
-                  opacity: running ? 0.6 : 1,
+                  border: 'none', cursor: screenerIsRunning ? 'not-allowed' : 'pointer',
+                  opacity: screenerIsRunning ? 0.6 : 1,
                 }}
               >
-                {running ? 'Running…' : 'Run Screener'}
+                {screenerIsRunning ? 'Running…' : 'Run Screener'}
               </button>
             )}
           </div>
@@ -213,6 +220,8 @@ export default function Signals() {
               memos:     memosDoneCount,
               decisions: decisionsCount,
             }}
+            screenerRunning={screenerIsRunning}
+            screenerRunAt={screenerLastRun}
           />
         </div>
       </Panel>

@@ -291,6 +291,19 @@ def update_status(memo_id: str, body: StatusUpdate):
 # ── Screening ─────────────────────────────────────────────────────────────────
 
 
+def _set_screener_running(is_running: bool) -> None:
+    """Stamp pm_config.screener_is_running; on completion also record screener_last_run."""
+    from datetime import datetime, timezone
+    from backend.memory.vector_store import _get_client
+    try:
+        update: dict = {"screener_is_running": is_running, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if not is_running:
+            update["screener_last_run"] = datetime.now(timezone.utc).isoformat()
+        _get_client().table("pm_config").update(update).eq("id", 1).execute()
+    except Exception as exc:
+        logger.warning("_set_screener_running: failed — %s", exc)
+
+
 @app.post("/screening/run")
 def trigger_screening(regime: str | None = None):
     """
@@ -299,13 +312,17 @@ def trigger_screening(regime: str | None = None):
     """
     from backend.agents.screening_agent import run_screening, ScreeningAgentError
     from backend.agents.short_screening_agent import run_short_screening
+    _set_screener_running(True)
     try:
         results = run_screening(regime=regime)
         run_short_screening()
     except ScreeningAgentError as exc:
+        _set_screener_running(False)
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
+        _set_screener_running(False)
         raise HTTPException(status_code=500, detail=f"Screening pipeline error: {exc}")
+    _set_screener_running(False)
     return {"count": len(results), "results": results}
 
 
