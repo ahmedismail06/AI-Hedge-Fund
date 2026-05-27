@@ -220,11 +220,11 @@ export default function Book() {
   ];
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '12px' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         {[...Array(4)].map((_, i) => <SkeletonStat key={i} />)}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 280px', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-2col">
         <SkeletonPanel label="Positions" rows={8} />
         <div className="space-y-3">
           <SkeletonPanel label="Exposure" rows={3} />
@@ -235,7 +235,7 @@ export default function Book() {
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       {confirm && (
         <ConfirmDialog
           title={confirm.action === 'approve' ? `Approve ${confirm.ticker}?` : `Reject ${confirm.ticker}?`}
@@ -271,7 +271,7 @@ export default function Book() {
       </div>
 
       {/* Main grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) clamp(240px, 25vw, 340px)', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-2col">
 
         {/* Left: position table */}
         <Panel>

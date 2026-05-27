@@ -160,11 +160,11 @@ export default function Signals() {
   ];
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       <div className="panel" style={{ marginBottom: '12px', padding: '16px' }}>
         <SkeletonBlock height={36} />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-2col-split">
         <SkeletonPanel label="Screener Watchlist" rows={10} />
         <div className="space-y-3">
           <SkeletonPanel label="Research Memos" rows={4} />
@@ -175,7 +175,7 @@ export default function Signals() {
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
 
       {/* Pipeline header */}
       <Panel style={{ marginBottom: '12px' }}>
@@ -218,7 +218,7 @@ export default function Signals() {
       </Panel>
 
       {/* Two-column: screener left, memos right */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 55fr) minmax(0, 45fr)', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-2col-split">
 
         {/* ── LEFT: Screener table ── */}
         <Panel>

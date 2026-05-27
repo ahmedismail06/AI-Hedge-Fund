@@ -154,11 +154,11 @@ export default function RiskEngine() {
   })).filter(d => d.value != null);
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '12px' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <div className="grid-metrics-4col" style={{ marginBottom: '12px' }}>
         {[...Array(4)].map((_, i) => <SkeletonStat key={i} />)}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 320px', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-risk-3col">
         <div className="space-y-3">
           <div className="panel"><SkeletonChart height={180} /></div>
           <SkeletonPanel label="Risk Alerts" rows={5} />
@@ -172,7 +172,7 @@ export default function RiskEngine() {
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
 
       {/* Critical banner */}
       {criticals.length > 0 && (
@@ -192,7 +192,7 @@ export default function RiskEngine() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 300px)', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-risk-3col">
 
         {/* ── LEFT: Alerts + Stop Ladder ── */}
         <div className="space-y-3">
@@ -264,7 +264,7 @@ export default function RiskEngine() {
         {/* ── CENTER: Metrics Grid + Sharpe History ── */}
         <div className="space-y-3">
           {/* 2×4 metric cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '8px' }}>
+          <div className="grid-metrics-4col">
             {Object.entries(METRIC_META).map(([key, meta]) => {
               const val = metrics?.[key];
               return (

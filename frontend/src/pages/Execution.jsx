@@ -198,23 +198,20 @@ export default function Execution() {
   const mkt = MKT_COLORS[marketStatus.colorKey] || MKT_COLORS.gray;
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       <div className="panel rounded-xl p-4 mb-3"><SkeletonStat style={{ border: 'none', padding: 0, background: 'none' }} /></div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '12px' }}>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
         {[...Array(3)].map((_, i) => <SkeletonStat key={i} />)}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 300px', gap: '12px', alignItems: 'start' }}>
-        <div className="space-y-3">
-          <SkeletonPanel label="Orders" rows={6} />
-          <SkeletonPanel label="Fills" rows={5} />
-        </div>
-        <div className="panel"><SkeletonChart height={200} /></div>
+      <div className="space-y-3">
+        <SkeletonPanel label="Orders" rows={6} />
+        <SkeletonPanel label="Fills" rows={5} />
       </div>
     </div>
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
 
       {/* ── Status Bar ── */}
       <div

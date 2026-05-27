@@ -142,9 +142,9 @@ export default function CommandCenter() {
   const tickers = displayPositions.map(p => p.ticker);
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       <SkeletonPanel label="AI Orchestrator" rows={1} style={{ marginBottom: '12px' }} />
-      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-3col">
         <div className="space-y-3">
           <SkeletonPanel label="Open Book" rows={6} />
           <SkeletonPanel rows={2} />
@@ -161,7 +161,7 @@ export default function CommandCenter() {
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       {confirm && (
         <ConfirmDialog
           title={confirm.action === 'approve' ? `Approve ${confirm.ticker}?` : `Reject ${confirm.ticker}?`}
@@ -212,7 +212,7 @@ export default function CommandCenter() {
       <OrchestratorBrain status={pmStatus} onRefresh={loadData} />
 
       {/* Three-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start', marginTop: '12px' }}>
+      <div className="page-grid-3col" style={{ marginTop: '12px' }}>
 
         {/* ── LEFT: Position list ──────────────────────────────── */}
         <div className="space-y-3">

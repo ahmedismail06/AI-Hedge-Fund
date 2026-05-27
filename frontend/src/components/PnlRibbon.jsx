@@ -102,7 +102,9 @@ export default function PnlRibbon() {
         valueColor={pnlColor(realised)}
       />
 
-      <RibbonStat label="Cash" value={fmt$(cash)} />
+      <div className="ribbon-stat-hide-mobile flex-shrink-0">
+        <RibbonStat label="Cash" value={fmt$(cash)} />
+      </div>
 
       <Divider />
 
@@ -111,10 +113,12 @@ export default function PnlRibbon() {
         value={gross != null ? `${gross.toFixed(1)}%` : '—'}
         valueColor={gross != null && gross > 150 ? 'var(--red)' : 'var(--text)'}
       />
-      <RibbonStat
-        label="Net"
-        value={net != null ? `${net >= 0 ? '+' : ''}${net.toFixed(1)}%` : '—'}
-      />
+      <div className="ribbon-stat-hide-mobile flex-shrink-0">
+        <RibbonStat
+          label="Net"
+          value={net != null ? `${net >= 0 ? '+' : ''}${net.toFixed(1)}%` : '—'}
+        />
+      </div>
 
       <Divider />
 

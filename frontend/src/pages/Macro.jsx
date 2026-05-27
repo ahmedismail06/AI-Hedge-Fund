@@ -163,9 +163,9 @@ export default function Macro() {
   })).filter(d => d.score != null);
 
   if (loading) return (
-    <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap" style={{ maxWidth: '1600px', margin: '0 auto' }}>
       <div className="panel rounded-xl p-4 mb-4"><SkeletonBlock height={56} /></div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 300px', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-macro-3col">
         <div className="space-y-3">
           <SkeletonPanel label="Macro Briefing" rows={5} />
           <div className="panel"><SkeletonChart height={140} /></div>
@@ -179,7 +179,7 @@ export default function Macro() {
   );
 
   return (
-    <div className="p-4 animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="p-4 page-wrap animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
 
       {/* Regime confidence header strip */}
       <div
@@ -245,7 +245,7 @@ export default function Macro() {
       {regime && (
         <Panel style={{ marginBottom: '12px' }}>
           <div className="p-4">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '16px' }}>
+            <div className="grid-subscores-4col">
               {Object.entries(SUB_SCORES).map(([key, label]) => (
                 <SubScorePill key={key} label={label} value={regime[key] ?? briefing?.[key]} />
               ))}
@@ -255,7 +255,7 @@ export default function Macro() {
       )}
 
       {/* Three-column body */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(180px, 20vw, 280px) minmax(0, 1fr) clamp(180px, 20vw, 280px)', gap: '12px', alignItems: 'start' }}>
+      <div className="page-grid-macro-3col">
 
         {/* ── LEFT: Indicator grid ── */}
         <div className="space-y-2">
