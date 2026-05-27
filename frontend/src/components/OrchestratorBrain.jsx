@@ -51,11 +51,17 @@ export default function OrchestratorBrain({ status, onRefresh }) {
     ? Math.round(status.cycle_interval_seconds / 60)
     : 5;
 
-  const stateKey = isHalted ? 'HALTED' : running ? 'RUNNING' : 'IDLE';
+  // Use real pm_cycle_status from DB; local `running` covers the brief window between
+  // button click and the next poll reflecting RUNNING in pm_config.
+  const dbCycleStatus = status?.pm_cycle_status ?? 'IDLE';
+  const isActuallyRunning = running || dbCycleStatus === 'RUNNING' || (status?.pm_is_running ?? false);
+
+  const stateKey = isHalted ? 'HALTED' : isActuallyRunning ? 'RUNNING' : dbCycleStatus === 'FAILED' ? 'FAILED' : 'IDLE';
   const STATE_CONFIG = {
     IDLE:    { label: 'IDLE',    color: 'var(--text-2)',  dotStyle: { background: 'var(--text-3)' } },
     RUNNING: { label: 'RUNNING', color: 'var(--accent)',  dotStyle: { background: 'var(--accent)' }, pulse: true },
     HALTED:  { label: 'HALTED',  color: 'var(--amber)',   dotStyle: { background: 'var(--amber)' } },
+    FAILED:  { label: 'FAILED',  color: 'var(--red)',     dotStyle: { background: 'var(--red)' } },
   };
   const cfg = STATE_CONFIG[stateKey];
 

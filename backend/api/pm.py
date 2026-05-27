@@ -185,6 +185,8 @@ async def get_pm_status():
             "cycle_interval_seconds": config.get("cycle_interval_seconds", 300),
             "daily_loss_halt_triggered": config.get("daily_loss_halt_triggered", False),
             "halted_until": config.get("halted_until"),
+            "pm_cycle_status": config.get("pm_cycle_status", "IDLE"),
+            "pm_is_running": config.get("pm_is_running", False),
             "portfolio": portfolio,
             "last_cycle": last_cycle,
             "decisions_today": today_count,

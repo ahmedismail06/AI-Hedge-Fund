@@ -103,10 +103,10 @@ create table if not exists macro_briefings (
     id                  uuid primary key default gen_random_uuid(),
     date                date not null,
     regime              text not null
-                            check (regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation')),
+                            check (regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation', 'Constructive')),
     regime_score        numeric(6, 2) not null,
     previous_regime     text
-                            check (previous_regime is null or previous_regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation')),
+                            check (previous_regime is null or previous_regime in ('Risk-On', 'Risk-Off', 'Transitional', 'Stagflation', 'Constructive')),
     regime_changed      boolean not null default false,
     growth_score        numeric(5, 4) not null,
     inflation_score     numeric(5, 4) not null,
@@ -557,3 +557,23 @@ CREATE INDEX IF NOT EXISTS short_candidates_ticker_idx
 CREATE INDEX IF NOT EXISTS short_candidates_queued_idx
     ON short_candidates (queued_for_research, run_date)
     WHERE queued_for_research = TRUE;
+
+-- ── Inflation Engine Diagnostics ──────────────────────────────────────────────
+-- Per-run output from the inflation scoring pipeline (diagnostics.persist_result).
+-- One row per scoring date; upserted on re-runs.
+CREATE TABLE IF NOT EXISTS inflation_diagnostics (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    date                date NOT NULL,
+    score               numeric(8, 4) NOT NULL,
+    confidence          numeric(5, 4) NOT NULL,
+    aggregate_method    text,
+    layer_scores        jsonb,
+    layer_confidences   jsonb,
+    normalised_weights  jsonb,
+    layer_ics           jsonb,
+    result_json         jsonb,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (date)
+);
+CREATE INDEX IF NOT EXISTS inflation_diagnostics_date_idx
+    ON inflation_diagnostics (date DESC);
