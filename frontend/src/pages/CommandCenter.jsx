@@ -361,13 +361,13 @@ export default function CommandCenter() {
                 </div>
               ) : (
                 decisions.map(d => (
-                  <div key={d.decision_id} onClick={() => setSelectedDecision(d)} style={{ cursor: 'pointer' }}>
-                    <DecisionCard
-                      decision={d}
-                      onOverride={handleOverride}
-                      onDefer={(id) => setSelectedDecision(decisions.find(x => x.decision_id === id) ?? null)}
-                    />
-                  </div>
+                  <DecisionCard
+                    key={d.decision_id}
+                    decision={d}
+                    onOverride={handleOverride}
+                    onDefer={(id) => setSelectedDecision(decisions.find(x => x.decision_id === id) ?? null)}
+                    onOpenDetail={setSelectedDecision}
+                  />
                 ))
               )}
             </div>
