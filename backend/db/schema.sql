@@ -138,7 +138,7 @@ create index if not exists macro_briefings_created_idx
 -- (Component 4). One row per position decision; status tracks the full lifecycle
 -- from PENDING_APPROVAL through OPEN to CLOSED.
 -- direction allowed values: 'LONG' | 'SHORT'
--- status allowed values: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'OPEN' | 'CLOSED'
+-- status allowed values: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'OPEN' | 'CLOSED' | 'EXPIRED'
 -- size_label allowed values: 'large' | 'medium' | 'small' | 'micro'
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ create table if not exists positions (
     memo_id             uuid references memos(id),
     direction           text not null check (direction in ('LONG', 'SHORT')),
     status              text not null default 'PENDING_APPROVAL'
-                            check (status in ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'OPEN', 'CLOSED')),
+                            check (status in ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'OPEN', 'CLOSED', 'EXPIRED')),
     conviction_score    numeric(4, 2) not null,
     kelly_fraction      numeric(6, 4) not null,
     dollar_size         numeric(12, 2) not null,

@@ -31,19 +31,35 @@ function fmtAgo(ts) {
 function fmtHaltedUntil(ts) {
   if (!ts) return null;
   const d = new Date(ts);
-  if (isNaN(d)) return null;
-  if (d < new Date()) return null;
+  if (isNaN(d) || d < new Date()) return null;
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+
+function VDivider() {
+  return <div style={{ width: '1px', alignSelf: 'stretch', background: 'var(--border)', flexShrink: 0 }} />;
+}
+
+function Stat({ label, value, color }) {
+  return (
+    <div className="flex-shrink-0">
+      <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: color ?? 'var(--text-3)', fontFamily: 'Syne' }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: 'JetBrains Mono', fontSize: '18px', fontWeight: 700, color: color ?? 'var(--text)', lineHeight: 1.15 }}>
+        {value}
+      </div>
+    </div>
+  );
 }
 
 export default function OrchestratorBrain({ status, onRefresh }) {
   const { isAdmin } = useAuth();
   const [running, setRunning] = useState(false);
 
-  const isHalted     = status?.daily_loss_halt_triggered ?? false;
-  const mode         = status?.mode ?? 'supervised';
-  const lastCycle    = status?.last_cycle;
-  const lastTs       = lastCycle?.timestamp ?? null;
+  const isHalted         = status?.daily_loss_halt_triggered ?? false;
+  const mode             = status?.mode ?? 'supervised';
+  const lastCycle        = status?.last_cycle;
+  const lastTs           = lastCycle?.timestamp ?? null;
   const decisionsToday   = status?.decisions_today ?? 0;
   const criticalAlerts   = status?.active_critical_alerts ?? 0;
   const haltedUntil      = fmtHaltedUntil(status?.halted_until);
@@ -51,9 +67,7 @@ export default function OrchestratorBrain({ status, onRefresh }) {
     ? Math.round(status.cycle_interval_seconds / 60)
     : 5;
 
-  // Use real pm_cycle_status from DB; local `running` covers the brief window between
-  // button click and the next poll reflecting RUNNING in pm_config.
-  const dbCycleStatus = status?.pm_cycle_status ?? 'IDLE';
+  const dbCycleStatus     = status?.pm_cycle_status ?? 'IDLE';
   const isActuallyRunning = running || dbCycleStatus === 'RUNNING' || (status?.pm_is_running ?? false);
 
   const stateKey = isHalted ? 'HALTED' : isActuallyRunning ? 'RUNNING' : dbCycleStatus === 'FAILED' ? 'FAILED' : 'IDLE';
@@ -63,8 +77,7 @@ export default function OrchestratorBrain({ status, onRefresh }) {
     HALTED:  { label: 'HALTED',  color: 'var(--amber)',   dotStyle: { background: 'var(--amber)' } },
     FAILED:  { label: 'FAILED',  color: 'var(--red)',     dotStyle: { background: 'var(--red)' } },
   };
-  const cfg = STATE_CONFIG[stateKey];
-
+  const cfg  = STATE_CONFIG[stateKey];
   const stats = status?.portfolio;
 
   const handleRun = async () => {
@@ -78,133 +91,132 @@ export default function OrchestratorBrain({ status, onRefresh }) {
 
   return (
     <div
-      className="rounded-xl p-4"
+      className="rounded-xl px-5 py-3"
       style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
     >
-      {/* Header */}
-      <div className="flex items-start gap-2 mb-3">
-        <div
-          className={`w-2 h-2 rounded-full flex-shrink-0 mt-1 ${cfg.pulse ? 'pulse-brain' : ''}`}
-          style={cfg.dotStyle}
-        />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
-            AI Orchestrator
-          </div>
-          <div style={{ fontFamily: 'Syne', fontSize: '11px', fontWeight: 800, color: cfg.color, lineHeight: 1.2 }}>
-            {cfg.label} · {mode.toUpperCase()}
-          </div>
-          {haltedUntil && (
-            <div style={{ fontSize: '9px', color: 'var(--amber)', fontFamily: 'JetBrains Mono', marginTop: '1px' }}>
-              halted until {haltedUntil}
+      <div className="flex items-center gap-5" style={{ minHeight: '52px' }}>
+
+        {/* ── Status ── */}
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <div
+            className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${cfg.pulse ? 'pulse-brain' : ''}`}
+            style={cfg.dotStyle}
+          />
+          <div>
+            <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+              AI Orchestrator
             </div>
-          )}
+            <div style={{ fontFamily: 'Syne', fontSize: '14px', fontWeight: 800, color: cfg.color, lineHeight: 1.2 }}>
+              {cfg.label} · {mode.toUpperCase()}
+            </div>
+            {haltedUntil && (
+              <div style={{ fontSize: '9px', color: 'var(--amber)', fontFamily: 'JetBrains Mono', marginTop: '1px' }}>
+                halted until {haltedUntil}
+              </div>
+            )}
+          </div>
         </div>
-        <div className="text-right flex-shrink-0">
-          <div style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'JetBrains Mono' }}>last cycle</div>
-          <div style={{ fontSize: '11px', color: 'var(--text-2)', fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+
+        <VDivider />
+
+        {/* ── Last cycle ── */}
+        <div className="flex-shrink-0">
+          <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-3)', fontFamily: 'Syne' }}>
+            Last Cycle
+          </div>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: '14px', fontWeight: 700, color: 'var(--text-2)', lineHeight: 1.2 }}>
             {fmtAgo(lastTs)}
           </div>
         </div>
-      </div>
 
-      {/* Stats row: decisions today + critical alerts + cycle interval */}
-      <div className="flex items-center gap-3 mb-3" style={{ borderBottom: '1px solid var(--border)', paddingBottom: '10px' }}>
-        <div>
-          <div style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase' }}>Today</div>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: '15px', fontWeight: 700, color: 'var(--text)' }}>{decisionsToday}</div>
+        <VDivider />
+
+        {/* ── Decisions + Cycle interval + Critical ── */}
+        <div className="flex items-center gap-5 flex-shrink-0">
+          <Stat label="Today" value={decisionsToday} />
+          <Stat label="Cycle" value={`${cycleIntervalMin}m`} />
+          {criticalAlerts > 0 && (
+            <Stat label="Critical" value={criticalAlerts} color="var(--red)" />
+          )}
         </div>
-        <div style={{ width: '1px', alignSelf: 'stretch', background: 'var(--border)' }} />
-        <div>
-          <div style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase' }}>Cycle</div>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: '15px', fontWeight: 700, color: 'var(--text)' }}>{cycleIntervalMin}m</div>
-        </div>
-        {criticalAlerts > 0 && (
+
+        {/* ── Portfolio snapshot ── */}
+        {stats && (
           <>
-            <div style={{ width: '1px', alignSelf: 'stretch', background: 'var(--border)' }} />
-            <div>
-              <div style={{ fontSize: '9px', color: 'var(--red)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase' }}>Critical</div>
-              <div style={{ fontFamily: 'JetBrains Mono', fontSize: '15px', fontWeight: 700, color: 'var(--red)' }}>{criticalAlerts}</div>
+            <VDivider />
+            <div className="flex items-center gap-5 flex-shrink-0">
+              <Stat label="Gross" value={`${(stats.gross_exposure * 100).toFixed(0)}%`} />
+              <Stat label="Net"   value={`${(stats.net_exposure   * 100).toFixed(0)}%`} />
+              <Stat label="Cash"  value={`${(stats.cash_pct       * 100).toFixed(0)}%`} />
+              <Stat label="Pos"   value={stats.position_count} />
             </div>
           </>
         )}
-      </div>
 
-      {/* Portfolio stats */}
-      {stats && (
-        <div className="grid grid-cols-4 gap-2 mb-3">
-          {[
-            { label: 'Gross',  value: `${(stats.gross_exposure * 100).toFixed(0)}%` },
-            { label: 'Net',    value: `${(stats.net_exposure   * 100).toFixed(0)}%` },
-            { label: 'Cash',   value: `${(stats.cash_pct       * 100).toFixed(0)}%` },
-            { label: 'Pos',    value: stats.position_count },
-          ].map(({ label, value }) => (
-            <div key={label} className="rounded-lg p-2 text-center" style={{ background: 'var(--surface-2)' }}>
-              <div style={{ fontSize: '8px', color: 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                {label}
+        {/* ── Last decision — takes remaining space ── */}
+        {lastCycle && (
+          <>
+            <VDivider />
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <div style={{ fontSize: '9px', color: 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase', flexShrink: 0 }}>
+                Last
               </div>
-              <div style={{ fontFamily: 'JetBrains Mono', fontSize: '12px', fontWeight: 700, color: 'var(--text)', marginTop: '1px' }}>
-                {value}
-              </div>
+              {lastCycle.category && (() => {
+                const cs = CATEGORY_STYLE[lastCycle.category] ?? { bg: 'var(--surface-2)', color: 'var(--text-3)', border: 'var(--border)' };
+                return (
+                  <span style={{
+                    fontSize: '9px', fontWeight: 700, fontFamily: 'Syne',
+                    padding: '2px 6px', borderRadius: '4px', flexShrink: 0,
+                    background: cs.bg, color: cs.color, border: `1px solid ${cs.border}`,
+                  }}>
+                    {lastCycle.category}
+                  </span>
+                );
+              })()}
+              {lastCycle.decision && (
+                <span
+                  className="truncate"
+                  style={{
+                    fontFamily: 'Syne', fontSize: '12px', fontWeight: 700, minWidth: 0,
+                    color: EXEC_STYLE[lastCycle.execution_status]?.color ?? 'var(--text-2)',
+                  }}
+                >
+                  {lastCycle.decision}
+                </span>
+              )}
+              {lastCycle.execution_status && (
+                <span style={{
+                  marginLeft: 'auto', flexShrink: 0,
+                  fontSize: '9px', color: EXEC_STYLE[lastCycle.execution_status]?.color ?? 'var(--text-3)',
+                  fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em',
+                }}>
+                  {lastCycle.execution_status.replace(/_/g, ' ')}
+                </span>
+              )}
             </div>
-          ))}
-        </div>
-      )}
+          </>
+        )}
 
-      {/* Last decision row */}
-      {lastCycle && (
-        <div
-          className="rounded-lg px-3 py-2 mb-3 flex items-center gap-2 flex-wrap"
-          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+        {/* ── Run button ── */}
+        <button
+          onClick={handleRun}
+          disabled={running || !isAdmin}
+          title={!isAdmin ? 'Guest mode — read only' : undefined}
+          className="flex-shrink-0 py-2 px-5 rounded-lg text-[11px] font-bold tracking-wide transition-all"
+          style={{
+            fontFamily: 'Syne',
+            background: running ? 'var(--surface-2)' : 'var(--accent)',
+            color: running ? 'var(--text-2)' : '#000',
+            border: 'none',
+            cursor: running || !isAdmin ? 'not-allowed' : 'pointer',
+            opacity: !isAdmin ? 0.5 : 1,
+            whiteSpace: 'nowrap',
+          }}
         >
-          <div style={{ fontSize: '8px', color: 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700, textTransform: 'uppercase', marginRight: '2px' }}>
-            Last
-          </div>
-          {lastCycle.category && (() => {
-            const cs = CATEGORY_STYLE[lastCycle.category] ?? { bg: 'var(--surface-2)', color: 'var(--text-3)', border: 'var(--border)' };
-            return (
-              <span style={{
-                fontSize: '8px', fontWeight: 700, fontFamily: 'Syne',
-                padding: '1px 5px', borderRadius: '3px',
-                background: cs.bg, color: cs.color, border: `1px solid ${cs.border}`,
-              }}>
-                {lastCycle.category}
-              </span>
-            );
-          })()}
-          {lastCycle.decision && (
-            <span style={{
-              fontFamily: 'Syne', fontSize: '10px', fontWeight: 700,
-              color: EXEC_STYLE[lastCycle.execution_status]?.color ?? 'var(--text-2)',
-            }}>
-              {lastCycle.decision}
-            </span>
-          )}
-          {lastCycle.execution_status && (
-            <span style={{ marginLeft: 'auto', fontSize: '8px', color: EXEC_STYLE[lastCycle.execution_status]?.color ?? 'var(--text-3)', fontFamily: 'Syne', fontWeight: 700 }}>
-              {lastCycle.execution_status.replace(/_/g, ' ')}
-            </span>
-          )}
-        </div>
-      )}
+          {running ? 'Running…' : 'Run PM Cycle'}
+        </button>
 
-      {/* Run cycle button */}
-      <button
-        onClick={handleRun}
-        disabled={running || !isAdmin}
-        title={!isAdmin ? 'Guest mode — read only' : undefined}
-        className="w-full py-2 rounded-lg text-[11px] font-bold tracking-wide transition-all"
-        style={{
-          fontFamily: 'Syne',
-          background: running ? 'var(--surface-2)' : 'var(--accent)',
-          color: running ? 'var(--text-2)' : '#000',
-          border: 'none',
-          cursor: running || !isAdmin ? 'not-allowed' : 'pointer',
-          opacity: !isAdmin ? 0.5 : 1,
-        }}
-      >
-        {running ? 'Running cycle…' : 'Run PM Cycle'}
-      </button>
+      </div>
     </div>
   );
 }

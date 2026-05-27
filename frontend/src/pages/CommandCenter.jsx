@@ -143,6 +143,7 @@ export default function CommandCenter() {
 
   if (loading) return (
     <div className="p-4" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+      <SkeletonPanel label="AI Orchestrator" rows={1} style={{ marginBottom: '12px' }} />
       <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start' }}>
         <div className="space-y-3">
           <SkeletonPanel label="Open Book" rows={6} />
@@ -153,8 +154,6 @@ export default function CommandCenter() {
           <div className="panel"><SkeletonChart height={140} /></div>
         </div>
         <div className="space-y-3">
-          <SkeletonPanel label="PM Status" rows={3} />
-          <SkeletonPanel label="Risk Alerts" rows={3} />
           <SkeletonPanel label="Decisions" rows={4} />
         </div>
       </div>
@@ -209,8 +208,11 @@ export default function CommandCenter() {
         </div>
       )}
 
+      {/* ── Orchestrator brain — full width ─────────────────────── */}
+      <OrchestratorBrain status={pmStatus} onRefresh={loadData} />
+
       {/* Three-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'clamp(200px, 22vw, 300px) minmax(0, 1fr) clamp(200px, 22vw, 320px)', gap: '12px', alignItems: 'start', marginTop: '12px' }}>
 
         {/* ── LEFT: Position list ──────────────────────────────── */}
         <div className="space-y-3">
@@ -343,12 +345,8 @@ export default function CommandCenter() {
           )}
         </div>
 
-        {/* ── RIGHT: AI Decisions + Orchestrator ───────────────── */}
+        {/* ── RIGHT: Decision Queue ───────────────────────────── */}
         <div className="space-y-3">
-          {/* Orchestrator brain */}
-          <OrchestratorBrain status={pmStatus} onRefresh={loadData} />
-
-          {/* PM Decision queue */}
           <Panel>
             <PanelHeader
               label="Decision Queue"
