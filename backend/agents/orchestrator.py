@@ -1300,6 +1300,13 @@ def _route_decision(
                             _exec_override = float(_raw_exec_dollar)
                         except (TypeError, ValueError):
                             pass
+                    # Normalise PM direction so AVOID-verdict memos can be shorted.
+                    _raw_dir = _exec_action.get("direction")
+                    _dir_override = None
+                    if _raw_dir not in (None, ""):
+                        _norm_dir = str(_raw_dir).upper().replace("SELL_SHORT", "SHORT").replace("BUY", "LONG")
+                        if _norm_dir in ("LONG", "SHORT"):
+                            _dir_override = _norm_dir
                     # Run in a new thread to avoid "event loop already running" inside
                     # FastAPI/APScheduler contexts where asyncio.run() would fail.
                     with _cf.ThreadPoolExecutor(max_workers=1) as pool:
@@ -1310,9 +1317,10 @@ def _route_decision(
                                 portfolio_value=portfolio_value,
                                 auto_approve=auto_approve,
                                 override_dollar_amount=_exec_override,
+                                direction_override=_dir_override,
                             ),
                         ).result()
-                    logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s, override=$%s)", ticker, auto_approve, _exec_override)
+                    logger.info("PM: EXECUTE — sized position for %s (auto_approve=%s, override=$%s, direction=%s)", ticker, auto_approve, _exec_override, _dir_override or "from_memo")
                     return "SENT_TO_EXECUTION" if auto_approve else "PENDING_HUMAN"
                 except Exception as exc:
                     logger.warning("PM: EXECUTE sizing failed for %s — %s", ticker, exc)
@@ -1331,6 +1339,12 @@ def _route_decision(
                     from backend.agents.portfolio_agent import run_portfolio_sizing
                     import asyncio as _asyncio
                     import concurrent.futures as _cf
+                    _mod_raw_dir = action.get("direction")
+                    _mod_dir_override = None
+                    if _mod_raw_dir not in (None, ""):
+                        _mod_norm = str(_mod_raw_dir).upper().replace("SELL_SHORT", "SHORT").replace("BUY", "LONG")
+                        if _mod_norm in ("LONG", "SHORT"):
+                            _mod_dir_override = _mod_norm
                     # Run in a new thread to avoid "event loop already running" inside
                     # FastAPI/APScheduler contexts where asyncio.run() would fail.
                     with _cf.ThreadPoolExecutor(max_workers=1) as pool:
@@ -1340,7 +1354,8 @@ def _route_decision(
                                 memo_id=memo_id,
                                 portfolio_value=portfolio_value,
                                 auto_approve=auto_approve,
-                                override_dollar_amount=new_dollar
+                                override_dollar_amount=new_dollar,
+                                direction_override=_mod_dir_override,
                             ),
                         ).result()
                     # Apply PM's size override on top of Kelly sizing

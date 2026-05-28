@@ -244,6 +244,7 @@ async def run_portfolio_sizing(
     portfolio_value: Optional[float] = None,
     auto_approve: bool = False,
     override_dollar_amount: Optional[float] = None,
+    direction_override: Optional[str] = None,
 ) -> SizingRecommendation:
     """
     Run the 5-phase portfolio sizing pipeline for a completed InvestmentMemo.
@@ -259,8 +260,12 @@ async def run_portfolio_sizing(
         If True, write the position directly as APPROVED (PM has already
         decided EXECUTE).  If False, write as PENDING_APPROVAL (legacy path).
     override_dollar_amount:
-        If provided, bypasses Kelly sizing and automated correlation reductions, 
+        If provided, bypasses Kelly sizing and automated correlation reductions,
         using this explicit size instead.
+    direction_override:
+        If provided, overrides the memo's verdict-derived direction.  Accepts
+        "LONG", "SHORT", or "SELL_SHORT" (normalised to "SHORT").  Use when
+        the PM wants to short a stock that only has an AVOID memo.
 
     Returns
     -------
@@ -271,8 +276,8 @@ async def run_portfolio_sizing(
     Raises
     ------
     PortfolioAgentError
-        On hard stops: non-LONG verdict, conviction below 5.0, missing entry
-        price, sizing engine ValueError, or exposure-limit breach.
+        On hard stops: conviction below 5.0 (without dollar override), missing
+        entry price, sizing engine ValueError, or exposure-limit breach.
     """
     if portfolio_value is None or portfolio_value <= 0:
         from backend.broker.ibkr import get_portfolio_value
@@ -297,6 +302,11 @@ async def run_portfolio_sizing(
         else None
     )
     direction = str(memo_json.get("verdict") or row.get("verdict", "LONG")).upper()
+    if direction_override is not None:
+        _norm = str(direction_override).upper().replace("SELL_SHORT", "SHORT").replace("BUY", "LONG")
+        if _norm in ("LONG", "SHORT"):
+            logger.info("Phase 1: direction overridden by PM — memo verdict=%s, using %s", direction, _norm)
+            direction = _norm
 
     # ── Phase 2: Read macro regime ─────────────────────────────────────────────
     regime = _read_regime()
