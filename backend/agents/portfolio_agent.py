@@ -53,8 +53,10 @@ def _load_memo(memo_id: str) -> dict:
     Phase 1: Fetch memo row from Supabase by primary key.
 
     Returns the raw row dict with an extra '_memo_json_parsed' key containing
-    the parsed memo_json dict.  Raises PortfolioAgentError if the memo is not
-    found, the verdict is not LONG, or the conviction score is below 5.0.
+    the parsed memo_json dict.  Raises PortfolioAgentError only if the memo is
+    not found.  Verdict and conviction validation are deferred to
+    run_portfolio_sizing so that direction_override and dollar overrides can be
+    applied before the checks run.
     """
     try:
         client = _get_client()
@@ -83,24 +85,12 @@ def _load_memo(memo_id: str) -> dict:
             memo_json = {}
     row["_memo_json_parsed"] = memo_json
 
-    verdict = str(memo_json.get("verdict") or row.get("verdict", "")).upper()
-    conviction_score = float(memo_json.get("conviction_score") or row.get("conviction_score") or 0.0)
-
-    if verdict not in ("LONG", "SHORT"):
-        raise PortfolioAgentError(
-            f"Phase 1: verdict must be LONG or SHORT to size (got {verdict!r})"
-        )
-    if conviction_score < 5.0:
-        raise PortfolioAgentError(
-            f"Phase 1: conviction too low to size (conviction_score={conviction_score:.1f})"
-        )
-
     logger.info(
         "Phase 1 complete | memo_id=%s ticker=%s verdict=%s conviction=%.1f",
         memo_id,
         memo_json.get("ticker") or row.get("ticker", "?"),
-        verdict,
-        conviction_score,
+        str(memo_json.get("verdict") or row.get("verdict", "")).upper(),
+        float(memo_json.get("conviction_score") or row.get("conviction_score") or 0.0),
     )
     return row
 
@@ -307,6 +297,17 @@ async def run_portfolio_sizing(
         if _norm in ("LONG", "SHORT"):
             logger.info("Phase 1: direction overridden by PM — memo verdict=%s, using %s", direction, _norm)
             direction = _norm
+
+    # Verdict gate (after override): direction must resolve to LONG or SHORT.
+    if direction not in ("LONG", "SHORT"):
+        raise PortfolioAgentError(
+            f"Phase 1: verdict must be LONG or SHORT to size (got {direction!r})"
+        )
+    # Conviction gate: bypass only when the PM has explicitly set the dollar size.
+    if conviction_score < 5.0 and override_dollar_amount is None:
+        raise PortfolioAgentError(
+            f"Phase 1: conviction too low to size (conviction_score={conviction_score:.1f})"
+        )
 
     # ── Phase 2: Read macro regime ─────────────────────────────────────────────
     regime = _read_regime()
