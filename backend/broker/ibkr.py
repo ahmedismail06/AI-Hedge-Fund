@@ -334,3 +334,26 @@ def get_cash_balance() -> Optional[float]:
     """Return the live USD cash balance from IBKR. Returns None when unreachable."""
     val = get_account_summary().get("CashBalance")
     return float(val) if val is not None else None
+
+
+def get_last_account_snapshot() -> Optional[dict]:
+    """
+    Return the most recent account_snapshots row, or None if unavailable.
+    Used as a fallback when the live IBKR connection is dead.
+    Keys: net_liquidation, cash, total_cash_value, unrealized_pnl, realized_pnl, captured_at.
+    """
+    try:
+        from backend.memory.vector_store import _get_client
+        result = (
+            _get_client()
+            .table("account_snapshots")
+            .select("net_liquidation,cash,total_cash_value,unrealized_pnl,realized_pnl,captured_at")
+            .gt("net_liquidation", 0)
+            .order("captured_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception as exc:
+        logger.warning("get_last_account_snapshot failed: %s", exc)
+        return None

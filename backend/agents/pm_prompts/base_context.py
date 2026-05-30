@@ -82,15 +82,27 @@ def build_base_context(supabase_client) -> Dict[str, Any]:
         # dollar_size is set at fill time and only updated on partial exits — it drifts
         # as prices move, causing cash_pct to be wrong. current_price is refreshed every
         # risk monitor cycle so it's the correct denominator input.
-        from backend.broker.ibkr import get_portfolio_value, get_account_summary
+        from backend.broker.ibkr import get_portfolio_value, get_account_summary, get_last_account_snapshot
         portfolio_value = get_portfolio_value()  # raises RuntimeError if IBKR + snapshot both unavailable
 
         # Wire in the exact IBKR cash balance (TotalCashValue) so the PM sees the
         # same figure as the dashboard status bar, rather than a derived estimate.
+        # When IBKR is dead, fall back to the most recent account_snapshot row.
         try:
             summary = get_account_summary()
-            cash_usd = summary.get("TotalCashValue")
-            ctx["cash_usd"] = float(cash_usd) if cash_usd is not None else None
+            cash_usd_val = summary.get("TotalCashValue") if summary else None
+            if cash_usd_val is not None:
+                ctx["cash_usd"] = float(cash_usd_val)
+            else:
+                snap = get_last_account_snapshot()
+                if snap and snap.get("total_cash_value") is not None:
+                    ctx["cash_usd"] = float(snap["total_cash_value"])
+                    logger.warning(
+                        "build_base_context: IBKR cash unavailable — using snapshot %.2f (captured_at=%s)",
+                        ctx["cash_usd"], snap.get("captured_at"),
+                    )
+                else:
+                    ctx["cash_usd"] = None
         except Exception as _cash_exc:
             logger.warning("build_base_context: could not fetch IBKR cash balance — %s", _cash_exc)
             ctx["cash_usd"] = None
