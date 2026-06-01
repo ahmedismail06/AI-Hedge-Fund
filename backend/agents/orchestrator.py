@@ -1211,6 +1211,9 @@ _DECISION_TO_MEMO_STATUS = {
     "DEFER":        "DEFERRED",
     "REJECT":       "REJECTED",
     "WATCHLIST":    "WATCHLIST",
+    # POSITION_UPDATE decisions are pre-resolved to memo statuses by the caller;
+    # include "APPROVED" as a passthrough so CLOSE/TRIM/ADD memos are actually cleared.
+    "APPROVED":     "APPROVED",
 }
 
 
@@ -1938,6 +1941,17 @@ def _scan_actionable_items(base_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                     items.append({"category": "CRISIS", "data": {"alert": alert}, "priority": priority})
     except Exception as exc:
         logger.warning("_scan_actionable_items: alerts scan failed — %s", exc)
+
+    # 2b. Drop memo-driven POSITION_UPDATE items already decided within the 1-hour cooldown.
+    # processed_recent is fully populated above; this is the safety net for cases where
+    # the memo status update fails and the memo stays PENDING_PM_REVIEW.
+    items = [
+        i for i in items
+        if not (
+            i.get("category") == "POSITION_UPDATE"
+            and (i.get("data", {}).get("memo", {}).get("ticker"), "POSITION_UPDATE") in processed_recent
+        )
+    ]
 
     # 3. Positions approaching stops (within 3%)
     # Deduplicate against any item the alerts scanner already raised for this ticker —
