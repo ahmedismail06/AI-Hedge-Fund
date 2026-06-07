@@ -1,7 +1,6 @@
-import axios from 'axios';
+import client from './client';
 import { cached, invalidate } from './cache';
 
-const BASE = import.meta.env.VITE_API_BASE_URL;
 
 // Macro agent runs once daily at 7 AM ET — long TTLs are appropriate
 const TTL = {
@@ -11,10 +10,10 @@ const TTL = {
   indicators: 600_000,
 };
 
-export const getBriefing   = () => cached('macro/briefing',   TTL.briefing,   () => axios.get(`${BASE}/macro/briefing`).then(r => r.data));
-export const getRegime     = () => cached('macro/regime',     TTL.regime,     () => axios.get(`${BASE}/macro/regime`).then(r => r.data));
-export const getMacroHistory = () => cached('macro/history',  TTL.history,    () => axios.get(`${BASE}/macro/history`).then(r => r.data));
-export const getIndicators = () => cached('macro/indicators', TTL.indicators, () => axios.get(`${BASE}/macro/indicators`).then(r => r.data));
+export const getBriefing   = () => cached('macro/briefing',   TTL.briefing,   () => client.get(`/macro/briefing`).then(r => r.data));
+export const getRegime     = () => cached('macro/regime',     TTL.regime,     () => client.get(`/macro/regime`).then(r => r.data));
+export const getMacroHistory = () => cached('macro/history',  TTL.history,    () => client.get(`/macro/history`).then(r => r.data));
+export const getIndicators = () => cached('macro/indicators', TTL.indicators, () => client.get(`/macro/indicators`).then(r => r.data));
 
 export const runMacroAgent = () =>
-  axios.post(`${BASE}/macro/run`).then(r => { invalidate('macro/'); return r.data; });
+  client.post(`/macro/run`).then(r => { invalidate('macro/'); return r.data; });

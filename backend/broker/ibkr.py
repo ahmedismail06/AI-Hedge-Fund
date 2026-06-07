@@ -117,36 +117,26 @@ def _get_ib() -> IB:
     port = 7497 if is_paper() else 7496
     client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
 
-    last_exc: Optional[Exception] = None
-    for attempt in range(3):
-        try:
-            # Run the connection coroutine on the dedicated ib_insync loop
-            future = asyncio.run_coroutine_threadsafe(
-                _connect_async(host, port, client_id),
-                _ib_loop
-            )
-            future.result(timeout=15)  # block until connected or timeout
-            logger.info("Connected to IBKR at %s:%d (paper=%s)", host, port, is_paper())
-            return _ib
-        except Exception as exc:
-            last_exc = exc
-            sleep_seconds = 2 ** attempt
-            logger.warning(
-                "IBKR connection attempt %d/3 failed: %s — retrying in %ds",
-                attempt + 1, exc, sleep_seconds,
-            )
-            time.sleep(sleep_seconds)
-
-    raise IBKRConnectionError(
-        f"Failed to connect to IBKR at {host}:{port} after 3 attempts"
-    ) from last_exc
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            _connect_async(host, port, client_id),
+            _ib_loop
+        )
+        future.result(timeout=5)
+        logger.info("Connected to IBKR at %s:%d (paper=%s)", host, port, is_paper())
+        return _ib
+    except Exception as exc:
+        logger.warning("IBKR connection failed: %s", exc)
+        raise IBKRConnectionError(
+            f"Failed to connect to IBKR at {host}:{port}"
+        ) from exc
 
 
 async def _connect_async(host: str, port: int, client_id: int) -> None:
     """Coroutine that runs on the dedicated ib_insync loop."""
     global _ib
     ib = IB()
-    await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+    await ib.connectAsync(host, port, clientId=client_id, timeout=4)
     _ib = ib
 
 

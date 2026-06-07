@@ -1,7 +1,6 @@
-import axios from 'axios';
+import client from './client';
 import { cached, invalidate } from './cache';
 
-const BASE = import.meta.env.VITE_API_BASE_URL;
 
 const TTL = {
   status: 30_000,
@@ -10,19 +9,19 @@ const TTL = {
 };
 
 export const getOrchestratorStatus = () =>
-  cached('orchestrator/status', TTL.status, () => axios.get(`${BASE}/orchestrator/status`).then(r => r.data));
+  cached('orchestrator/status', TTL.status, () => client.get(`/orchestrator/status`).then(r => r.data));
 
 export const getMode = () =>
-  cached('orchestrator/mode', TTL.mode, () => axios.get(`${BASE}/orchestrator/mode`).then(r => r.data));
+  cached('orchestrator/mode', TTL.mode, () => client.get(`/orchestrator/mode`).then(r => r.data));
 
 export const getLog = (runDate, limit = 100) =>
   cached(`orchestrator/log/${runDate}/${limit}`, TTL.log, () =>
-    axios.get(`${BASE}/orchestrator/log`, { params: { run_date: runDate, limit } }).then(r => r.data));
+    client.get(`/orchestrator/log`, { params: { run_date: runDate, limit } }).then(r => r.data));
 
 export const setMode = (mode) =>
-  axios.post(`${BASE}/orchestrator/mode`, { mode }).then(r => { invalidate('orchestrator/mode'); return r; });
+  client.post(`/orchestrator/mode`, { mode }).then(r => { invalidate('orchestrator/mode'); return r; });
 
 export const runCycle = (portfolioValue = null) =>
-  axios.post(`${BASE}/orchestrator/cycle/run`, null, {
+  client.post(`/orchestrator/cycle/run`, null, {
     params: portfolioValue != null ? { portfolio_value: portfolioValue } : {},
   }).then(r => { invalidate('orchestrator/'); return r; });
