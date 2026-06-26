@@ -122,7 +122,10 @@ def _get_ib() -> IB:
             _connect_async(host, port, client_id),
             _ib_loop
         )
-        future.result(timeout=5)
+        # Outer timeout must be strictly larger than connectAsync's own timeout
+        # so the coroutine's internal timeout fires first and runs its socket
+        # cleanup, rather than us abandoning a still-running connect coroutine.
+        future.result(timeout=12)
         logger.info("Connected to IBKR at %s:%d (paper=%s)", host, port, is_paper())
         return _ib
     except Exception as exc:
@@ -133,10 +136,37 @@ def _get_ib() -> IB:
 
 
 async def _connect_async(host: str, port: int, client_id: int) -> None:
-    """Coroutine that runs on the dedicated ib_insync loop."""
+    """Coroutine that runs on the dedicated ib_insync loop.
+
+    Must never leave a half-open socket behind. connectAsync opens the TCP
+    socket early in the handshake; if the handshake then times out or fails,
+    the socket is still open on the TWS/Gateway side. Discarding the IB object
+    without disconnecting orphans that socket under the same clientId — repeated
+    orphans collide on reconnect (error 326) and eventually wedge the TWS API,
+    dropping the connection entirely.
+    """
     global _ib
+
+    # Tear down any prior (possibly half-open/stale) connection before
+    # reconnecting so we never stack two sockets on the same clientId.
+    if _ib is not None:
+        try:
+            _ib.disconnect()
+        except Exception:
+            pass
+        _ib = None
+
     ib = IB()
-    await ib.connectAsync(host, port, clientId=client_id, timeout=4)
+    try:
+        await ib.connectAsync(host, port, clientId=client_id, timeout=8)
+    except Exception:
+        # Handshake failed/timed out — close the half-open socket so it does
+        # not linger on TWS and collide with the next reconnect attempt.
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+        raise
     _ib = ib
 
 
