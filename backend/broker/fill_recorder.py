@@ -327,7 +327,13 @@ def _update_order_aggregate(
         # order_side is the IBKR action (BUY/SELL) which inverts for SHORT positions
         # (SHORT entry = SELL to open; SHORT exit = BUY to cover). Using exit_type
         # as the routing key is direction-agnostic and always correct.
-        if is_filled and avg_price is not None:
+        # order_row holds the status from BEFORE this fill was recorded. If it
+        # was already FILLED, this is a duplicate/correction fill (e.g. IBKR
+        # exec-id suffix bump) — the position handlers and Slack notification
+        # already ran once, so running them again would double-apply the fill.
+        already_filled: bool = order_row.get("status") == "FILLED"
+
+        if is_filled and avg_price is not None and not already_filled:
             if order_row.get("exit_type") in ("EXIT_CLOSE", "EXIT_TRIM"):
                 _handle_exit_fill(order_row["position_id"], avg_price, total_qty, order_row, client)
             else:

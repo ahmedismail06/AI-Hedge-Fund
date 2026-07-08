@@ -330,12 +330,8 @@ def _run_exit_cycle(client, outside_rth: bool = False, skip_position_ids: set | 
                 "Exit order placed: %s %s | exit_type=%s qty=%d order_id=%s",
                 pos.get("ticker"), pos["id"], exit_type, req.requested_qty, order_status.order_id,
             )
-            notify_event("EXIT_ORDER_PLACED", {
-                "ticker": pos.get("ticker", "—"),
-                "exit_type": exit_type,
-                "qty": req.requested_qty,
-                "limit_price": req.limit_price,
-            })
+            # Slack notification is sent by place_order() (ORDER_PLACED with
+            # exit_type context) — do not notify again here.
 
         except IBKRConnectionError as exc:
             logger.error("IBKR down during exit for %s: %s", pos.get("ticker"), exc)
@@ -477,11 +473,8 @@ def _run_add_cycle(client, skip_position_ids: set | None = None) -> dict:
                 "Add order placed: %s %s | qty=%d order_id=%s",
                 pos.get("ticker"), pos["id"], add_qty, order_status.order_id,
             )
-            notify_event("ORDER_PLACED", {
-                "ticker": pos.get("ticker", "—"),
-                "qty": add_qty,
-                "note": "ADD to existing position",
-            })
+            # Slack notification is sent by place_order() (ORDER_PLACED with
+            # exit_type=ENTRY_ADD context) — do not notify again here.
 
         except IBKRConnectionError as exc:
             logger.error("IBKR down during ADD for %s: %s", pos.get("ticker"), exc)

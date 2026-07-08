@@ -123,6 +123,7 @@ def place_order(req: OrderRequest, contract, ib_order) -> OrderStatus:
         "qty": req.requested_qty,
         "limit_price": req.limit_price,
         "ibkr_order_id": perm_id,
+        "exit_type": req.exit_type,
     })
 
     # 8. Snapshot account state now that cash is committed to a new order.

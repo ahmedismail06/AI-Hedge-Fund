@@ -174,9 +174,17 @@ def _fmt_position_rejected(p: dict):
     )
 
 
+_ORDER_PLACED_TITLES = {
+    "EXIT_CLOSE": "Exit Order Placed (CLOSE)",
+    "EXIT_TRIM":  "Exit Order Placed (TRIM)",
+    "ENTRY_ADD":  "Add Order Placed",
+}
+
+
 def _fmt_order_placed(p: dict):
+    title_prefix = _ORDER_PLACED_TITLES.get(p.get("exit_type"), "Order Placed")
     return (
-        f"Order Placed: {p.get('ticker', '—')}",
+        f"{title_prefix}: {p.get('ticker', '—')}",
         [
             {"title": "Order Type",  "value": str(p.get("order_type", "—")),  "short": True},
             {"title": "Qty",         "value": str(p.get("qty", "—")),         "short": True},
