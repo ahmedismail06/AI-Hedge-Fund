@@ -313,12 +313,51 @@ def check_timeouts() -> List[str]:
         #                  so the next cycle can retry.
         # REJECTED is reserved for IBKR explicit rejections (error callbacks),
         # NOT for orders that expired.
-        total_filled: float = float(order.get("total_filled_qty") or 0)
+        #
+        # Count fills from the fills table — orders.total_filled_qty can be
+        # stale-zero when fill callbacks were missed and reconciliation inserted
+        # the fills without the aggregate recompute landing. Declaring TIMEOUT
+        # on an order that actually filled makes the execution agent revert the
+        # position to APPROVED and buy the full size again, silently doubling
+        # the real IBKR position.
+        fill_rows: list = []
+        try:
+            fills_resp = (
+                _get_client()
+                .table("fills")
+                .select("fill_qty,fill_price")
+                .eq("order_id", order_id)
+                .execute()
+            )
+            fill_rows = fills_resp.data or []
+        except Exception as exc:
+            logger.error(
+                "Fills lookup failed in check_timeouts (order_id=%s): %s — "
+                "falling back to orders.total_filled_qty",
+                order_id, exc,
+            )
+
+        total_filled: float = sum(float(f["fill_qty"]) for f in fill_rows)
+        if not fill_rows:
+            total_filled = float(order.get("total_filled_qty") or 0)
         now_iso = datetime.utcnow().isoformat()
 
         if total_filled > 0:
             new_status = "PARTIAL_FILLED"
             update_data: dict = {"status": "PARTIAL_FILLED", "filled_at": now_iso}
+            # Repair a stale aggregate so record_partial_fill_open sizes the
+            # position from the true fill quantity and VWAP.
+            if fill_rows and float(order.get("total_filled_qty") or 0) != total_filled:
+                vwap = (
+                    sum(float(f["fill_qty"]) * float(f["fill_price"]) for f in fill_rows)
+                    / total_filled
+                )
+                update_data["total_filled_qty"] = total_filled
+                update_data["avg_fill_price"] = round(vwap, 4)
+                logger.warning(
+                    "Order %s aggregate was stale (had %.0f, fills table has %.0f) — repaired",
+                    order_id, float(order.get("total_filled_qty") or 0), total_filled,
+                )
             logger.warning(
                 "Order %s timed out with partial fill (%.0f shares) → PARTIAL_FILLED (position %s)",
                 order_id, total_filled, position_id,

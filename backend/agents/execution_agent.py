@@ -194,17 +194,27 @@ def run_fill_recon() -> int:
                 new_fill_count += 1
                 orders_to_update.add(perm_id)
 
-        # 2. Update aggregate once for each order that received new fills
+        # 2. Update aggregate once for each order that received new fills.
+        # Each order is isolated in its own try/except: one Supabase failure
+        # must not abort the remaining aggregates — a skipped aggregate leaves
+        # total_filled_qty stale at 0, which check_timeouts would previously
+        # misread as a zero-fill TIMEOUT and trigger a duplicate re-buy.
         if orders_to_update:
             logger.info("Updating aggregates for %d orders...", len(orders_to_update))
             client = _get_client()
             for perm_id in orders_to_update:
-                res = client.table("orders").select("*").eq("ibkr_order_id", perm_id).execute()
-                if res.data:
-                    order_row = res.data[0]
-                    # Passing 0 as new_fill_qty because _update_order_aggregate 
-                    # re-queries ALL fills from the DB anyway.
-                    _fill_recorder._update_order_aggregate(order_row["id"], order_row, 0)
+                try:
+                    res = client.table("orders").select("*").eq("ibkr_order_id", perm_id).execute()
+                    if res.data:
+                        order_row = res.data[0]
+                        # Passing 0 as new_fill_qty because _update_order_aggregate
+                        # re-queries ALL fills from the DB anyway.
+                        _fill_recorder._update_order_aggregate(order_row["id"], order_row, 0)
+                except Exception as agg_exc:
+                    logger.warning(
+                        "Recon aggregate update failed for permId=%s: %s — continuing",
+                        perm_id, agg_exc,
+                    )
 
         return new_fill_count
     except Exception as exc:
@@ -746,6 +756,57 @@ def run_execution_cycle(force: bool = False) -> ExecutionSummary:
                         pos["id"], pos.get("ticker"),
                         ", ".join(o["status"] for o in existing.data),
                     )
+                continue
+
+            # Duplicate-buy guard: a prior entry order for this position may have
+            # been marked TIMEOUT with a stale zero aggregate even though fills
+            # were recorded (missed callbacks + late reconciliation). Placing a
+            # fresh full-size order on top of those fills is how untracked shares
+            # accumulate at IBKR. If any entry fills exist, repair the stale
+            # aggregates (which opens the position when fully filled) and skip
+            # placing a new order this cycle. Fail closed: if the guard itself
+            # errors, defer the entry rather than risk a duplicate buy.
+            try:
+                entry_orders = (
+                    client.table("orders")
+                    .select("*")
+                    .eq("position_id", pos["id"])
+                    .is_("exit_type", "null")
+                    .execute()
+                ).data or []
+                entry_ids = [o["id"] for o in entry_orders]
+                fill_rows = []
+                if entry_ids:
+                    fill_rows = (
+                        client.table("fills")
+                        .select("order_id,fill_qty")
+                        .in_("order_id", entry_ids)
+                        .execute()
+                    ).data or []
+                if fill_rows:
+                    filled_by_order: dict = {}
+                    for f in fill_rows:
+                        filled_by_order[f["order_id"]] = (
+                            filled_by_order.get(f["order_id"], 0.0) + float(f["fill_qty"])
+                        )
+                    for o in entry_orders:
+                        actual = filled_by_order.get(o["id"], 0.0)
+                        if actual > 0 and float(o.get("total_filled_qty") or 0) != actual:
+                            _fill_recorder._update_order_aggregate(o["id"], o, 0)
+                    total_prior = sum(filled_by_order.values())
+                    logger.warning(
+                        "Position %s (%s) is APPROVED but already has %.0f entry "
+                        "shares filled across %d order(s) — repaired stale "
+                        "aggregates instead of placing a duplicate order",
+                        pos["id"], pos.get("ticker"), total_prior, len(filled_by_order),
+                    )
+                    continue
+            except Exception as guard_exc:
+                logger.warning(
+                    "Duplicate-buy guard failed for position %s (%s): %s — "
+                    "deferring entry to next cycle",
+                    pos["id"], pos.get("ticker"), guard_exc,
+                )
                 continue
 
             # Retry cap: abandon positions that have timed out too many times.
