@@ -23,6 +23,9 @@ node_modules/
 dist/
 .next/
 
+# Vercel
+.vercel/
+
 # IDE
 .vscode/
 .idea/
