@@ -1,4 +1,4 @@
-const BACKEND = (process.env.BACKEND_URL || 'http://YOUR_BACKEND_HOST:8000').trim().replace(/\/$/, '');
+const BACKEND = (process.env.BACKEND_URL || 'http://localhost:8000').trim().replace(/\/$/, '');
 
 module.exports = async function handler(req, res) {
   const segments = Array.isArray(req.query.path)
